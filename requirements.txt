@@ -1,0 +1,3 @@
+numpy>=1.26
+plyfile>=1.0
+matplotlib>=3.8
