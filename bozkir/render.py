@@ -153,3 +153,75 @@ def render_orthographic(s, **kw):
               if k in kw}
     p = project_orthographic(s, **kw)
     return rasterize(p, **ras_kw), p
+
+
+def rasterize_rgba(p, max_splats=None):
+    """Blend into a premultiplied RGBA buffer over transparency.
+
+    Same maths as `rasterize`, but the result can be composited with other
+    buffers afterwards. That is what makes tile-by-tile rendering possible:
+    each tile becomes a layer, and the layers are combined in tile order
+    rather than every splat being sorted together.
+
+    Premultiplied means the stored colour is already scaled by alpha, so
+    'over' is a plain lerp with no division anywhere.
+    """
+    W, H = p["W"], p["H"]
+    rgba = np.zeros((H, W, 4), dtype=np.float32)
+    if len(p["depth"]) == 0:
+        return rgba
+
+    order = np.argsort(p["depth"])                      # far to near
+    if max_splats is not None and len(order) > max_splats:
+        ink = np.pi * p["radius"] ** 2 * p["opacity"]
+        best = np.argpartition(ink, -max_splats)[-max_splats:]
+        order = order[np.isin(order, best)]
+
+    mean, cov, col, op, rad = (p["mean2d"], p["cov2d"], p["colour"],
+                               p["opacity"], p["radius"])
+    det = cov[:, 0, 0] * cov[:, 1, 1] - cov[:, 0, 1] ** 2
+    inv = np.empty((len(cov), 3), dtype=np.float32)
+    inv[:, 0] = cov[:, 1, 1] / det
+    inv[:, 1] = -cov[:, 0, 1] / det
+    inv[:, 2] = cov[:, 0, 0] / det
+
+    for i in order:
+        r = rad[i]
+        x0 = max(int(mean[i, 0] - r), 0)
+        x1 = min(int(mean[i, 0] + r) + 1, W)
+        y0 = max(int(mean[i, 1] - r), 0)
+        y1 = min(int(mean[i, 1] + r) + 1, H)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        dx = np.arange(x0, x1, dtype=np.float32) + 0.5 - mean[i, 0]
+        dy = np.arange(y0, y1, dtype=np.float32) + 0.5 - mean[i, 1]
+        a, b, c = inv[i]
+        DX, DY = dx[None, :], dy[:, None]
+        power = -0.5 * (a * DX * DX + 2.0 * b * DX * DY + c * DY * DY)
+        alpha = op[i] * np.exp(np.minimum(power, 0.0))
+        alpha = np.where(alpha > MIN_ALPHA, alpha, 0.0)[..., None]
+        if not alpha.any():
+            continue
+
+        dst = rgba[y0:y1, x0:x1]
+        dst[..., :3] = col[i] * alpha + dst[..., :3] * (1.0 - alpha)
+        dst[..., 3:] = alpha + dst[..., 3:] * (1.0 - alpha)
+
+    return rgba
+
+
+def over(dst, src):
+    """Composite premultiplied `src` over premultiplied `dst`. Src is nearer."""
+    a = src[..., 3:]
+    out = np.empty_like(dst)
+    out[..., :3] = src[..., :3] + dst[..., :3] * (1.0 - a)
+    out[..., 3:] = src[..., 3:] + dst[..., 3:] * (1.0 - a)
+    return out
+
+
+def flatten(rgba, background=(0.0, 0.0, 0.0)):
+    """Premultiplied RGBA over an opaque background -> RGB."""
+    bg = np.asarray(background, dtype=np.float32)
+    a = rgba[..., 3:]
+    return np.clip(rgba[..., :3] + bg * (1.0 - a), 0.0, 1.0)

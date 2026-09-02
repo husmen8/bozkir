@@ -111,7 +111,17 @@ def project_perspective(cam, s, sh_degree=None, guard=1.3):
     in_front = z > cam.near
     idx = np.flatnonzero(in_front)
     if len(idx) == 0:
-        raise ValueError("every splat is behind the camera")
+        # A tile entirely behind the camera is normal once a grid is large
+        # enough. Return an empty projection rather than failing.
+        return {
+            "mean2d": np.zeros((0, 2), np.float32),
+            "cov2d": np.zeros((0, 2, 2), np.float32),
+            "depth": np.zeros(0, np.float32),
+            "colour": np.zeros((0, 3), np.float32),
+            "opacity": np.zeros(0, np.float32),
+            "radius": np.zeros(0, np.float32),
+            "W": W, "H": H, "kept": 0, "total": len(s), "behind": len(s),
+        }
 
     p_cam = p_cam[idx]
     z = p_cam[:, 2]

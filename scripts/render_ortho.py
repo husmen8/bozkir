@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.ply import load_ply  # noqa: E402
+from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.render import project_orthographic, rasterize  # noqa: E402
 
 AXES = "xyz"
@@ -35,14 +35,12 @@ def main():
                     help="which end of that axis the camera sits on")
     ap.add_argument("--res", type=int, default=800)
     ap.add_argument("--max-splats", type=int, default=None)
-    ap.add_argument("--sh", type=int, default=0,
-                    help="SH degree to evaluate colour at")
     ap.add_argument("--bg", type=float, nargs=3, default=(1.0, 1.0, 1.0))
     ap.add_argument("--out", type=Path, default=Path("out"))
+    add_scene_args(ap)
     args = ap.parse_args()
 
-    s = load_ply(args.path)
-    print(f"{args.path.name}: {len(s):,} splats, SH degree {s.sh_degree}")
+    s = scene_from_args(args)
 
     axis = args.axis
     if axis is None:
@@ -58,7 +56,7 @@ def main():
 
     t0 = time.time()
     p = project_orthographic(s, view_axis=axis, up_sign=args.sign,
-                             resolution=args.res, sh_degree=args.sh)
+                             resolution=args.res)
     print(f"  projected {p['kept']:,} / {p['total']:,} splats "
           f"({p['kept'] / p['total']:.1%}) to {p['W']}x{p['H']} "
           f"in {time.time() - t0:.1f}s")

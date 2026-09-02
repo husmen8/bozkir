@@ -21,8 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.ply import load_ply  # noqa: E402
-from bozkir.select import auto_clean, crop_cylinder  # noqa: E402
+from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.camera import orbit_camera, project_perspective  # noqa: E402
 from bozkir.render import rasterize  # noqa: E402
 
@@ -52,32 +51,15 @@ def main():
     ap.add_argument("--fov", type=float, default=60.0)
     ap.add_argument("--width", type=int, default=800)
     ap.add_argument("--height", type=int, default=600)
-    ap.add_argument("--sh", type=int, default=None,
-                    help="SH degree for colour (default: whatever the file has)")
     ap.add_argument("--bg", type=float, nargs=3, default=(0.0, 0.0, 0.0))
     ap.add_argument("--max-splats", type=int, default=None)
     ap.add_argument("--turntable", type=int, default=0,
                     help="render N frames evenly spaced in azimuth")
-    ap.add_argument("--up-axis", type=int, default=2, choices=(0, 1, 2))
-    ap.add_argument("--clean", action="store_true",
-                    help="crop to the subject, drop the background shell "
-                         "and remove floaters before rendering")
-    ap.add_argument("--radius-pct", type=float, default=60.0,
-                    help="with --clean: keep splats inside this percentile "
-                         "of horizontal distance from the centre")
-    ap.add_argument("--floater-std", type=float, default=2.0,
-                    help="with --clean: lower removes more floaters")
     ap.add_argument("--out", type=Path, default=Path("out"))
+    add_scene_args(ap)
     args = ap.parse_args()
 
-    s = load_ply(args.path)
-    print(f"{args.path.name}: {len(s):,} splats, SH degree {s.sh_degree}")
-
-    if args.clean:
-        s = auto_clean(s, up_axis=args.up_axis,
-                       radius_pct=args.radius_pct,
-                       floater_std=args.floater_std)
-
+    s = scene_from_args(args)
     target, auto_dist = frame(s, args.up_axis)
     dist = args.dist if args.dist is not None else auto_dist
 
@@ -92,7 +74,7 @@ def main():
                            fov_deg=args.fov, width=args.width, height=args.height)
 
         t0 = time.time()
-        p = project_perspective(cam, s, sh_degree=args.sh)
+        p = project_perspective(cam, s)
         t_proj = time.time() - t0
 
         n = p["kept"] if args.max_splats is None else min(p["kept"], args.max_splats)

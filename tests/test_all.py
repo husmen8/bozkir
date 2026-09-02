@@ -14,7 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bozkir.ply import Splats, quat_to_matrix, SH_C0          # noqa: E402
+from bozkir.ply import Splats, quat_to_matrix, SH_C0  # noqa: E402
 from bozkir.render import (project_orthographic, rasterize,   # noqa: E402
                            render_orthographic, DILATION)
 from bozkir.camera import (Camera, orbit_camera,              # noqa: E402
@@ -23,6 +23,10 @@ from bozkir.transform import (quat_between, quat_multiply,    # noqa: E402
                               rotate, align_to_ground, ground_normal)
 from bozkir.select import (crop_box, crop_cylinder,           # noqa: E402
                            remove_large, remove_floaters)
+from bozkir.render import rasterize_rgba, over, flatten        # noqa: E402
+from bozkir.tile import (extract_patch, translate, merge,      # noqa: E402
+                         grid, render_global, render_tiled, seam_camera)
+from bozkir.scene import SceneConfig, config_from_args           # noqa: E402
 
 RNG = np.random.default_rng(0)
 
@@ -426,6 +430,227 @@ def test_remove_floaters_discriminates():
     _, keep = remove_floaters(s, k=8, std_ratio=2.0, weight_by_opacity=False)
     assert keep[:15_000].mean() > 0.95
     assert keep[15_000:].mean() < 0.35
+
+
+def test_translate_moves_only_positions():
+    n = 300
+    q = RNG.normal(size=(n, 4)).astype(np.float32)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    s = scene(RNG.normal(0, 1, (n, 3)), rot=q)
+    t = translate(s, [1.0, -2.0, 0.5])
+    assert np.allclose(t.xyz - s.xyz, [1.0, -2.0, 0.5], atol=1e-6)
+    assert np.array_equal(t.rot, s.rot)
+    assert np.array_equal(t.scale, s.scale)
+    # Shapes are unchanged, so the covariance must be identical.
+    assert np.array_equal(t.covariance(), s.covariance())
+
+
+def test_merge_preserves_everything():
+    a = scene(RNG.normal(0, 1, (100, 3)), sh_degree=1, k=3)
+    b = scene(RNG.normal(5, 1, (60, 3)), sh_degree=1, k=3)
+    m = merge(a, b)
+    assert len(m) == 160
+    for name in ("xyz", "opacity", "scale", "rot", "sh_dc", "sh_rest"):
+        want = np.concatenate([getattr(a, name), getattr(b, name)])
+        assert np.array_equal(getattr(m, name), want), name
+
+
+def test_merge_truncates_to_the_lowest_sh_degree():
+    """Mixed degrees are common once tiles come from different captures."""
+    a = scene(RNG.normal(0, 1, (10, 3)), sh_degree=1, k=3)
+    b = scene(RNG.normal(0, 1, (10, 3)), sh_degree=3, k=15)
+    m = merge(a, b)
+    assert m.sh_degree == 1
+    assert m.sh_rest.shape[1] == 3
+    assert np.array_equal(m.sh_rest[10:], b.sh_rest[:, :3])
+
+
+def test_naive_merge_produces_a_boundary():
+    """Two copies of a patch placed flush must abut, not overlap or gap."""
+    pts = RNG.uniform(-3, 3, (20_000, 3))
+    s = scene(pts)
+    size = 2.0
+    a, _ = crop_box(s, [-size / 2, -size / 2], [size / 2, size / 2], axes=(0, 1))
+    b = translate(a, [size, 0, 0])
+    m = merge(a, b)
+
+    assert len(m) == 2 * len(a)
+    assert a.xyz[:, 0].max() <= size / 2 + 1e-5
+    assert b.xyz[:, 0].min() >= size / 2 - 1e-5
+    assert np.abs(m.xyz[:, 0]).max() <= 1.5 * size + 1e-5
+
+
+# --------------------------------------------------------------- tile.py
+
+def test_rgba_path_matches_rgb_path():
+    n = 2000
+    s = scene(RNG.normal(0, 0.5, (n, 3)),
+              opacity=RNG.uniform(0.1, 0.9, n).astype(np.float32),
+              scale=np.full((n, 3), 0.02, np.float32),
+              rgb=RNG.uniform(0, 1, (n, 3)))
+    cam = Camera([0, -4, 1], [0, 0, 0], up=[0, 0, 1], width=200, height=150)
+    p = project_perspective(cam, s, sh_degree=0)
+    for bg in ((0, 0, 0), (1, 1, 1)):
+        assert np.abs(rasterize(p, background=bg)
+                      - flatten(rasterize_rgba(p), bg)).max() < 1e-5
+
+
+def test_extract_patch_uses_ground_plane_only():
+    pts = RNG.uniform(-3, 3, (4000, 3))
+    s = scene(pts)
+    p = extract_patch(s, [1.0, 0.0], 2.0, up_axis=2, recentre=False)
+    want = np.all((pts[:, :2] - [1, 0] >= -1) & (pts[:, :2] - [1, 0] <= 1), axis=1)
+    assert len(p) == want.sum()
+    assert p.xyz[:, 2].min() < -2 and p.xyz[:, 2].max() > 2   # height unbounded
+
+
+def test_extract_patch_recentres_horizontally_only():
+    pts = RNG.uniform(-3, 3, (4000, 3))
+    s = scene(pts)
+    a = extract_patch(s, [1.0, 0.5], 2.0, recentre=False)
+    b = extract_patch(s, [1.0, 0.5], 2.0, recentre=True)
+    assert np.abs(b.xyz[:, :2]).max() <= 1.001
+    assert np.allclose(np.sort(a.xyz[:, 2]), np.sort(b.xyz[:, 2]))
+
+
+def test_translate_moves_positions_only():
+    s = scene(RNG.normal(0, 1, (500, 3)))
+    t = translate(s, [1, 2, 3])
+    assert np.allclose(t.xyz - s.xyz, [1, 2, 3])
+    assert np.array_equal(t.scale, s.scale) and np.array_equal(t.rot, s.rot)
+
+
+def test_merge_concatenates():
+    a = scene(RNG.normal(0, 1, (300, 3)))
+    b = scene(RNG.normal(0, 1, (200, 3)))
+    m = merge(a, b)
+    assert len(m) == 500
+    assert np.array_equal(m.xyz[:300], a.xyz) and np.array_equal(m.xyz[300:], b.xyz)
+
+
+def test_grid_lays_tiles_edge_to_edge():
+    s = scene(RNG.uniform(-0.5, 0.5, (200, 3)))
+    tiles = grid(s, 2, 1, 1.0, up_axis=2)
+    assert len(tiles) == 2
+    dx = tiles[1].xyz[:, 0].mean() - tiles[0].xyz[:, 0].mean()
+    assert np.allclose(dx, 1.0, atol=1e-5)
+
+
+def _two_rows(opacity, interleave=True):
+    ys = np.linspace(-2, 2, 8)
+    ay, by = (ys[0::2], ys[1::2]) if interleave else (ys[:4], ys[4:])
+    mk = lambda yy, c: scene([[0, y, 0] for y in yy], opacity=[opacity] * 4,
+                             scale=np.full((4, 3), 0.15, np.float32), rgb=[c] * 4)
+    return mk(ay, [1, 0, 0]), mk(by, [0, 0, 1])
+
+
+def test_tiled_matches_global_when_tiles_do_not_overlap():
+    a = scene([[-1, 0, 0]], opacity=[0.8], scale=[[0.15] * 3], rgb=[[1, 0, 0]])
+    b = scene([[1, 0, 0]], opacity=[0.8], scale=[[0.15] * 3], rgb=[[0, 0, 1]])
+    cam = Camera([0, -12, 0], [0, 0, 0], up=[0, 0, 1], fov_deg=30,
+                 width=200, height=150)
+    g, _ = render_global(cam, [a, b], sh_degree=0)
+    t, _ = render_tiled(cam, [a, b], sh_degree=0)
+    assert np.abs(g - t).max() < 1e-6
+
+
+def test_tiled_differs_from_global_when_tiles_interleave_in_depth():
+    """The boundary artifact, isolated. Same geometry, only the sort differs."""
+    cam = Camera([0, -12, 0], [0, 0, 0], up=[0, 0, 1], fov_deg=30,
+                 width=100, height=100)
+
+    a, b = _two_rows(0.5, interleave=True)
+    g, _ = render_global(cam, [a, b], sh_degree=0)
+    t, _ = render_tiled(cam, [a, b], sh_degree=0)
+    mask = g.sum(2) > 0.01
+    interleaved = np.abs(g - t)[mask].mean() / g[mask].mean()
+
+    a, b = _two_rows(0.5, interleave=False)
+    g, _ = render_global(cam, [a, b], sh_degree=0)
+    t, _ = render_tiled(cam, [a, b], sh_degree=0)
+    mask = g.sum(2) > 0.01
+    separated = np.abs(g - t)[mask].mean() / g[mask].mean()
+
+    assert interleaved > 0.10, interleaved
+    assert separated < 1e-6, separated
+
+
+def test_tile_entirely_behind_camera_is_skipped():
+    """Normal once a grid is large enough - must not raise."""
+    patch = scene(RNG.uniform(-0.5, 0.5, (300, 3)),
+                  scale=np.full((300, 3), 0.03, np.float32))
+    tiles = grid(patch, 6, 6, 1.0, up_axis=2)
+    cam = seam_camera([0, 0, 0.05], 1.5, 3.0, 0.0, up_axis=2,
+                      fov_deg=50, width=80, height=60)
+    behind = [t for t in tiles
+              if project_perspective(cam, t, sh_degree=0)["kept"] == 0]
+    assert behind, "test needs at least one tile out of view"
+    img, info = render_tiled(cam, tiles, sh_degree=0)
+    assert np.isfinite(img).all() and info["layers"] < len(tiles)
+
+
+def test_more_tiles_means_more_artifact():
+    """More boundaries stacked along a grazing ray affect more pixels."""
+    n = 4000
+    xyz = np.stack([RNG.uniform(-0.5, 0.5, n), RNG.uniform(-0.5, 0.5, n),
+                    RNG.normal(0, 0.03, n)], 1)
+    q = RNG.normal(size=(n, 4)).astype(np.float32)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    patch = scene(xyz, rot=q,
+                  scale=np.stack([np.full(n, 0.05), np.full(n, 0.04),
+                                  np.full(n, 0.008)], 1).astype(np.float32),
+                  opacity=RNG.uniform(0.15, 0.85, n).astype(np.float32),
+                  rgb=RNG.uniform(0, 1, (n, 3)))
+    cam = seam_camera([0, 0, 0.05], 2.5, 4.0, 0.0, up_axis=2,
+                      fov_deg=50, width=160, height=120)
+
+    def affected(nx):
+        tiles = grid(patch, nx, 1, 1.0, up_axis=2)
+        g, _ = render_global(cam, tiles, sh_degree=0)
+        t, _ = render_tiled(cam, tiles, sh_degree=0)
+        d = np.abs(g - t).sum(2) / 3.0
+        lit = g.sum(2) > 0.01
+        return (lit & (d > 1 / 255)).sum() / max(lit.sum(), 1)
+
+    assert affected(4) > affected(2) * 1.5
+
+
+def test_seam_camera_azimuth_convention():
+    """0 degrees looks along the seam (the +y axis here), 90 across it."""
+    along = seam_camera([0, 0, 0], 5.0, 0.0, 0.0, up_axis=2, width=10, height=10)
+    across = seam_camera([0, 0, 0], 5.0, 0.0, 90.0, up_axis=2, width=10, height=10)
+    assert abs(along.position[1]) > 4.9 and abs(along.position[0]) < 0.1
+    assert abs(across.position[0]) > 4.9 and abs(across.position[1]) < 0.1
+
+
+# -------------------------------------------------------------- scene.py
+
+def test_config_key_is_stable_and_discriminating():
+    assert SceneConfig().key() == SceneConfig().key()
+    keys = {SceneConfig().key(),
+            SceneConfig(clean=True).key(),
+            SceneConfig(floater_std=1.5).key(),
+            SceneConfig(align=False).key(),
+            SceneConfig(sh_degree=0).key()}
+    assert len(keys) == 5, "settings that change output must change the key"
+
+
+def test_config_from_args_round_trip():
+    import argparse
+    from bozkir.scene import add_scene_args
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", type=Path)
+    add_scene_args(ap)
+
+    cfg = config_from_args(ap.parse_args(["x.ply"]))
+    assert cfg.align and cfg.recentre and not cfg.clean
+
+    cfg = config_from_args(ap.parse_args(["x.ply", "--raw"]))
+    assert not cfg.align and not cfg.recentre
+
+    cfg = config_from_args(ap.parse_args(
+        ["x.ply", "--clean", "--radius-pct", "40", "--sh", "0"]))
+    assert cfg.clean and cfg.radius_pct == 40.0 and cfg.sh_degree == 0
 
 
 # ----------------------------------------------------------- integration
