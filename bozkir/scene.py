@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from .ply import load_ply, save_ply
-from .transform import align_to_ground, recentre
+from .transform import align_to_ground, ground_normal, recentre
 from .select import crop_cylinder, remove_large, remove_floaters
 
 CACHE_DIR = Path("data/cache")
@@ -33,6 +33,7 @@ class SceneConfig:
     align: bool = True
     recentre: bool = True
     up_axis: int = 2
+    flip: bool = False              # invert the detected up direction
 
     clean: bool = False
     radius_pct: float = 60.0        # keep this percentile of horizontal distance
@@ -49,7 +50,7 @@ class SceneConfig:
     def describe(self):
         bits = []
         if self.align:
-            bits.append(f"align->{'xyz'[self.up_axis]}")
+            bits.append(f"align->{'xyz'[self.up_axis]}" + ("(flipped)" if self.flip else ""))
         if self.recentre:
             bits.append("recentre")
         if self.clean:
@@ -83,7 +84,12 @@ def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
         print(f"  preparing: {cfg.describe()}")
 
     if cfg.align:
-        s, info = align_to_ground(s, target_axis=cfg.up_axis)
+        hint = None
+        if cfg.flip:
+            # Ask for the opposite of whatever the detector chose.
+            n, _ = ground_normal(s)
+            hint = -n
+        s, info = align_to_ground(s, target_axis=cfg.up_axis, up_hint=hint)
         if verbose:
             print(f"  tilt {info['tilt_before_deg']:.2f} -> "
                   f"{info['tilt_after_deg']:.2f} deg")
@@ -133,6 +139,9 @@ def add_scene_args(parser):
     g.add_argument("--sh", type=int, default=None,
                    help="truncate spherical harmonics to this degree")
     g.add_argument("--up-axis", type=int, default=2, choices=(0, 1, 2))
+    g.add_argument("--flip", action="store_true",
+                   help="invert the detected up direction; use when a scene "
+                        "comes out upside down")
     g.add_argument("--no-cache", action="store_true")
     return parser
 
@@ -142,6 +151,7 @@ def config_from_args(args):
         align=not args.raw,
         recentre=not args.raw,
         up_axis=args.up_axis,
+        flip=args.flip,
         clean=args.clean,
         radius_pct=args.radius_pct,
         max_extent_pct=args.max_extent_pct,

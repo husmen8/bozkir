@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>bozkır</title>
+    <style>
+        :root {
+            --bg: #0b0d0e;
+            --panel: #16191b;
+            --line: #262b2e;
+            --text: #d8dde0;
+            --dim: #7b868c;
+            --accent: #c8a05a;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg);
+            color: var(--text);
+            font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        }
+
+        #app {
+            display: flex;
+            height: 100%;
+        }
+
+        #stage {
+            flex: 1;
+            position: relative;
+            min-width: 0;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #panel {
+            width: 260px;
+            flex: none;
+            background: var(--panel);
+            border-left: 1px solid var(--line);
+            overflow-y: auto;
+            padding: 14px;
+        }
+
+        #panel h1 {
+            font-size: 13px;
+            font-weight: 600;
+            margin: 0 0 2px;
+            letter-spacing: .04em;
+        }
+
+        #panel .sub {
+            color: var(--dim);
+            font-size: 11px;
+            margin-bottom: 16px;
+        }
+
+        .group {
+            border-top: 1px solid var(--line);
+            padding: 12px 0;
+        }
+
+        .group:first-of-type {
+            border-top: none;
+            padding-top: 0;
+        }
+
+        .group>.label {
+            color: var(--dim);
+            font-size: 10px;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 2px 0;
+            font-size: 12px;
+        }
+
+        .row .v {
+            color: var(--accent);
+        }
+
+        label.field {
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        label.field span {
+            display: block;
+            color: var(--dim);
+            font-size: 11px;
+            margin-bottom: 3px;
+        }
+
+        input[type=range] {
+            width: 100%;
+            accent-color: var(--accent);
+        }
+
+        input[type=file] {
+            width: 100%;
+            font: inherit;
+            font-size: 11px;
+            color: var(--dim);
+        }
+
+        button {
+            width: 100%;
+            padding: 6px;
+            font: inherit;
+            cursor: pointer;
+            background: #1f2427;
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: 3px;
+        }
+
+        button:hover {
+            border-color: var(--accent);
+        }
+
+        label.check {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 3px 0;
+            cursor: pointer;
+        }
+
+        #gizmo {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            width: 92px;
+            height: 92px;
+            pointer-events: none;
+            background: rgba(11, 13, 14, .55);
+            border-radius: 50%;
+        }
+
+        #gizmo text {
+            font: 600 10px ui-monospace, monospace;
+        }
+
+        #overlay {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            background: var(--bg);
+            text-align: center;
+            padding: 20px;
+        }
+
+        #overlay.hidden {
+            display: none;
+        }
+
+        #overlay .msg {
+            color: var(--dim);
+            max-width: 380px;
+        }
+
+        #overlay .msg b {
+            color: var(--text);
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        #bar {
+            width: 240px;
+            height: 2px;
+            background: var(--line);
+            margin: 14px auto 0;
+        }
+
+        #bar i {
+            display: block;
+            height: 100%;
+            width: 0;
+            background: var(--accent);
+        }
+
+        .hint {
+            color: var(--dim);
+            font-size: 11px;
+            line-height: 1.7;
+        }
+
+        kbd {
+            background: #1f2427;
+            border: 1px solid var(--line);
+            border-radius: 3px;
+            padding: 0 4px;
+            font-size: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <div id="stage">
+            <canvas id="gl"></canvas>
+            <svg id="gizmo" viewBox="0 0 92 92">
+                <g id="gz"></g>
+            </svg>
+            <div id="overlay">
+                <div class="msg">
+                    <b>bozkır</b>
+                    Load a .splat file to begin.<br>
+                    Export one with <code>scripts/export_splat.py</code>.
+                    <div id="bar"><i></i></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="panel">
+            <h1>bozkır</h1>
+            <div class="sub">gaussian splat viewer</div>
+
+            <div class="group">
+                <div class="label">scene</div>
+                <input type="file" id="file" accept=".splat">
+                <div class="row" style="margin-top:8px"><span>splats</span><span class="v" id="n">—</span></div>
+                <div class="row"><span>drawn</span><span class="v" id="drawn">—</span></div>
+                <div class="row"><span>fps</span><span class="v" id="fps">—</span></div>
+                <div class="row"><span>sort</span><span class="v" id="sortms">—</span></div>
+            </div>
+
+            <div class="group">
+                <div class="label">camera</div>
+                <div class="row"><span>azimuth</span><span class="v" id="azim">—</span></div>
+                <div class="row"><span>elevation</span><span class="v" id="elev">—</span></div>
+                <div class="row"><span>distance</span><span class="v" id="dist">—</span></div>
+                <label class="field" style="margin-top:8px">
+                    <span>field of view</span>
+                    <input type="range" id="fov" min="20" max="100" value="60">
+                </label>
+                <button id="reset">reset view</button>
+            </div>
+
+            <div class="group">
+                <div class="label">render</div>
+                <label class="field">
+                    <span>splat size</span>
+                    <input type="range" id="gain" min="0.2" max="2" step="0.05" value="1">
+                </label>
+                <label class="check"><input type="checkbox" id="sorting" checked> depth sorting</label>
+                <div class="hint" style="margin-top:6px">
+                    Turning sorting off shows what the ordering is worth.
+                </div>
+            </div>
+
+            <div class="group">
+                <div class="label">controls</div>
+                <div class="hint">
+                    <kbd>drag</kbd> orbit<br>
+                    <kbd>scroll</kbd> zoom<br>
+                    <kbd>W A S D</kbd> move target<br>
+                    <kbd>Q E</kbd> raise / lower
+                </div>
+            </div>
+
+            <div class="group">
+                <div class="label">match in python</div>
+                <div class="hint" id="cmd" style="word-break:break-all">—</div>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="./viewer.js"></script>
+</body>
+
+</html>

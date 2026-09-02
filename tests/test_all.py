@@ -377,6 +377,22 @@ def _tilted_ground(tilt_deg, azim_deg=0.0):
     return rotate(s, quat_between([0, 0, 1], tgt))
 
 
+def test_alignment_always_ends_up_right_side_up():
+    """A plane fit cannot tell which side is up; the scene's mass can.
+
+    Without this the ground normal's arbitrary sign leaves the scene
+    inverted about half the time, and every render is upside down.
+    """
+    for tgt in ([0, 0, 1], [0.42, 0, 0.91], [0.9, 0, 0.42],
+                [0, 0, -1], [0.42, 0, -0.91], [1, 0, 0], [-1, 0, 0]):
+        s = rotate(_tilted_ground(0.0), quat_between([0, 0, 1], tgt))
+        out, info = align_to_ground(s)
+        assert info["tilt_after_deg"] < 0.5, (tgt, info)
+        # Ground at the bottom means most mass sits above the floor.
+        floor = np.percentile(out.xyz[:, 2], 5)
+        assert out.xyz[:, 2].mean() - floor > 0.1, f"inverted from {tgt}"
+
+
 def test_alignment_recovers_known_tilt():
     for tilt in (5, 25, 65):
         for azim in (0, 210):

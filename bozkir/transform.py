@@ -95,20 +95,24 @@ def rotate(s, q):
 
 
 def ground_normal(s, core_pct=90.0, low_pct=30.0):
-    """Estimate the ground plane normal.
+    """Estimate the ground plane normal, pointing up.
 
     The dense part of a captured outdoor scene is mostly ground, so its
     thinnest principal direction is the surface normal. This is plain PCA:
     eigenvectors of the covariance of the point positions, smallest
     eigenvalue first.
 
-    Two filters. `core_pct` drops floaters, which are sparse but spread
-    wide enough to dominate a least-squares fit. Then only one end of the
-    scene is kept, so objects standing on the ground do not tilt it.
+    Two things a plane fit cannot tell you on its own.
 
-    Which end is the ground cannot be read off the eigenvector: `eigh`
-    returns an arbitrary sign. Both ends are fitted instead and the flatter
-    one wins, since ground is a plane and the tops of objects are not.
+    Which end of the scene is the ground: `eigh` returns an arbitrary sign,
+    so both ends are fitted and the flatter one wins, since ground is a
+    plane and the tops of objects are not.
+
+    Which side of that plane is up: a plane looks the same from both sides.
+    The tie is broken by where the rest of the scene is - things sit on top
+    of the ground, so up is the direction from the ground band toward
+    everything else. Without this the scene comes out inverted about half
+    the time, and every render is upside down.
     """
     centre = np.median(s.xyz, axis=0)
     r = np.linalg.norm(s.xyz - centre, axis=1)
@@ -123,15 +127,51 @@ def ground_normal(s, core_pct=90.0, low_pct=30.0):
     axis = int(np.argmax(np.abs(n)))
     h = core[:, axis]
 
-    best = (n, planarity)
+    best_n, best_p, best_band = n, planarity, core
     for band in (core[h <= np.percentile(h, low_pct)],
                  core[h >= np.percentile(h, 100.0 - low_pct)]):
         if len(band) > 100:
-            cand = fit(band)
-            if cand[1] < best[1]:
-                best = cand
+            cand_n, cand_p = fit(band)
+            if cand_p < best_p:
+                best_n, best_p, best_band = cand_n, cand_p, band
 
-    return best[0].astype(np.float32), best[1]
+    if _points_down(s.xyz, best_n, core, best_band):
+        best_n = -best_n
+
+    return best_n.astype(np.float32), best_p
+
+
+def _points_down(xyz, n, core, band):
+    """Guess whether `n` points into the ground rather than out of it.
+
+    A plane looks the same from both sides, so this cannot be read off the
+    fit. Two weak signals are combined instead.
+
+    Skew: a captured outdoor scene has a hard floor and a long tail of
+    foliage, sky and floaters above it, so the distribution of heights is
+    right-skewed when measured along a normal that points up.
+
+    Mass: things stand on the ground, so the rest of the scene tends to sit
+    on the outward side of the ground band. This one fails when the surface
+    that got fitted is a raised platform - a table with a pot underneath -
+    which is why it only breaks ties.
+
+    Neither is reliable alone, and for some scenes neither is right. The
+    caller can always override with `up_hint`.
+    """
+    t = xyz @ n
+    lo, hi = np.percentile(t, [1, 99])          # floaters would swamp the mean
+    inner = t[(t >= lo) & (t <= hi)]
+    spread = inner.std()
+    skew = (inner.mean() - np.median(inner)) / spread if spread > 1e-9 else 0.0
+
+    away = core.mean(axis=0) - band.mean(axis=0)
+    mass = float(np.dot(n, away))
+
+    # Trust skew when it is decisive; otherwise fall back on the mass test.
+    if abs(skew) > 0.05:
+        return skew < 0
+    return mass < 0
 
 
 def align_to_ground(s, target_axis=2, up_hint=None):
@@ -147,12 +187,13 @@ def align_to_ground(s, target_axis=2, up_hint=None):
     target = np.zeros(3, dtype=np.float32)
     target[target_axis] = 1.0
 
-    # The normal's sign is arbitrary; flipping it would turn the scene
-    # upside down. Choose the sign that needs the smaller rotation, unless
-    # told otherwise.
-    hint = target if up_hint is None else np.asarray(up_hint, dtype=np.float32)
-    if float(np.dot(n, hint)) < 0:
-        n = -n
+    # ground_normal already points up (away from the ground, toward the
+    # rest of the scene). Overriding that sign is what turns a scene upside
+    # down, so only do it when explicitly asked.
+    if up_hint is not None:
+        hint = np.asarray(up_hint, dtype=np.float32)
+        if float(np.dot(n, hint)) < 0:
+            n = -n
 
     q = quat_between(n, target)
     out = rotate(s, q)
