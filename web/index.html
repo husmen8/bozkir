@@ -258,6 +258,30 @@
             </div>
 
             <div class="group">
+                <div class="label">terrain</div>
+                <label class="field">
+                    <span>grid <b id="gridn">1 x 1</b></span>
+                    <input type="range" id="grid" min="1" max="24" step="1" value="1" disabled>
+                </label>
+                <label class="field">
+                    <span>tiles used <b id="usedn">—</b></span>
+                    <input type="range" id="used" min="1" max="16" step="1" value="16" disabled>
+                </label>
+                <button id="reseed">shuffle tiles</button>
+                <div class="hint" style="margin-top:6px" id="wangnote">—</div>
+                <label class="check" style="margin-top:8px">
+                    <input type="checkbox" id="edges"> tile edges
+                </label>
+                <label class="check">
+                    <input type="checkbox" id="diagonals"> patch diagonals
+                </label>
+                <div class="hint">
+                    Edge colours are the matching constraint. Two tiles meet correctly
+                    when their shared boundary is one colour, not two.
+                </div>
+            </div>
+
+            <div class="group">
                 <div class="label">render</div>
                 <label class="field">
                     <span>splat size</span>
@@ -265,7 +289,8 @@
                 </label>
                 <label class="check"><input type="checkbox" id="sorting" checked> depth sorting</label>
                 <div class="hint" style="margin-top:6px">
-                    Turning sorting off shows what the ordering is worth.
+                    Splats are sorted within a tile, never across tiles. That is what
+                    GSWT does, and where the boundary artifact comes from.
                 </div>
             </div>
 

@@ -7,7 +7,7 @@
 // can be used as ground truth when this one looks wrong.
 
 // Printed on load so a stale cached copy is obvious at a glance.
-const BUILD = 'bozkir viewer 0.3 (gizmo, orientation)';
+const BUILD = 'bozkir viewer 0.7 (shared tile parts)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;             // bytes per splat in the .splat format
@@ -25,6 +25,7 @@ uniform sampler2D uData;       // RGBA32F, 3 texels per splat
 uniform sampler2D uColour;     // RGBA8,   1 texel per splat
 uniform mat3 uView;            // world -> camera rotation (rows are axes)
 uniform vec3 uEye;
+uniform vec3 uOffset;    // world position of the tile being drawn
 uniform vec2 uFocal;           // pixels
 uniform vec2 uViewport;        // pixels
 uniform float uGain;           // splat size multiplier
@@ -46,7 +47,7 @@ void main() {
   vec4 b = fetch(aIndex, 1);   // scale.xyz
   vec4 q = fetch(aIndex, 2);   // rotation w,x,y,z
 
-  vec3 cam = uView * (a.xyz - uEye);
+  vec3 cam = uView * (a.xyz + uOffset - uEye);
   if (cam.z < uNear) {         // behind the camera: collapse the quad
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     return;
@@ -289,6 +290,11 @@ const ui = {
     dist: document.getElementById('dist'),
     cmd: document.getElementById('cmd'),
     gz: document.getElementById('gz'),
+    grid: document.getElementById('grid'),
+    gridn: document.getElementById('gridn'),
+    used: document.getElementById('used'),
+    usedn: document.getElementById('usedn'),
+    wang: document.getElementById('wangnote'),
 };
 
 function fail(title, detail) {
@@ -327,6 +333,7 @@ gl.useProgram(prog);
 const loc = {
     view: gl.getUniformLocation(prog, 'uView'),
     eye: gl.getUniformLocation(prog, 'uEye'),
+    offset: gl.getUniformLocation(prog, 'uOffset'),
     focal: gl.getUniformLocation(prog, 'uFocal'),
     viewport: gl.getUniformLocation(prog, 'uViewport'),
     gain: gl.getUniformLocation(prog, 'uGain'),
@@ -364,6 +371,83 @@ gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA,
     gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 gl.clearColor(0, 0, 0, 1);
 
+let lineProg, lineLoc, linePosBuf, lineRGBBuf, lineCount = 0;
+try {
+    lineProg = program(gl, LINE_VERT, LINE_FRAG);
+} catch (e) {
+    fail(e);
+}
+lineLoc = {
+    view: gl.getUniformLocation(lineProg, 'uView'),
+    eye: gl.getUniformLocation(lineProg, 'uEye'),
+    focal: gl.getUniformLocation(lineProg, 'uFocal'),
+    viewport: gl.getUniformLocation(lineProg, 'uViewport'),
+    near: gl.getUniformLocation(lineProg, 'uNear'),
+    alpha: gl.getUniformLocation(lineProg, 'uAlpha'),
+    pos: gl.getAttribLocation(lineProg, 'aPos'),
+    rgb: gl.getAttribLocation(lineProg, 'aRGB'),
+};
+linePosBuf = gl.createBuffer();
+lineRGBBuf = gl.createBuffer();
+
+// Two colours per axis, as in the GSWT figures: warm for north/south,
+// cool for east/west, so a glance tells you which constraint you are
+// looking at.
+const EDGE_RGB = {
+    h: [[0.88, 0.32, 0.32], [0.35, 0.78, 0.35], [0.95, 0.60, 0.20],
+    [0.85, 0.40, 0.80]],
+    v: [[0.35, 0.63, 0.88], [0.88, 0.75, 0.35], [0.45, 0.85, 0.82],
+    [0.70, 0.55, 0.95]],
+};
+const DIAGONAL_RGB = [0.55, 0.55, 0.55];
+
+let showEdges = false, showDiagonals = false;
+
+/** Rebuild the overlay geometry for the current grid.
+ *
+ *  Each cell contributes its four boundary segments, coloured by that
+ *  edge's colour code, and optionally its two diagonals, which are where
+ *  the four source patches meet inside the tile. Shared boundaries get
+ *  drawn twice, by both neighbours - if the two disagree the line shows
+ *  two colours, which is the failure this view exists to reveal. */
+function buildOverlay() {
+    if (!tileSize || !cells.length) { lineCount = 0; return; }
+    const h = tileSize / 2;
+    const lift = tileSize * 0.02;      // sit just above the ground
+    const pos = [], rgb = [];
+
+    const seg = (x0, y0, x1, y1, c) => {
+        pos.push(x0, y0, lift, x1, y1, lift);
+        rgb.push(c[0], c[1], c[2], c[0], c[1], c[2]);
+    };
+
+    for (const cell of cells) {
+        const { x, y } = cell;
+        if (showEdges) {
+            const code = wangCodes ? wangCodes[cell.patch] : [0, 0, 0, 0];
+            const cn = EDGE_RGB.h[code[0] % 4], ce = EDGE_RGB.v[code[1] % 4];
+            const cs = EDGE_RGB.h[code[2] % 4], cw = EDGE_RGB.v[code[3] % 4];
+            // Inset slightly so the two tiles sharing a boundary draw side by
+            // side instead of on top of each other.
+            const k = h * 0.94;
+            seg(x - k, y + k, x + k, y + k, cn);
+            seg(x + k, y - k, x + k, y + k, ce);
+            seg(x - k, y - k, x + k, y - k, cs);
+            seg(x - k, y - k, x - k, y + k, cw);
+        }
+        if (showDiagonals) {
+            seg(x - h, y - h, x + h, y + h, DIAGONAL_RGB);
+            seg(x - h, y + h, x + h, y - h, DIAGONAL_RGB);
+        }
+    }
+
+    lineCount = pos.length / 3;
+    gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineRGBBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(rgb), gl.DYNAMIC_DRAW);
+}
+
 const cam = new Orbit();
 console.log('starting sort worker');
 const worker = new Worker('./sort-worker.js');
@@ -377,6 +461,15 @@ let frames = 0, fpsTime = performance.now();
 let sortingEnabled = true;
 let gain = 1;
 let identityOrder = null;   // file order, for the sorting-off comparison
+let patches = [{ start: 0, count: 0 }];   // slices of the splat buffer
+let tileSize = 0;           // world units; 0 means "not a tile set"
+let gridN = 1;              // grid is gridN x gridN cells
+let cells = [];             // {x, y, patch}
+let seed = 1;
+let wangCodes = null;       // [n, e, s, w] per tile, when the set is a Wang set
+let tileParts = null;       // which parts each tile is assembled from
+let usedPatches = 0;        // how many of the exported patches to draw from
+let drawnSplats = 0, drawCalls = 0;
 
 worker.onmessage = (e) => {
     if (e.data.type === 'sorted') {
@@ -431,6 +524,52 @@ function drawGizmo(b) {
     }).join('');
 }
 
+/** Lay out gridN x gridN cells.
+ *
+ *  With a Wang tile set, each cell's west colour is fixed by the cell to
+ *  its left and its south colour by the cell below; north and east stay
+ *  free. A complete set always has a tile that fits, so this never
+ *  backtracks, and the free choices are what stop the terrain repeating.
+ *
+ *  Without edge codes it falls back to picking a patch at random, which
+ *  is an array of copies rather than a tiling. */
+function buildGrid() {
+    cells = [];
+    if (!tileSize) { cells = [{ x: 0, y: 0, patch: 0 }]; return; }
+    usedPatches = Math.max(1, Math.min(usedPatches || patches.length,
+        patches.length));
+    let s = seed;
+    const rand = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const half = (gridN - 1) / 2;
+
+    const chosen = new Int32Array(gridN * gridN).fill(-1);
+    for (let j = 0; j < gridN; j++) {
+        for (let i = 0; i < gridN; i++) {
+            let pick;
+            if (wangCodes) {
+                const west = i > 0 ? wangCodes[chosen[j * gridN + i - 1]][1] : -1;
+                const south = j > 0 ? wangCodes[chosen[(j - 1) * gridN + i]][0] : -1;
+                const fits = [];
+                for (let k = 0; k < wangCodes.length; k++) {
+                    const c = wangCodes[k];
+                    if (west >= 0 && c[3] !== west) continue;
+                    if (south >= 0 && c[2] !== south) continue;
+                    fits.push(k);
+                }
+                pick = fits.length
+                    ? fits[Math.floor(rand() * fits.length) % fits.length] : 0;
+            } else {
+                pick = Math.floor(rand() * usedPatches) % usedPatches;
+            }
+            chosen[j * gridN + i] = pick;
+            cells.push({
+                x: (i - half) * tileSize, y: (j - half) * tileSize,
+                patch: pick
+            });
+        }
+    }
+}
+
 function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = Math.floor(canvas.clientWidth * dpr);
@@ -442,9 +581,31 @@ function resize() {
     }
 }
 
-function load(buffer) {
+function load(buffer, manifest) {
     const { n, positions, data, colour } = unpack(buffer);
     splatCount = n;
+
+    if (manifest && manifest.parts && manifest.tiles) {
+        // A Wang set stores the distinct triangles once; each tile is four
+        // references into them. Sixteen tiles share eight parts, so this is
+        // eight times less data to hold, sort and upload.
+        patches = manifest.parts.map(p => ({ start: p.start, count: p.count }));
+        tileParts = manifest.tiles.map(t => t.parts);
+        wangCodes = manifest.tiles.map(t => [t.n, t.e, t.s, t.w]);
+        tileSize = manifest.size || 0;
+    } else if (manifest && manifest.tiles && manifest.tiles.length) {
+        patches = manifest.tiles.map(t => ({ start: t.start, count: t.count }));
+        tileSize = manifest.size || 0;
+        tileParts = null;
+        wangCodes = manifest.wang
+            ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
+    } else {
+        patches = [{ start: 0, count: n }];
+        tileSize = 0;
+        wangCodes = null;
+        tileParts = null;
+    }
+    buildGrid();
 
     const texels = n * 3;
     const w = 2048;
@@ -483,12 +644,27 @@ function load(buffer) {
     (q(zs, .25) + q(zs, .75)) / 2];
     cam.distance = Math.max(
         2.5 * Math.max(q(xs, .75) - q(xs, .25), q(ys, .75) - q(ys, .25)), 0.5);
+    if (tileSize) { cam.target = [0, 0, cam.target[2]]; cam.elevation = 12; }
 
     const pos = positions.slice();
-    worker.postMessage({ type: 'init', positions: pos.buffer }, [pos.buffer]);
+    worker.postMessage({ type: 'init', positions: pos.buffer, patches },
+        [pos.buffer]);
 
     console.log(`loaded ${n} splats`);
-    ui.n.textContent = n.toLocaleString();
+    ui.n.textContent = n.toLocaleString() +
+        (patches.length > 1 ? ` in ${patches.length}` : '');
+    const nTiles = wangCodes ? wangCodes.length : patches.length;
+    ui.grid.disabled = !tileSize;
+    // With a Wang set the arrangement is decided by the matching rule, so
+    // restricting how many tiles may appear would break it.
+    ui.used.disabled = !tileSize || patches.length < 2 || !!wangCodes;
+    ui.wang.textContent = wangCodes
+        ? `wang: ${nTiles} tiles from ${patches.length} shared parts, ` +
+        `${manifest.colours || 2} colours per axis`
+        : 'random placement, edges do not match';
+    ui.used.max = patches.length;
+    ui.used.value = usedPatches = patches.length;
+    ui.usedn.textContent = `${patches.length} of ${patches.length}`;
     overlay.classList.add('hidden');
 }
 
@@ -520,15 +696,88 @@ function frame() {
     drawGizmo(b);
 
     gl.clear(gl.COLOR_BUFFER_BIT);
+    drawnSplats = 0;
+    drawCalls = 0;
     if (splatCount && sortedReady) {
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, splatCount);
+        // Cells are drawn far to near and composited with 'over'. Splats are
+        // only sorted within a patch, never across cells - which is precisely
+        // the approximation that produces the boundary artifact.
+        const visible = [];
+        for (const c of cells) {
+            const dx = c.x - b.eye[0], dy = c.y - b.eye[1], dz = -b.eye[2];
+            const z = dx * b.forward[0] + dy * b.forward[1] + dz * b.forward[2];
+            if (z < -tileSize) continue;                       // fully behind
+            // Cheap frustum test: how far off-axis the cell centre sits.
+            const sx = dx * b.right[0] + dy * b.right[1] + dz * b.right[2];
+            const sy = dx * b.down[0] + dy * b.down[1] + dz * b.down[2];
+            const reach = tileSize * 1.5 + Math.max(z, 0.01) *
+                Math.tan(cam.fov * Math.PI / 360) * (canvas.width / canvas.height);
+            if (Math.abs(sx) > reach || Math.abs(sy) > reach) continue;
+            visible.push({ c, z });
+        }
+        visible.sort((p, q) => q.z - p.z);
+
+        for (const { c } of visible) {
+            // A Wang tile is four shared parts drawn at the same offset; a plain
+            // tile set is one patch. Either way the splats within a part are
+            // sorted, and parts are not sorted against each other.
+            const ids = tileParts ? tileParts[c.patch] : [c.patch];
+            gl.uniform3f(loc.offset, c.x, c.y, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
+            for (const id of ids) {
+                const p = patches[id];
+                if (!p || !p.count) continue;
+                gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, p.start * 4);
+                gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, p.count);
+                drawnSplats += p.count;
+                drawCalls++;
+            }
+        }
+    }
+
+    if (lineCount) {
+        gl.useProgram(lineProg);
+        gl.uniformMatrix3fv(lineLoc.view, false, new Float32Array([
+            b.right[0], b.down[0], b.forward[0],
+            b.right[1], b.down[1], b.forward[1],
+            b.right[2], b.down[2], b.forward[2],
+        ]));
+        gl.uniform3fv(lineLoc.eye, new Float32Array(b.eye));
+        const fy = (canvas.height / 2) / Math.tan(cam.fov * Math.PI / 360);
+        gl.uniform2f(lineLoc.focal, fy, fy);
+        gl.uniform2f(lineLoc.viewport, canvas.width, canvas.height);
+        gl.uniform1f(lineLoc.near, 0.05);
+        gl.uniform1f(lineLoc.alpha, 0.85);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuf);
+        gl.enableVertexAttribArray(lineLoc.pos);
+        gl.vertexAttribPointer(lineLoc.pos, 3, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(lineLoc.pos, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, lineRGBBuf);
+        gl.enableVertexAttribArray(lineLoc.rgb);
+        gl.vertexAttribPointer(lineLoc.rgb, 3, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(lineLoc.rgb, 0);
+
+        gl.drawArrays(gl.LINES, 0, lineCount);
+
+        gl.disableVertexAttribArray(lineLoc.pos);
+        gl.disableVertexAttribArray(lineLoc.rgb);
+        gl.useProgram(prog);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        gl.enableVertexAttribArray(aCorner);
+        gl.vertexAttribPointer(aCorner, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
+        gl.enableVertexAttribArray(aIndex);
+        gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, 0);
+        gl.vertexAttribDivisor(aIndex, 1);
     }
 
     frames++;
     const now = performance.now();
     if (now - fpsTime > 500) {
         ui.fps.textContent = (frames * 1000 / (now - fpsTime)).toFixed(0);
-        ui.drawn.textContent = splatCount.toLocaleString();
+        ui.drawn.textContent = drawnSplats.toLocaleString() +
+            (drawCalls > 1 ? ` / ${drawCalls} cells` : '');
         ui.sortms.textContent = sortMs ? sortMs.toFixed(0) + ' ms' : '—';
         frames = 0;
         fpsTime = now;
@@ -621,6 +870,34 @@ document.getElementById('sorting').addEventListener('change', (e) => {
         sortMs = 0;
     }
 });
+ui.grid.addEventListener('input', (e) => {
+    gridN = +e.target.value;
+    ui.gridn.textContent = `${gridN} x ${gridN}`;
+    buildGrid();
+    buildOverlay();
+    buildOverlay();
+});
+ui.used.addEventListener('input', (e) => {
+    usedPatches = +e.target.value;
+    ui.usedn.textContent = `${usedPatches} of ${patches.length}`;
+    buildGrid();
+    buildOverlay();
+    buildOverlay();
+});
+document.getElementById('reseed').addEventListener('click', () => {
+    seed = (Math.random() * 1e9) | 0;
+    buildGrid();
+    buildOverlay();
+    buildOverlay();
+});
+document.getElementById('edges').addEventListener('change', (e) => {
+    showEdges = e.target.checked;
+    buildOverlay();
+});
+document.getElementById('diagonals').addEventListener('change', (e) => {
+    showDiagonals = e.target.checked;
+    buildOverlay();
+});
 document.getElementById('reset').addEventListener('click', () => {
     cam.azimuth = 45; cam.elevation = 25;
 });
@@ -629,9 +906,11 @@ document.getElementById('reset').addEventListener('click', () => {
 //   index.html?scene=garden   ->  ./data/garden.splat
 const wanted = new URLSearchParams(location.search).get('scene');
 for (const name of (wanted ? [wanted] : ['scene', 'garden'])) {
-    fetch(`./data/${name}.splat`)
-        .then(r => (r.ok ? r.arrayBuffer() : null))
-        .then(b => { if (b && !splatCount) load(b); })
+    Promise.all([
+        fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
+        fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null))
+            .catch(() => null),
+    ]).then(([b, m]) => { if (b && !splatCount) load(b, m); })
         .catch(() => { });
 }
 

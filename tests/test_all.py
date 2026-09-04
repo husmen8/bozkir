@@ -27,6 +27,9 @@ from bozkir.render import rasterize_rgba, over, flatten        # noqa: E402
 from bozkir.tile import (extract_patch, translate, merge,      # noqa: E402
                          grid, render_global, render_tiled, seam_camera)
 from bozkir.scene import SceneConfig, config_from_args           # noqa: E402
+from bozkir.wang import (region_weights, build_tile,             # noqa: E402
+                         build_tile_set, layout, check_layout,
+                         edge_gaussians)
 
 RNG = np.random.default_rng(0)
 
@@ -669,6 +672,88 @@ def test_config_from_args_round_trip():
     assert cfg.clean and cfg.radius_pct == 40.0 and cfg.sh_degree == 0
 
 
+# --------------------------------------------------------------- wang.py
+
+def _exemplar(tag, size=1.0, n=20_000):
+    xy = RNG.uniform(-size / 2, size / 2, (n, 2))
+    xyz = np.concatenate([xy, RNG.normal(0, 0.01, (n, 1))], 1)
+    dc = np.zeros((n, 3), np.float32)
+    dc[:, tag % 3] = 1.0
+    s = scene(xyz, opacity=np.full(n, 0.7, np.float32),
+              scale=np.full((n, 3), 0.01, np.float32))
+    s.sh_dc[:] = dc
+    return s
+
+
+def test_region_weights_partition_the_square():
+    pts = RNG.uniform(-0.5, 0.5, (5000, 2))
+    for blend in (0.0, 0.05, 0.2):
+        w = region_weights(pts, 1.0, blend)
+        assert np.allclose(w.sum(axis=1), 1.0)
+        assert w.min() >= 0.0 and w.max() <= 1.0 + 1e-6
+
+
+def test_region_weights_hard_cut_assigns_the_right_triangle():
+    pts = np.float32([[0, 0.4], [0.4, 0], [0, -0.4], [-0.4, 0]])
+    assert list(np.argmax(region_weights(pts, 1.0, 0.0), axis=1)) == [0, 1, 2, 3]
+
+
+def test_tiles_sharing_an_edge_colour_have_an_identical_edge():
+    """The entire reason the construction exists.
+
+    Corners are excluded: the diagonals reach the edge there, so the last
+    sliver before a corner comes from the neighbouring triangle. Cohen's
+    original construction has the same gap.
+    """
+    h = [_exemplar(0), _exemplar(1)]
+    v = [_exemplar(2), _exemplar(3)]
+    tiles, codes = build_tile_set(h, v, 1.0, blend=0.0)
+    assert len(tiles) == 16
+
+    for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+        groups = {}
+        for t, c in zip(tiles, codes):
+            groups.setdefault(c[col], []).append(
+                edge_gaussians(t, 1.0, edge=edge))
+        assert len(groups) == 2
+        for g in groups.values():
+            assert len(g[0]) > 100, "edge sample is too small to mean anything"
+            for other in g:
+                assert np.array_equal(g[0], other), edge
+        reps = [g[0] for g in groups.values()]
+        assert not np.array_equal(reps[0], reps[1]), f"{edge} colours identical"
+
+
+def test_feathered_tiles_still_match_away_from_the_diagonals():
+    h = [_exemplar(0), _exemplar(1)]
+    v = [_exemplar(2), _exemplar(3)]
+    tiles, codes = build_tile_set(h, v, 1.0, blend=0.05)
+    groups = {}
+    for t, c in zip(tiles, codes):
+        groups.setdefault(c[0], []).append(
+            edge_gaussians(t, 1.0, edge="n", margin=0.1))
+    for g in groups.values():
+        assert all(np.array_equal(g[0], x) for x in g)
+
+
+def test_layout_never_places_a_mismatched_edge():
+    codes = [(n, e, s, w) for n in range(2) for e in range(2)
+             for s in range(2) for w in range(2)]
+    for nx, ny in ((4, 4), (16, 16), (32, 32)):
+        assert check_layout(codes, layout(codes, nx, ny, seed=1)) == 0
+
+
+def test_layout_is_aperiodic_and_uses_the_whole_set():
+    codes = [(n, e, s, w) for n in range(2) for e in range(2)
+             for s in range(2) for w in range(2)]
+    g = layout(codes, 32, 32, seed=1)
+    assert len(np.unique(g)) == 16
+    row = g[0]
+    for period in range(1, 17):
+        assert not np.array_equal(row[:-period], row[period:]), period
+    assert not np.array_equal(g, layout(codes, 32, 32, seed=2))
+
+
 # ----------------------------------------------------------- integration
 
 def test_align_then_render_end_to_end():
@@ -682,6 +767,29 @@ def test_align_then_render_end_to_end():
     assert p["kept"] > 1000
     assert (img.sum(axis=2) > 0.01).mean() > 0.05          # something is drawn
     assert np.isfinite(img).all()
+
+
+def test_every_script_imports():
+    """Catch a script importing a name its module does not define.
+
+    Modules and the scripts that use them drift apart: a helper gets moved
+    or renamed on one side only, and nothing notices until the script is
+    run. Importing each one here fails immediately instead.
+    """
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    scripts = sorted((root / "scripts").glob("*.py"))
+    assert scripts, "no scripts found"
+    sys.path.insert(0, str(root / "scripts"))
+    for path in scripts:
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except SystemExit:
+            pass                      # argparse in a __main__ guard is fine
+        except ImportError as e:
+            raise AssertionError(f"{path.name}: {e}") from e
 
 
 def main():

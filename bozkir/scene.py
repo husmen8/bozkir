@@ -54,7 +54,9 @@ class SceneConfig:
         if self.recentre:
             bits.append("recentre")
         if self.clean:
-            bits.append(f"clean(r{self.radius_pct:g},f{self.floater_std:g})")
+            bits.append(f"clean(r{self.radius_pct:g}"
+                        + (f",f{self.floater_std:g}" if self.floater_std > 0
+                           else ",no-floaters") + ")")
         if self.sh_degree is not None:
             bits.append(f"sh{self.sh_degree}")
         return " + ".join(bits) if bits else "raw"
@@ -106,7 +108,12 @@ def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
                              up_axis=cfg.up_axis)
         s, _ = remove_large(
             s, float(np.percentile(s.scale.max(axis=1), cfg.max_extent_pct)))
-        s, _ = remove_floaters(s, std_ratio=cfg.floater_std)
+        # Floater removal builds a KD-tree over every splat, which costs
+        # minutes and gigabytes on a 10M-splat scene. Patch-level slab
+        # clipping already discards anything away from the ground, so on
+        # large scenes it is often not worth paying for.
+        if cfg.floater_std > 0:
+            s, _ = remove_floaters(s, std_ratio=cfg.floater_std)
         if verbose:
             print(f"  cleaned {n0:,} -> {len(s):,} ({len(s) / n0:.0%})")
 
@@ -134,7 +141,9 @@ def add_scene_args(parser):
                    help="crop to the subject, drop the background shell, "
                         "remove floaters")
     g.add_argument("--radius-pct", type=float, default=60.0)
-    g.add_argument("--floater-std", type=float, default=2.0)
+    g.add_argument("--floater-std", type=float, default=2.0,
+                   help="lower removes more floaters; 0 skips the step, "
+                        "which matters on scenes of several million splats")
     g.add_argument("--max-extent-pct", type=float, default=99.0)
     g.add_argument("--sh", type=int, default=None,
                    help="truncate spherical harmonics to this degree")
