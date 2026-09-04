@@ -269,7 +269,35 @@
                 </label>
                 <button id="reseed">shuffle tiles</button>
                 <div class="hint" style="margin-top:6px" id="wangnote">—</div>
-                <label class="check" style="margin-top:8px">
+                <label class="field" style="margin-top:10px">
+                    <span>relief <b id="reliefn">0.00</b></span>
+                    <input type="range" id="relief" min="0" max="2" step="0.02" value="0">
+                </label>
+                <label class="field">
+                    <span>relief scale <b id="reliefscalen">6</b> tiles</span>
+                    <input type="range" id="reliefscale" min="2" max="40" step="1" value="6">
+                </label>
+                <label class="field">
+                    <span>frames per tile <b id="subdivn">1 (GSWT)</b></span>
+                    <input type="range" id="subdiv" min="1" max="17" step="1" value="1">
+                </label>
+                <div class="hint" style="margin-bottom:8px">
+                    One frame per tile is GSWT: exact at the centre, drifting toward the
+                    edges, so neighbours disagree at their boundary. More frames shorten
+                    that span, but trade one large break for many small ones inside the
+                    tile. The far end is the limit of subdividing - a frame per splat,
+                    with no break anywhere.
+                </div>
+                <div class="row" style="margin:8px 0 2px"><span>boundary gap</span></div>
+                <div class="hint" id="seam" style="margin-bottom:10px">—</div>
+                <label class="check">
+                    <input type="checkbox" id="tints"> edge colours on tiles
+                </label>
+                <label class="field" style="margin-top:6px">
+                    <span>edge band <b id="bandn">0.12</b></span>
+                    <input type="range" id="band" min="0.02" max="0.4" step="0.01" value="0.12">
+                </label>
+                <label class="check">
                     <input type="checkbox" id="edges"> tile edges
                 </label>
                 <label class="check">
