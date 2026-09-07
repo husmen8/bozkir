@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.ply import SH_C0  # noqa: E402
 
@@ -68,7 +69,8 @@ def main():
     ap.add_argument("--max-splats", type=int, default=None,
                     help="keep only this many, most visible first")
     add_scene_args(ap)
-    args = ap.parse_args()
+    add_preset_args(ap)
+    args = apply_preset(ap)
 
     s = scene_from_args(args)
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.ply import load_ply, save_ply  # noqa: E402
 from bozkir.transform import align_to_ground, recentre  # noqa: E402
 
@@ -31,7 +32,8 @@ def main():
                     help="also render before/after top-down views")
     ap.add_argument("--res", type=int, default=600)
     ap.add_argument("--out", type=Path, default=Path("data/aligned"))
-    args = ap.parse_args()
+    add_preset_args(ap)
+    args = apply_preset(ap)
 
     s = load_ply(args.path)
     print(f"{args.path.name}: {len(s):,} splats")

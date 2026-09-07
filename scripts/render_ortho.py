@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.render import project_orthographic, rasterize  # noqa: E402
 
@@ -38,7 +39,8 @@ def main():
     ap.add_argument("--bg", type=float, nargs=3, default=(1.0, 1.0, 1.0))
     ap.add_argument("--out", type=Path, default=Path("out"))
     add_scene_args(ap)
-    args = ap.parse_args()
+    add_preset_args(ap)
+    args = apply_preset(ap)
 
     s = scene_from_args(args)
 

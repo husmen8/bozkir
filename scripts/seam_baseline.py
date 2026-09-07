@@ -28,8 +28,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.ply import load_ply  # noqa: E402
-from bozkir.select import remove_floaters, remove_large  # noqa: E402
+from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
+from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.tile import (extract_patch, grid, render_global,  # noqa: E402
                          render_tiled, seam_camera)
 
@@ -53,29 +53,21 @@ def main():
     ap.add_argument("--width", type=int, default=400)
     ap.add_argument("--height", type=int, default=300)
     ap.add_argument("--fov", type=float, default=50.0)
-    ap.add_argument("--no-clean", action="store_true")
-    ap.add_argument("--up-axis", type=int, default=2, choices=(0, 1, 2))
     ap.add_argument("--out", type=Path, default=Path("out/seam"))
-    args = ap.parse_args()
+    add_scene_args(ap)
+    add_preset_args(ap)
+    args = apply_preset(ap)
 
     azims = args.azim if args.azim else [0, 15, 30, 45, 60, 75, 90]
     plane = [i for i in range(3) if i != args.up_axis]
 
-    s = load_ply(args.path)
-    print(f"{args.path.name}: {len(s):,} splats")
+    s = scene_from_args(args)
 
     centre = (args.centre if args.centre is not None
               else np.median(s.xyz[:, plane], axis=0))
     patch = extract_patch(s, centre, args.size, up_axis=args.up_axis)
     print(f"  patch {args.size} x {args.size} at "
           f"({centre[0]:.2f}, {centre[1]:.2f}): {len(patch):,} splats")
-
-    if not args.no_clean:
-        n0 = len(patch)
-        patch, _ = remove_large(patch,
-                                float(np.percentile(patch.scale.max(axis=1), 99)))
-        patch, _ = remove_floaters(patch, std_ratio=2.0)
-        print(f"  cleaned: {n0:,} -> {len(patch):,}")
 
     if len(patch) < 500:
         raise SystemExit("patch is nearly empty - try a different --centre "

@@ -6,7 +6,7 @@
 // implementations comparable means the slow Python renderer can serve as
 // ground truth when this one looks wrong.
 
-const BUILD = 'bozkir viewer 1.4 (seam measurement)';
+const BUILD = 'bozkir viewer 1.7 (sky and fog)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -32,6 +32,11 @@ uniform int uSubdiv;          // tangent frames per tile edge; 1 is GSWT,
 uniform float uTileSize;
 uniform vec3 uEdgeN, uEdgeE, uEdgeS, uEdgeW;
 uniform float uEdgeMark;      // band width as a fraction of the tile; 0 is off
+uniform float uFade;          // level-of-detail cross-fade weight
+uniform vec3 uTint;
+uniform float uTintAmount;
+uniform vec3 uFogColour;
+uniform float uFogDensity;
 uniform vec2 uFocal;
 uniform vec2 uViewport;
 uniform float uGain;
@@ -210,7 +215,11 @@ void main() {
     float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
     rgb = mix(vec3(0.55 + 0.45 * grey), ec, w);
   }
-  vColour = vec4(rgb, col.a);
+  // Distance haze, toward the same colour the sky has at the horizon, so
+  // far ground dissolves into it instead of ending at a hard edge.
+  float fog = 1.0 - exp(-uFogDensity * max(cam.z, 0.0));
+  rgb = mix(rgb, uFogColour, fog);
+  vColour = vec4(mix(rgb, uTint, uTintAmount), col.a * uFade);
 }
 `;
 
@@ -258,6 +267,39 @@ out vec4 oColour;
 void main() { oColour = vec4(vRGB * uAlpha, uAlpha); }
 `;
 
+// A gradient standing in for a sky. Cheap, and it does more for how the
+// terrain reads than anything else of this size: ground against black has
+// no depth, ground against a horizon does.
+const SKY_VERT = `#version 300 es
+precision highp float;
+in vec2 aNDC;
+out vec2 vNDC;
+void main() { vNDC = aNDC; gl_Position = vec4(aNDC, 0.0, 1.0); }
+`;
+
+const SKY_FRAG = `#version 300 es
+precision highp float;
+uniform mat3 uView;          // world -> camera; its transpose undoes that
+uniform vec2 uFocal;
+uniform vec2 uViewport;
+uniform vec3 uSkyTop;
+uniform vec3 uSkyHorizon;
+uniform vec3 uGround;
+in vec2 vNDC;
+out vec4 oColour;
+void main() {
+  // Reconstruct the world direction this pixel looks along.
+  vec2 px = vec2(vNDC.x * uViewport.x * 0.5, -vNDC.y * uViewport.y * 0.5);
+  vec3 dir = transpose(uView) * normalize(vec3(px.x / uFocal.x,
+                                               px.y / uFocal.y, 1.0));
+  float t = dir.z;
+  vec3 c = t > 0.0
+    ? mix(uSkyHorizon, uSkyTop, pow(clamp(t, 0.0, 1.0), 0.55))
+    : mix(uSkyHorizon, uGround, pow(clamp(-t, 0.0, 1.0), 0.5));
+  oColour = vec4(c, 1.0);
+}
+`;
+
 // =============================================================== helpers
 
 const canvas = document.getElementById('gl');
@@ -268,7 +310,9 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
     'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
     'wangnote', 'edges', 'diagonals', 'tints',
     'relief', 'reliefn', 'reliefscale', 'reliefscalen',
-    'band', 'bandn', 'subdiv', 'subdivn', 'seam']) {
+    'band', 'bandn', 'subdiv', 'subdivn', 'seam',
+    'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
+    'sky', 'fog', 'fogn', 'orbit']) {
     ui[id] = document.getElementById(id);
 }
 
@@ -398,17 +442,19 @@ class Orbit {
 
 // ================================================================= setup
 
-let splatProg, lineProg;
+let splatProg, lineProg, skyProg;
 try {
     splatProg = program(SPLAT_VERT, SPLAT_FRAG);
     lineProg = program(LINE_VERT, LINE_FRAG);
+    skyProg = program(SKY_VERT, SKY_FRAG);
 } catch (e) { fail(e); }
 console.log('shaders compiled');
 
 const splatU = uniforms(splatProg,
     ['view', 'eye', 'cellXY', 'relief', 'wave', 'subdiv',
         'focal', 'viewport', 'gain', 'near',
-        'data', 'colour', 'tileSize', 'edgeMark',
+        'data', 'colour', 'tileSize', 'edgeMark', 'fade',
+        'tint', 'tintAmount', 'fogColour', 'fogDensity',
         'edgeN', 'edgeE', 'edgeS', 'edgeW']);
 const lineU = uniforms(lineProg,
     ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
@@ -418,6 +464,7 @@ const lineU = uniforms(lineProg,
 // line pass then reads its colours from a single vertex, or nothing at all.
 const splatVAO = gl.createVertexArray();
 const lineVAO = gl.createVertexArray();
+const skyVAO = gl.createVertexArray();
 
 const quadBuf = gl.createBuffer();
 const indexBuf = gl.createBuffer();
@@ -445,6 +492,16 @@ const aRGB = gl.getAttribLocation(lineProg, 'aRGB');
 gl.bindBuffer(gl.ARRAY_BUFFER, lineRGBBuf);
 gl.enableVertexAttribArray(aRGB);
 gl.vertexAttribPointer(aRGB, 3, gl.FLOAT, false, 0, 0);
+const skyU = uniforms(skyProg,
+    ['view', 'focal', 'viewport', 'skyTop', 'skyHorizon', 'ground']);
+const skyBuf = gl.createBuffer();
+gl.bindVertexArray(skyVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const aNDC = gl.getAttribLocation(skyProg, 'aNDC');
+gl.enableVertexAttribArray(aNDC);
+gl.vertexAttribPointer(aNDC, 2, gl.FLOAT, false, 0, 0);
 gl.bindVertexArray(null);
 
 gl.disable(gl.DEPTH_TEST);
@@ -504,6 +561,60 @@ function tangentFrame(x, y) {
 
 let lineCount = 0;
 let splatWidth = 0;        // median splat long axis, the unit gaps are judged in
+let lodLevels = 1;         // levels available per tile
+let lodBase = 8;           // distance in tiles at which level 1 takes over
+let lodOn = true;
+let lodCounts = [];        // cells drawn at each level, for the readout
+let showLodColours = false;
+
+// Three skies rather than one slider: choosing a mood is easier than
+// choosing six numbers, and the fog has to match the horizon or the
+// terrain ends against a colour the sky never has.
+const SKIES = {
+    none: { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
+    overcast: {
+        top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
+        ground: [0.10, 0.10, 0.11], fog: 0.020
+    },
+    dusk: {
+        top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
+        ground: [0.05, 0.05, 0.07], fog: 0.030
+    },
+    clear: {
+        top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
+        ground: [0.08, 0.09, 0.10], fog: 0.012
+    },
+};
+let sky = 'overcast';
+let fogScale = 1.0;
+let orbiting = false;
+
+// Green through red as detail drops, the convention every engine's LOD
+// debug view uses.
+const LOD_RGB = [[0.30, 0.85, 0.35], [0.95, 0.85, 0.25],
+[0.98, 0.58, 0.20], [0.92, 0.30, 0.30],
+[0.75, 0.35, 0.85], [0.40, 0.60, 0.95]];
+
+/** Which level a cell should use, and how far through the cross-fade it is.
+ *
+ *  Level i takes over at lodBase * 2^i tiles away, doubling each time, and
+ *  the two neighbouring levels are blended across the last 20% of that
+ *  range so the switch does not pop. GSWT does the same (Section 3.5) with
+ *  a band of about 5%; a wider one is more forgiving when the levels differ
+ *  as much as ours do. */
+function lodFor(distance) {
+    if (!lodOn || lodLevels < 2) return [0, 1, 0];
+    const d = distance / Math.max(lodBase * (tileSize || 1), 1e-3);
+    const f = Math.log2(Math.max(d, 1e-6));
+    const lvl = Math.max(0, Math.min(Math.floor(f), lodLevels - 1));
+    const frac = f - lvl;
+    const band = 0.2;
+    if (frac > 1 - band && lvl + 1 < lodLevels) {
+        const w = (frac - (1 - band)) / band;
+        return [lvl, 1 - w, w];
+    }
+    return [lvl, 1, 0];
+}
 let drawnSplats = 0, drawCalls = 0;
 let frames = 0, fpsTime = performance.now();
 
@@ -697,11 +808,16 @@ function load(buffer, manifest) {
     splatCount = n;
 
     if (manifest && manifest.tiles && manifest.tiles.length) {
-        patches = manifest.tiles.map(t => ({ start: t.start, count: t.count }));
+        patches = manifest.tiles.map(t => ({
+            start: t.start, count: t.count,
+            levels: t.levels || [[t.start, t.count]],
+        }));
+        lodLevels = Math.max(1, manifest.lod || 1);
         tileSize = manifest.size || 0;
         wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
     } else {
-        patches = [{ start: 0, count: n }];
+        patches = [{ start: 0, count: n, levels: [[0, n]] }];
+        lodLevels = 1;
         tileSize = 0;
         wangCodes = null;
     }
@@ -752,7 +868,13 @@ function load(buffer, manifest) {
     if (tileSize) { cam.target = [0, 0, cam.target[2]]; cam.elevation = 20; }
 
     const pos = positions.slice();
-    worker.postMessage({ type: 'init', positions: pos.buffer, patches },
+    // Every level is sorted separately: it holds a different set of splats,
+    // so it needs its own order.
+    const ranges = [];
+    for (const p of patches) {
+        for (const [start, count] of p.levels) ranges.push({ start, count });
+    }
+    worker.postMessage({ type: 'init', positions: pos.buffer, patches: ranges },
         [pos.buffer]);
 
     ui.n.textContent = n.toLocaleString() +
@@ -837,7 +959,19 @@ function frame() {
         }
     }
 
+    const S = SKIES[sky] || SKIES.none;
     gl.clear(gl.COLOR_BUFFER_BIT);
+    if (sky !== 'none') {
+        gl.useProgram(skyProg);
+        gl.bindVertexArray(skyVAO);
+        gl.uniformMatrix3fv(skyU.view, false, viewMat);
+        gl.uniform2f(skyU.focal, fy, fy);
+        gl.uniform2f(skyU.viewport, canvas.width, canvas.height);
+        gl.uniform3fv(skyU.skyTop, new Float32Array(S.top));
+        gl.uniform3fv(skyU.skyHorizon, new Float32Array(S.horizon));
+        gl.uniform3fv(skyU.ground, new Float32Array(S.ground));
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
     drawnSplats = 0; drawCalls = 0;
 
     if (splatCount && sortedReady) {
@@ -855,6 +989,8 @@ function frame() {
         gl.uniform1f(splatU.wave, Math.max(reliefScale * (tileSize || 1), 0.01));
         gl.uniform1i(splatU.subdiv, subdiv);
         gl.uniform1f(splatU.tileSize, tileSize);
+        gl.uniform3fv(splatU.fogColour, new Float32Array(S.horizon));
+        gl.uniform1f(splatU.fogDensity, S.fog * fogScale);
 
         // Cells far to near, composited with 'over'. Splats are sorted within
         // a patch and never across cells, which is the approximation that
@@ -864,16 +1000,18 @@ function frame() {
             const dx = c.x - b.eye[0], dy = c.y - b.eye[1], dz = c.z - b.eye[2];
             const z = dx * b.forward[0] + dy * b.forward[1] + dz * b.forward[2];
             if (z < -tileSize) continue;
+            const dist = Math.hypot(dx, dy, c.z - b.eye[2]);
             const sx = dx * b.right[0] + dy * b.right[1] + dz * b.right[2];
             const sy = dx * b.down[0] + dy * b.down[1] + dz * b.down[2];
             const reach = tileSize * 1.5 + Math.max(z, 0.01) *
                 Math.tan(cam.fov * Math.PI / 360) * (canvas.width / canvas.height);
             if (Math.abs(sx) > reach || Math.abs(sy) > reach) continue;
-            visible.push({ c, z });
+            visible.push({ c, z, dist });
         }
         visible.sort((p, q) => q.z - p.z);
 
-        for (const { c } of visible) {
+        lodCounts = new Array(lodLevels).fill(0);
+        for (const { c, dist } of visible) {
             const p = patches[c.patch];
             if (!p || !p.count) continue;
             gl.uniform2f(splatU.cellXY, c.x, c.y);
@@ -888,10 +1026,25 @@ function frame() {
             } else {
                 gl.uniform1f(splatU.edgeMark, 0.0);
             }
+            const [lvl, wA, wB] = lodFor(dist);
+            lodCounts[lvl]++;
             gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
-            gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, p.start * 4);
-            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, p.count);
-            drawnSplats += p.count; drawCalls++;
+            for (const [li, w] of [[lvl, wA], [lvl + 1, wB]]) {
+                if (w <= 0.001 || li >= p.levels.length) continue;
+                const [start, count] = p.levels[li];
+                if (!count) continue;
+                gl.uniform1f(splatU.fade, w);
+                if (showLodColours) {
+                    const c2 = LOD_RGB[li % LOD_RGB.length];
+                    gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
+                    gl.uniform1f(splatU.tintAmount, 0.6);
+                } else {
+                    gl.uniform1f(splatU.tintAmount, 0.0);
+                }
+                gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, start * 4);
+                gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+                drawnSplats += count; drawCalls++;
+            }
         }
     }
 
@@ -917,6 +1070,11 @@ function frame() {
         ui.drawn.textContent = drawnSplats.toLocaleString() +
             (drawCalls > 1 ? ` / ${drawCalls} cells` : '');
         ui.sortms.textContent = sortMs ? sortMs.toFixed(0) + ' ms' : '—';
+        if (ui.lodinfo) {
+            ui.lodinfo.textContent = lodLevels < 2 ? 'not in this file'
+                : (lodOn ? lodCounts.map((n, i) => `L${i}:${n}`).join('  ')
+                    : 'off, all cells at level 0');
+        }
         frames = 0; fpsTime = now;
     }
     ui.azim.textContent = cam.azimuth.toFixed(0) + '\u00b0';
@@ -925,6 +1083,8 @@ function frame() {
     ui.cmd.textContent = `--azim ${cam.azimuth.toFixed(0)} ` +
         `--elev ${cam.elevation.toFixed(0)} --dist ${cam.distance.toFixed(2)} ` +
         `--fov ${cam.fov.toFixed(0)}`;
+
+    if (orbiting) cam.azimuth = (cam.azimuth + 0.08) % 360;
 
     requestAnimationFrame(frame);
 }
@@ -1011,6 +1171,28 @@ ui.used.addEventListener('input', (e) => {
     regenerate();
 });
 ui.tints.addEventListener('change', (e) => { showTints = e.target.checked; });
+ui.lod.addEventListener('change', (e) => { lodOn = e.target.checked; });
+ui.sky.addEventListener('change', (e) => { sky = e.target.value; });
+ui.fog.addEventListener('input', (e) => {
+    fogScale = +e.target.value;
+    ui.fogn.textContent = fogScale.toFixed(2);
+});
+ui.orbit.addEventListener('change', (e) => { orbiting = e.target.checked; });
+for (const [id, elev, dist] of [['viewGround', 3, 8], ['viewWalk', 12, 6],
+['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
+    document.getElementById(id).addEventListener('click', () => {
+        cam.elevation = elev;
+        cam.distance = (tileSize || 1) * dist;
+        cam.target = [0, 0, cam.target[2]];
+    });
+}
+ui.lodcolours.addEventListener('change', (e) => {
+    showLodColours = e.target.checked;
+});
+ui.lodbase.addEventListener('input', (e) => {
+    lodBase = +e.target.value;
+    ui.lodbasen.textContent = `${lodBase} tiles`;
+});
 ui.subdiv.addEventListener('input', (e) => {
     const v = +e.target.value;
     setTimeout(reportSeams, 0);

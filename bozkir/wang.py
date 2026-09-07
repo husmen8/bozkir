@@ -63,34 +63,52 @@ def region_weights(xy, size, blend=0.0):
     return w / total
 
 
-def build_tile(patches, size, blend=0.0, up_axis=2, min_weight=0.02):
+def build_tile(patches, size, blend=0.0, up_axis=2, min_weight=0.02,
+               labels=None):
     """Assemble one tile from four patches, one per edge.
 
     `patches` is (north, east, south, west). Each is a Splats already
-    centred on the origin in the ground plane. Each contributes the
-    Gaussians falling in its own triangle, with opacity scaled by weight so
-    a feathered diagonal fades rather than cuts.
+    centred on the origin in the ground plane, and each contributes the
+    Gaussians falling in its own region.
+
+    Without `labels` the regions are the four triangles, feathered across
+    the diagonals by `blend`. Feathering blurs the join; it cannot hide a
+    change of material.
+
+    With `labels` - a region image from bozkir.graphcut - the boundary has
+    already been placed where the patches agree, so the assignment is a
+    hard lookup and needs no feathering.
     """
     plane = [i for i in range(3) if i != up_axis]
     parts = []
 
-    for region, p in enumerate(patches):
-        if not len(p):
-            continue
-        w = region_weights(p.xyz[:, plane], size, blend)[:, region]
-        keep = w > min_weight
-        if not keep.any():
-            continue
-        part = p.subset(keep)
-        part.opacity = (part.opacity * w[keep]).astype(np.float32)
-        parts.append(part)
+    if labels is not None:
+        from .graphcut import label_at
+        for region, p in enumerate(patches):
+            if not len(p):
+                continue
+            keep = label_at(p, labels, size, up_axis) == region
+            if keep.any():
+                parts.append(p.subset(keep))
+    else:
+        for region, p in enumerate(patches):
+            if not len(p):
+                continue
+            w = region_weights(p.xyz[:, plane], size, blend)[:, region]
+            keep = w > min_weight
+            if not keep.any():
+                continue
+            part = p.subset(keep)
+            part.opacity = (part.opacity * w[keep]).astype(np.float32)
+            parts.append(part)
 
     if not parts:
         raise ValueError("no patch contributed any Gaussians")
     return merge(*parts)
 
 
-def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2):
+def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
+                   cut=False, resolution=160, band=0.14, verbose=False):
     """Every tile over the given edge colours.
 
     `h_patches` supplies the colours available on north and south edges,
@@ -98,20 +116,41 @@ def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2):
     tiles, which is the smallest set guaranteeing a tile exists for any
     pair of already-placed neighbours.
 
+    With `cut`, each tile's diagonals are placed by graph cut rather than
+    left straight. Every patch is rendered once and the images reused, so
+    the cost is one minimum cut per diagonal per tile.
+
     Returns (tiles, codes) where codes[i] is (n, e, s, w) for tiles[i].
     """
     if len(h_patches) < 1 or len(v_patches) < 1:
         raise ValueError("need at least one patch per axis")
+
+    images = None
+    if cut:
+        from .graphcut import render_patch, tile_labels
+        images = {}
+        for tag, group in (("h", h_patches), ("v", v_patches)):
+            for i, p in enumerate(group):
+                images[(tag, i)] = render_patch(p, size, resolution, up_axis)[0]
 
     tiles, codes = [], []
     for n in range(len(h_patches)):
         for e in range(len(v_patches)):
             for s in range(len(h_patches)):
                 for w in range(len(v_patches)):
+                    labels = None
+                    if cut:
+                        labels = tile_labels(
+                            [images[("h", n)], images[("v", e)],
+                             images[("h", s)], images[("v", w)]],
+                            size=size, band=band)
                     tiles.append(build_tile(
                         (h_patches[n], v_patches[e], h_patches[s], v_patches[w]),
-                        size, blend, up_axis))
+                        size, blend, up_axis, labels=labels))
                     codes.append((n, e, s, w))
+                    if verbose:
+                        print(f"    tile {len(tiles):>3} ({n}{e}{s}{w}): "
+                              f"{len(tiles[-1]):,} splats")
     return tiles, codes
 
 

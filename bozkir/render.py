@@ -19,13 +19,15 @@ MIN_ALPHA = 1.0 / 255.0
 
 
 def project_orthographic(s, view_axis=1, up_sign=-1, resolution=800,
-                         bounds_pct=(1.0, 99.0), sh_degree=None):
+                         bounds_pct=(1.0, 99.0), sh_degree=None, bounds=None):
     """Project a scene to screen space along one world axis.
 
     view_axis   which world axis the camera looks down (0=x, 1=y, 2=z)
     up_sign     +1 or -1: which end of that axis the camera sits on
     resolution  pixels along the longer screen dimension
     bounds_pct  percentile range used for framing, to ignore floaters
+    bounds      ((lo_a, lo_b), (hi_a, hi_b)) to frame explicitly instead.
+                Needed when several scenes must land on the same pixel grid.
     sh_degree   evaluate colour at this SH degree (None = whatever the scene has)
 
     Returns a dict of per-splat screen-space quantities, already culled to
@@ -34,8 +36,12 @@ def project_orthographic(s, view_axis=1, up_sign=-1, resolution=800,
     ax = [i for i in range(3) if i != view_axis]        # the two screen axes
     scene = s.truncate_sh(sh_degree) if sh_degree is not None else s
 
-    lo = np.percentile(s.xyz[:, ax], bounds_pct[0], axis=0)
-    hi = np.percentile(s.xyz[:, ax], bounds_pct[1], axis=0)
+    if bounds is not None:
+        lo = np.asarray(bounds[0], dtype=np.float64)
+        hi = np.asarray(bounds[1], dtype=np.float64)
+    else:
+        lo = np.percentile(s.xyz[:, ax], bounds_pct[0], axis=0)
+        hi = np.percentile(s.xyz[:, ax], bounds_pct[1], axis=0)
     span = np.maximum(hi - lo, 1e-6)
 
     # Square pixels: one scale for both axes, set by the longer side.
