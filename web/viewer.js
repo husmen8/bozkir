@@ -6,7 +6,7 @@
 // implementations comparable means the slow Python renderer can serve as
 // ground truth when this one looks wrong.
 
-const BUILD = 'bozkir viewer 1.7 (sky and fog)';
+const BUILD = 'bozkir viewer 1.9 (free fly)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -211,7 +211,11 @@ void main() {
       d = 0.5 - abs(uv.x);
       ec = uv.x > 0.0 ? uEdgeE : uEdgeW;
     }
-    float w = 1.0 - smoothstep(0.0, uEdgeMark, d);
+    // Tiles carry Gaussians past their own square, so d goes negative out
+    // there. Without this those all take full edge colour, the band looks
+    // several times its width, and two neighbours paint the same strip in
+    // different colours.
+    float w = d < 0.0 ? 0.0 : 1.0 - smoothstep(0.0, uEdgeMark, d);
     float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
     rgb = mix(vec3(0.55 + 0.45 * grey), ec, w);
   }
@@ -312,7 +316,8 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
     'relief', 'reliefn', 'reliefscale', 'reliefscalen',
     'band', 'bandn', 'subdiv', 'subdivn', 'seam',
     'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
-    'sky', 'fog', 'fogn', 'orbit']) {
+    'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
+    'speedn']) {
     ui[id] = document.getElementById(id);
 }
 
@@ -408,8 +413,20 @@ function makeTexture(unit, internal, w, h, format, type, pixels) {
     return t;
 }
 
-/** Orbit camera. Matches orbit_camera() in bozkir/camera.py: z is up,
- *  elevation 0 looks along the ground, 90 straight down. */
+/** The camera, in two modes.
+ *
+ *  Orbit matches orbit_camera() in bozkir/camera.py: z is up, elevation 0
+ *  looks along the ground, 90 straight down, and the eye sits on a sphere
+ *  around a target. Good for inspecting one thing from all sides.
+ *
+ *  Fly holds the eye and turns the view instead, so you can go anywhere -
+ *  under the terrain, inside it, out to the horizon. Both modes share the
+ *  same azimuth and elevation, so switching between them keeps the view.
+ *
+ *  Elevation still stops just short of straight up or down. That is not a
+ *  restriction on where you can go: at exactly 90 the forward direction and
+ *  the world up are parallel, there is no way to say which way is right,
+ *  and the picture spins. Every camera of this shape has the same limit. */
 class Orbit {
     constructor() {
         this.target = [0, 0, 0];
@@ -417,19 +434,42 @@ class Orbit {
         this.azimuth = 45;
         this.elevation = 25;
         this.fov = 60;
+        this.fly = false;
+        this.pos = [0, 0, 0];        // eye, when flying
+        this.speed = 1;              // world units per second, when flying
     }
+
+    /** Unit vector the camera looks along. */
+    dir() {
+        const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
+        return [-Math.cos(el) * Math.cos(az), -Math.cos(el) * Math.sin(az),
+        -Math.sin(el)];
+    }
+
     eye() {
+        if (this.fly) return this.pos.slice();
         const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
         return [this.target[0] + this.distance * Math.cos(el) * Math.cos(az),
         this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
         this.target[2] + this.distance * Math.sin(el)];
     }
+
+    /** Keep the view unchanged when the mode changes. */
+    setFly(on) {
+        if (on === this.fly) return;
+        if (on) this.pos = this.eye();
+        else {
+            const e = this.pos, f = this.dir();
+            this.target = [e[0] + f[0] * this.distance, e[1] + f[1] * this.distance,
+            e[2] + f[2] * this.distance];
+        }
+        this.fly = on;
+    }
+
     basis() {
         const e = this.eye();
-        let f = [this.target[0] - e[0], this.target[1] - e[1], this.target[2] - e[2]];
-        const fl = Math.hypot(...f) || 1;
-        f = f.map(v => v / fl);
-        let up = Math.abs(f[2]) > 0.999 ? [1, 0, 0] : [0, 0, 1];
+        const f = this.dir();
+        const up = Math.abs(f[2]) > 0.999 ? [1, 0, 0] : [0, 0, 1];
         let r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2],
         f[0] * up[1] - f[1] * up[0]];
         const rl = Math.hypot(...r) || 1;
@@ -1079,7 +1119,9 @@ function frame() {
     }
     ui.azim.textContent = cam.azimuth.toFixed(0) + '\u00b0';
     ui.elev.textContent = cam.elevation.toFixed(0) + '\u00b0';
-    ui.dist.textContent = cam.distance.toFixed(2);
+    ui.dist.textContent = cam.fly
+        ? `fly @ ${cam.eye().map(v => v.toFixed(1)).join(', ')}`
+        : cam.distance.toFixed(2);
     ui.cmd.textContent = `--azim ${cam.azimuth.toFixed(0)} ` +
         `--elev ${cam.elevation.toFixed(0)} --dist ${cam.distance.toFixed(2)} ` +
         `--fov ${cam.fov.toFixed(0)}`;
@@ -1101,14 +1143,22 @@ canvas.addEventListener('pointerup', (e) => {
 });
 canvas.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    cam.azimuth = ((cam.azimuth - (e.clientX - lastX) * 0.3) % 360 + 360) % 360;
+    // Orbiting, the eye swings around a fixed point; flying, the view turns
+    // about a fixed eye. Opposite senses, same two numbers.
+    const s = cam.fly ? 0.18 : -0.3;
+    cam.azimuth = ((cam.azimuth + (e.clientX - lastX) * s) % 360 + 360) % 360;
     cam.elevation = Math.max(-89, Math.min(89,
-        cam.elevation + (e.clientY - lastY) * 0.3));
+        cam.elevation + (e.clientY - lastY) * (cam.fly ? -0.18 : 0.3)));
     lastX = e.clientX; lastY = e.clientY;
 });
 canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    cam.distance = Math.max(0.05, cam.distance * Math.exp(e.deltaY * 0.001));
+    if (cam.fly) {
+        cam.speed = Math.max(0.02, Math.min(200, cam.speed * Math.exp(-e.deltaY * 0.001)));
+        if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
+    } else {
+        cam.distance = Math.max(0.05, cam.distance * Math.exp(e.deltaY * 0.001));
+    }
 }, { passive: false });
 
 const held = new Set();
@@ -1116,8 +1166,24 @@ addEventListener('keydown', (e) => held.add(e.key.toLowerCase()));
 addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
 setInterval(() => {
     if (!held.size || !splatCount) return;
-    const step = cam.distance * 0.02;
     const b = cam.basis();
+    const fast = held.has('shift') ? 4 : 1;
+
+    if (cam.fly) {
+        // Full 3D: forward follows where you are looking, including up and down.
+        const step = cam.speed * 0.016 * fast;
+        const move = (v, s) => { for (let i = 0; i < 3; i++) cam.pos[i] += v[i] * s; };
+        if (held.has('w')) move(b.forward, step);
+        if (held.has('s')) move(b.forward, -step);
+        if (held.has('d')) move(b.right, step);
+        if (held.has('a')) move(b.right, -step);
+        if (held.has('e')) cam.pos[2] += step;
+        if (held.has('q')) cam.pos[2] -= step;
+        return;
+    }
+
+    // Orbiting, movement slides the point being orbited, along the ground.
+    const step = cam.distance * 0.02 * fast;
     const fl = Math.hypot(b.forward[0], b.forward[1]) || 1;
     const fwd = [b.forward[0] / fl, b.forward[1] / fl, 0];
     const rl = Math.hypot(b.right[0], b.right[1]) || 1;
@@ -1178,9 +1244,18 @@ ui.fog.addEventListener('input', (e) => {
     ui.fogn.textContent = fogScale.toFixed(2);
 });
 ui.orbit.addEventListener('change', (e) => { orbiting = e.target.checked; });
+ui.freefly.addEventListener('change', (e) => {
+    cam.setFly(e.target.checked);
+    ui.flynote.textContent = cam.fly
+        ? 'drag looks around, WASD flies, Q/E down and up, shift is faster, '
+        + 'scroll changes speed'
+        : 'drag orbits, WASD slides the centre, scroll zooms';
+    if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
+});
 for (const [id, elev, dist] of [['viewGround', 3, 8], ['viewWalk', 12, 6],
 ['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
     document.getElementById(id).addEventListener('click', () => {
+        if (cam.fly) { cam.setFly(false); ui.freefly.checked = false; }
         cam.elevation = elev;
         cam.distance = (tileSize || 1) * dist;
         cam.target = [0, 0, cam.target[2]];

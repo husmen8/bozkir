@@ -20,108 +20,14 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bozkir.patches import (appearance, level_patch, part_ink,  # noqa: E402
+                            pick_patches, select_similar, stratified_keep)
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.wang import (build_tile_set, layout, check_layout,  # noqa: E402
                          edge_gaussians)
-from export_splat import pack, STRIDE  # noqa: E402
+from bozkir.pack import pack, STRIDE  # noqa: E402
 from bozkir.tile import extract_patch  # noqa: E402
-from export_tileset import pick_patches, level_patch  # noqa: E402
-
-
-def stratified_keep(p, budget, size, up_axis=2):
-    """Pick `budget` splats spread evenly over the tile.
-
-    Taking the highest-ink splats globally concentrates them wherever the
-    tile happens to be brightest, leaves holes elsewhere, and - because
-    every tile is built from the same few source patches - keeps nearly the
-    same set in every tile, so the tiling looks repetitive at distance.
-
-    Binning the tile into a grid and keeping the best from each bin fixes
-    both: coverage stays even, and each tile keeps what is locally
-    distinctive about it rather than what is globally brightest.
-    """
-    if budget >= len(p):
-        return np.arange(len(p))
-
-    ink = part_ink(p)
-    plane = [i for i in range(3) if i != up_axis]
-    g = max(int(np.ceil(np.sqrt(budget))), 1)
-    xy = p.xyz[:, plane]
-    ij = np.clip(((xy + size / 2.0) / max(size, 1e-9) * g).astype(int), 0, g - 1)
-    cell = ij[:, 0] * g + ij[:, 1]
-
-    # Best splat per occupied bin, found by sorting once.
-    order = np.lexsort((-ink, cell))
-    first = np.ones(len(order), dtype=bool)
-    first[1:] = cell[order][1:] != cell[order][:-1]
-    keep = order[first]
-
-    if len(keep) > budget:                      # more bins than budget
-        keep = keep[np.argsort(-ink[keep])[:budget]]
-    elif len(keep) < budget:                    # empty bins, top up globally
-        rest = np.setdiff1d(np.argsort(-ink), keep, assume_unique=False)
-        keep = np.concatenate([keep, rest[:budget - len(keep)]])
-    return np.sort(keep)
-
-
-def part_ink(p):
-    """How much screen a splat can cover: its area times its opacity.
-
-    Used to decide which splats survive into a coarser level. Keeping the
-    largest and most opaque preserves the overall look while dropping the
-    fine detail that a distant tile could not resolve anyway.
-    """
-    sc = np.sort(p.scale, axis=1)
-    return sc[:, 2] * sc[:, 1] * p.opacity
-
-
-def appearance(p):
-    """A patch's colour signature: per-channel mean and spread.
-
-    Two patches with similar signatures blend where they meet. Two that do
-    not - pale cobbles against dark wet rock - show the diagonal seam no
-    matter how wide the feather, because the change is in the material
-    rather than in the cut.
-    """
-    rgb = p.base_rgb
-    return np.concatenate([rgb.mean(axis=0), rgb.std(axis=0)])
-
-
-def select_similar(cands, k, weight=1.0):
-    """Choose k patches that score well and look like each other.
-
-    `weight` trades appearance against score: 0 ignores appearance and takes
-    the top k by score alone.
-
-    The seed is not simply the best-scoring patch. On a beach the highest
-    score can easily be sea foam, and seeding on an outlier drags the whole
-    set toward it. The seed is the candidate that is both good and typical -
-    closest to the middle of what the scene actually looks like.
-    """
-    if weight <= 0 or len(cands) <= k:
-        return cands[:k]
-
-    feats = [appearance(c[2]) for c in cands]
-    scores = np.array([c[0] for c in cands], dtype=np.float64)
-    scores = scores / max(scores.max(), 1e-9)
-
-    centre = np.mean(feats, axis=0)
-    typicality = np.array([float(np.linalg.norm(f - centre)) for f in feats])
-    picked = [int(np.argmax(scores - weight * typicality))]
-
-    while len(picked) < k:
-        ref = np.mean([feats[i] for i in picked], axis=0)
-        best, best_val = None, -1e30
-        for i in range(len(cands)):
-            if i in picked:
-                continue
-            d = float(np.linalg.norm(feats[i] - ref))
-            val = scores[i] - weight * d
-            if val > best_val:
-                best, best_val = i, val
-        picked.append(best)
-    return [cands[i] for i in picked]
 
 
 def main():
@@ -161,6 +67,31 @@ def main():
                          "a bush - instead of the flattest ground. Only the "
                          "rim has to be flat; the middle is where the graph "
                          "cut works and where an object can sit.")
+    ap.add_argument("--cover-margin", type=float, default=0.10,
+                    help="how close to --min-cover an estimate has to be "
+                         "before the slow render is used to settle it. "
+                         "Larger is more accurate and much slower; 0 never "
+                         "renders.")
+    ap.add_argument("--min-cover", type=float, default=0.80,
+                    help="reject a patch that covers less than this fraction "
+                         "of its square; a patch with a hole in it tiles "
+                         "with holes")
+    ap.add_argument("--tile-overhang", type=float, default=None,
+                    help="how far past its square a finished tile may reach, "
+                         "as a fraction of the tile. Default is automatic: a "
+                         "couple of splat widths, which is what it takes to "
+                         "cover the seam. Much more and neighbours draw the "
+                         "same strip twice and swap which is in front as the "
+                         "camera turns; much less and the strip is bare.")
+    ap.add_argument("--overhang-splats", type=float, default=2.5,
+                    help="with automatic overhang: how many splat widths")
+    ap.add_argument("--extract-margin", type=float, default=0.35,
+                    help="cut candidates this much larger than the tile, so "
+                         "levelling has material to rotate in from")
+    ap.add_argument("--min-separation", type=float, default=1.0,
+                    help="how far apart chosen patches must sit, as a "
+                         "fraction of --size. Lower it when a scene is small "
+                         "and too few candidates survive.")
     ap.add_argument("--edge-flat", type=float, default=0.20,
                     help="with --features: how much relief the rim may have, "
                          "as a fraction of the tile")
@@ -192,7 +123,11 @@ def main():
     chosen = pick_patches(s, args.size, max(need * 4, 12), up, args.stride,
                           thickness, args.max_tilt, args.max_below,
                           features=args.features, edge_flat=args.edge_flat,
-                          edge_margin=args.edge_margin)
+                          edge_margin=args.edge_margin,
+                          min_separation=args.min_separation,
+                          min_cover=args.min_cover,
+                         cover_margin=args.cover_margin,
+                          extract_margin=args.extract_margin)
     if len(chosen) < need:
         raise SystemExit(f"  only {len(chosen)} patches passed, need {need}")
     if args.patches:
@@ -217,17 +152,24 @@ def main():
     print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "
           f"{'tilt':>7} {'rim':>6} {'mid':>6} {'mean rgb':>18}")
     for i, (sc, (x, y), p, info) in enumerate(chosen[:need]):
-        if args.max_per_tile and len(p) > args.max_per_tile:
-            ink = p.scale.max(axis=1) * p.opacity
-            keep = np.argpartition(ink, -args.max_per_tile)[-args.max_per_tile:]
-            p = p.subset(np.sort(keep))
-        p, tilt = level_patch(p, up)
+        # Level the wider cut so rotation has material to draw in from,
+        # then take the tile-sized middle of the result.
+        p, tilt = level_patch(info.get("wide", p), up)
         # Centre on the origin so every tile is assembled in the same frame.
         plane = [j for j in range(3) if j != up]
         off = np.zeros(3, dtype=np.float32)
         off[plane] = p.xyz[:, plane].mean(axis=0)
         q = p.subset(np.arange(len(p)))
         q.xyz = (q.xyz - off).astype(np.float32)
+
+        # The cap goes here, not before levelling: levelling reads the wide
+        # cut, so anything trimmed off the narrow one is simply picked up
+        # again and the cap does nothing. Spread the survivors rather than
+        # taking the brightest, or the tile ends up dense in one corner.
+        if args.max_per_tile and len(q) > args.max_per_tile:
+            q = q.subset(stratified_keep(q, args.max_per_tile,
+                                         args.size * (1.0 + args.extract_margin),
+                                         up))
         # The overhang left by levelling is kept: a Gaussian just outside
         # the square still covers ground just inside, and trimming it opens
         # a gap along every edge. label_at gives those a well defined
@@ -279,6 +221,43 @@ def main():
     # caps the count at N0 / 4^i; retraining is not available here, so each
     # level keeps the most visible splats of the level above instead -
     # largest area times opacity. Same budget, coarser selection.
+    # The wide cut exists so levelling has material; a finished tile only
+    # needs enough overhang to cover the seam. Keeping all of it means every
+    # boundary strip is drawn by both neighbours, and they swap which is in
+    # front as the camera turns. Cutting it to nothing leaves the strip bare,
+    # because a Gaussian centred just outside still covers ground just in.
+    #
+    # The amount that works is a couple of splat widths - a distance set by
+    # the material, not by how big the tile happens to be.
+    # Whether a Gaussian outside the square is worth keeping depends on how
+    # far it reaches, and that varies: sizes have a long tail, and the big
+    # ones cover the most ground. A single distance keeps the small ones
+    # that barely matter and drops the large ones that do, so each Gaussian
+    # is allowed its own reach instead.
+    plane2 = [j for j in range(3) if j != up]
+    trimmed = []
+    for t in tiles:
+        if args.tile_overhang is not None:
+            reach = args.size * (0.5 + args.tile_overhang)
+            keep = np.all(np.abs(t.xyz[:, plane2]) <= reach, axis=1)
+        else:
+            out = np.abs(t.xyz[:, plane2]).max(axis=1) - args.size / 2.0
+            keep = out <= args.overhang_splats * t.scale.max(axis=1)
+        trimmed.append(t.subset(keep))
+
+    before = sum(len(t) for t in tiles)
+    after = sum(len(t) for t in trimmed)
+    if args.tile_overhang is not None:
+        how = f"a flat {args.tile_overhang:.1%} of the tile"
+    else:
+        out = np.concatenate([np.abs(t.xyz[:, plane2]).max(axis=1)
+                              - args.size / 2.0 for t in trimmed])
+        how = (f"{args.overhang_splats:g} of each Gaussian's own width "
+               f"(up to {max(out.max(), 0) / args.size:.1%} of the tile)")
+    print(f"  overhang: {how}")
+    print(f"  trimmed {before:,} -> {after:,} splats ({after / before:.0%})")
+    tiles = trimmed
+
     parts, meta, cursor = [], [], 0
     total_levels = 0
     for t, c in zip(tiles, codes):

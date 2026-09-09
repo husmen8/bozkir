@@ -26,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.graphcut import render_patch  # noqa: E402
-from export_tileset import pick_patches, level_patch  # noqa: E402
-from export_wang import appearance  # noqa: E402
+from bozkir.patches import appearance, level_patch, pick_patches  # noqa: E402
 
 
 def main():
@@ -46,6 +45,22 @@ def main():
                          "a bush - instead of the flattest ground. Only the "
                          "rim has to be flat; the middle is where the graph "
                          "cut works and where an object can sit.")
+    ap.add_argument("--cover-margin", type=float, default=0.10,
+                    help="how close to --min-cover an estimate has to be "
+                         "before the slow render is used to settle it. "
+                         "Larger is more accurate and much slower; 0 never "
+                         "renders.")
+    ap.add_argument("--min-cover", type=float, default=0.80,
+                    help="reject a patch that covers less than this fraction "
+                         "of its square; a patch with a hole in it tiles "
+                         "with holes")
+    ap.add_argument("--extract-margin", type=float, default=0.35,
+                    help="cut candidates this much larger than the tile, so "
+                         "levelling has material to rotate in from")
+    ap.add_argument("--min-separation", type=float, default=1.0,
+                    help="how far apart chosen patches must sit, as a "
+                         "fraction of --size. Lower it when a scene is small "
+                         "and too few candidates survive.")
     ap.add_argument("--edge-flat", type=float, default=0.20,
                     help="with --features: how much relief the rim may have, "
                          "as a fraction of the tile")
@@ -67,11 +82,24 @@ def main():
     cands = pick_patches(s, args.size, args.count, up, args.stride,
                          thickness, args.max_tilt, args.max_below,
                          features=args.features, edge_flat=args.edge_flat,
-                         edge_margin=args.edge_margin)
+                         edge_margin=args.edge_margin,
+                         min_separation=args.min_separation,
+                         min_cover=args.min_cover,
+                         cover_margin=args.cover_margin,
+                         extract_margin=args.extract_margin)
 
     thumbs, rows = [], []
     for i, (score, (x, y), p, info) in enumerate(cands):
-        p, tilt = level_patch(p, up)
+        # Level the wider cut so rotation has material to draw in from,
+        # then take the tile-sized middle of the result.
+        p, tilt = level_patch(info.get("wide", p), up)
+        # Centre on the ground plane the way export_wang does, so the
+        # thumbnail shows the square that actually becomes a tile.
+        plane2 = [j for j in range(3) if j != up]
+        off = np.zeros(3, dtype=np.float32)
+        off[plane2] = p.xyz[:, plane2].mean(axis=0)
+        p = p.subset(np.arange(len(p)))
+        p.xyz = (p.xyz - off).astype(np.float32)
         rgb, alpha = render_patch(p, args.size, args.res, up)
         # Show coverage, so a patch full of holes is obvious.
         thumbs.append(np.clip(rgb * alpha[..., None], 0, 1))

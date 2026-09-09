@@ -22,256 +22,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bozkir.patches import (clip_slab, ground_level, level_patch,  # noqa: E402
+                            pick_patches, score_patch)
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.tile import extract_patch  # noqa: E402
 from bozkir.transform import rotate, quat_between  # noqa: E402
-from export_splat import pack, STRIDE  # noqa: E402
-
-
-def ground_level(h, thickness):
-    """Height of the ground within a patch.
-
-    Not a low percentile: reconstructions leave junk below the surface, and
-    a percentile follows it down. The ground is the densest thin horizontal
-    layer, so take the tallest bin of a histogram instead. Foliage above is
-    diffuse and never out-votes it.
-    """
-    lo, hi = np.percentile(h, [1, 99])
-    if hi - lo < 1e-6:
-        return float(lo)
-    bins = max(int((hi - lo) / max(thickness / 4.0, 1e-6)), 8)
-    counts, edges = np.histogram(h, bins=bins, range=(lo, hi))
-    k = int(np.argmax(counts))
-    return float((edges[k] + edges[k + 1]) / 2.0)
-
-
-def mass_below(p, up_axis, g, thickness, below=0.25):
-    """Fraction of a column that sits under the layer called 'ground'.
-
-    The histogram vote picks the densest horizontal layer, which under a
-    thick tree is the canopy rather than the dirt. Nothing should be beneath
-    the ground, so a large fraction here means the wrong layer won. This is
-    a local test: unlike comparing against a global height it works on
-    terrain with real relief, where the ground is not near zero.
-    """
-    h = p.xyz[:, up_axis]
-    return float((h < g - thickness * below).mean())
-
-
-def clip_slab(p, up_axis, thickness, below=0.25):
-    """Keep a slab around the ground, discarding whatever stands on it.
-
-    GSWT cuts a full column and keeps every Gaussian regardless of height,
-    which suits a flat exemplar. On a captured outdoor scene the column runs
-    from the dirt up through a whole tree, and a tree does not tile.
-    """
-    h = p.xyz[:, up_axis]
-    g = ground_level(h, thickness)
-    keep = (h >= g - thickness * below) & (h <= g + thickness)
-    return p.subset(keep), g
-
-
-def band_stats(p, up_axis, size, margin=0.22):
-    """Relief and tilt measured separately for the edge band and the middle.
-
-    A tile can carry a boulder or a bush and still tile, as long as its
-    edges stay flat: the edge strips are what two neighbouring tiles have to
-    agree on, and the graph cut only ever moves boundaries in the interior.
-    Judging the whole patch at once throws away every interesting square,
-    which is why the terrain ends up as the same flat ground repeated.
-
-    Returns (edge_relief, edge_tilt, interior_relief).
-    """
-    plane = [i for i in range(3) if i != up_axis]
-    h = p.xyz[:, up_axis]
-    r = np.max(np.abs(p.xyz[:, plane]), axis=1) / max(size / 2.0, 1e-9)
-    edge = r > 1.0 - margin
-    mid = ~edge
-
-    def relief(sel):
-        if sel.sum() < 50:
-            return 0.0
-        lo, hi = np.percentile(h[sel], [5, 95])
-        return float(hi - lo)
-
-    # Tilt is about whether the ground at the rim is level, so the plane is
-    # fitted to the lower part of the band only. Fitting the whole band
-    # measures the shape of a shell as tall as the slab, which says nothing
-    # about the ground and reports a near-random angle once the slab is
-    # thick enough to hold anything standing up.
-    tilt = 90.0
-    if edge.sum() >= 50:
-        eh = h[edge]
-        low = eh <= np.percentile(eh, 40.0)
-        q = p.subset(np.flatnonzero(edge)[low])
-        if len(q) >= 30:
-            d = q.xyz - q.xyz.mean(axis=0)
-            _, evecs = np.linalg.eigh((d.T @ d) / len(d))
-            n = evecs[:, 0]
-            tilt = float(np.degrees(np.arccos(np.clip(abs(n[up_axis]), 0, 1))))
-
-    return relief(edge), tilt, relief(mid)
-
-
-def patch_tilt(p, up_axis):
-    """Angle between a patch's own surface normal and the scene's up axis."""
-    if len(p) < 50:
-        return 90.0
-    d = p.xyz - p.xyz.mean(axis=0)
-    _, evecs = np.linalg.eigh((d.T @ d) / len(d))
-    n = evecs[:, 0]
-    return float(np.degrees(np.arccos(np.clip(abs(n[up_axis]), 0, 1))))
-
-
-def level_patch(p, up_axis):
-    """Rotate a patch so its own ground is horizontal, then drop it to zero.
-
-    Tiles are laid on a common plane, so each has to agree about which way
-    is flat. Without this, patches cut from a sloping scene meet at a step.
-    """
-    if len(p) < 50:
-        return p, 0.0
-    d = p.xyz - p.xyz.mean(axis=0)
-    _, evecs = np.linalg.eigh((d.T @ d) / len(d))
-    n = evecs[:, 0]
-    if n[up_axis] < 0:
-        n = -n
-
-    target = np.zeros(3, dtype=np.float32)
-    target[up_axis] = 1.0
-    tilt = float(np.degrees(np.arccos(np.clip(abs(n[up_axis]), 0, 1))))
-    if tilt > 0.5:
-        p = rotate(p, quat_between(n, target))
-
-    drop = np.zeros(3, dtype=np.float32)
-    drop[up_axis] = np.median(p.xyz[:, up_axis])
-    out = p.subset(np.arange(len(p)))
-    out.xyz = (out.xyz - drop).astype(np.float32)
-    return out, tilt
-
-
-def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
-    """How much a patch looks like tileable ground. Higher is better.
-
-    Three things are wanted: enough splats to render, a surface that is
-    flat rather than a wall or an object, and coverage spread across the
-    whole square rather than clustered in one corner.
-    """
-    if len(p) < 2000:
-        return -1.0, {}
-
-    plane = [i for i in range(3) if i != up_axis]
-    h = p.xyz[:, up_axis]
-    lo, hi = np.percentile(h, [5, 95])
-    relief = float(hi - lo)
-
-    # How flat the surface actually is, independent of how thick the slab
-    # was cut. A patch that is mostly a tree trunk fails this even if the
-    # slab clipped it to the right thickness.
-    d = p.xyz - p.xyz.mean(axis=0)
-    ev = np.linalg.eigvalsh((d.T @ d) / len(d))
-    planarity = float(ev[0] / max(ev[2], 1e-30))
-
-    # Occupancy on an 8x8 grid: a patch with a hole in it will not tile.
-    g = 8
-    ij = np.clip(((p.xyz[:, plane] - p.xyz[:, plane].min(axis=0))
-                  / max(size, 1e-6) * g).astype(int), 0, g - 1)
-    filled = len(np.unique(ij[:, 0] * g + ij[:, 1])) / (g * g)
-
-    density = len(p) / (size * size)
-    flatness = 1.0 / (1.0 + relief / max(size, 1e-6))
-
-    edge_rel, edge_tilt, mid_rel = band_stats(p, up_axis, size, edge_margin)
-    info = {"splats": len(p), "relief": relief, "filled": filled,
-            "planarity": planarity, "edge_relief": edge_rel,
-            "edge_tilt": edge_tilt, "interior_relief": mid_rel}
-
-    if features:
-        # Reward what stands in the middle, punish anything at the rim.
-        # The scoring above does the opposite, which is correct for a plain
-        # ground tile and wrong for one meant to carry something.
-        interest = 1.0 + 3.0 * mid_rel / max(size, 1e-9)
-        rim = 1.0 + 12.0 * edge_rel / max(size, 1e-9)
-        return float(filled * np.log1p(density) * interest / rim), info
-
-    return float(filled * flatness * np.log1p(density)
-                 / (1.0 + 20.0 * planarity)), info
-
-
-def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
-                 max_tilt=12.0, max_below=0.5, features=False,
-                 edge_flat=0.10, edge_margin=0.22, verbose=True):
-    """Search the ground plane for the k best non-overlapping patches."""
-    plane = [i for i in range(3) if i != up_axis]
-    lo = np.percentile(s.xyz[:, plane], 2, axis=0)
-    hi = np.percentile(s.xyz[:, plane], 98, axis=0)
-
-    step = size * stride
-    xs = np.arange(lo[0] + size / 2, hi[0] - size / 2 + 1e-6, step)
-    ys = np.arange(lo[1] + size / 2, hi[1] - size / 2 + 1e-6, step)
-    if len(xs) == 0 or len(ys) == 0:
-        raise SystemExit(f"scene is smaller than one {size} patch")
-
-    cands = []
-    rejected = {"sparse": 0, "buried": 0, "tilt": 0, "rim": 0, "score": 0}
-    for x in xs:
-        for y in ys:
-            p = extract_patch(s, [x, y], size, up_axis=up_axis)
-            if len(p) < 2000:
-                rejected["sparse"] += 1
-                continue
-            below = mass_below(p, up_axis, ground_level(p.xyz[:, up_axis],
-                                                        thickness), thickness)
-            p, g = clip_slab(p, up_axis, thickness)
-            if below > max_below:
-                rejected["buried"] += 1
-                continue
-            tilt = (band_stats(p, up_axis, size, edge_margin)[1] if features
-                    else patch_tilt(p, up_axis))
-            if tilt > max_tilt:
-                rejected["tilt"] += 1
-                continue
-            sc, info = score_patch(p, up_axis, size, features, edge_margin)
-            if features and info["edge_relief"] > edge_flat * size:
-                rejected["rim"] += 1
-                continue
-            if sc <= 0:
-                rejected["score"] += 1
-                continue
-            info["ground"] = g
-            info["tilt"] = tilt
-            info["below"] = below
-            cands.append((sc, (float(x), float(y)), p, info))
-    if verbose or not cands:
-        print(f"  searched {len(xs)}x{len(ys)} positions, "
-              f"{len(cands)} viable")
-        print(f"  rejected: {rejected['sparse']} too sparse, "
-              f"{rejected['buried']} ground buried "
-              f"(>{max_below:.0%} of the column below it), "
-              f"{rejected['tilt']} too tilted (>{max_tilt:.0f} deg), "
-              f"{rejected['rim']} rim not flat, "
-              f"{rejected['score']} low score")
-    if not cands:
-        raise SystemExit(
-            "  nothing passed. The counts above say which filter to loosen:\n"
-            "    too sparse   -> larger --size, or higher --radius-pct\n"
-            "    ground buried-> thicker --thickness, or higher --max-below\n"
-            "    too tilted   -> higher --max-tilt, or the region is a slope\n"
-            "    rim not flat -> higher --edge-flat, or a smaller --size")
-
-    cands.sort(key=lambda c: -c[0])
-
-    chosen = []
-    for sc, (x, y), p, info in cands:
-        # Keep patches apart so the set has genuinely different content.
-        if any(abs(x - cx) < size and abs(y - cy) < size
-               for _, (cx, cy), _, _ in chosen):
-            continue
-        chosen.append((sc, (x, y), p, info))
-        if len(chosen) >= k:
-            break
-    return chosen
+from bozkir.pack import pack, STRIDE  # noqa: E402
 
 
 def main():
@@ -294,6 +51,22 @@ def main():
     ap.add_argument("--edge-margin", type=float, default=0.22,
                     help="with --features: how wide the rim is, as a fraction "
                          "of the tile")
+    ap.add_argument("--cover-margin", type=float, default=0.10,
+                    help="how close to --min-cover an estimate has to be "
+                         "before the slow render is used to settle it. "
+                         "Larger is more accurate and much slower; 0 never "
+                         "renders.")
+    ap.add_argument("--min-cover", type=float, default=0.80,
+                    help="reject a patch that covers less than this fraction "
+                         "of its square; a patch with a hole in it tiles "
+                         "with holes")
+    ap.add_argument("--extract-margin", type=float, default=0.35,
+                    help="cut candidates this much larger than the tile, so "
+                         "levelling has material to rotate in from")
+    ap.add_argument("--min-separation", type=float, default=1.0,
+                    help="how far apart chosen patches must be, in tiles. "
+                         "Keeps the set varied, but on a small scene it "
+                         "prunes most of what passed the filters.")
     ap.add_argument("--max-below", type=float, default=0.5,
                     help="reject a patch when more than this fraction of its "
                          "column lies under the detected ground, which means "
@@ -320,7 +93,13 @@ def main():
     print(f"  cutting {args.tiles} patches of {args.size} x {args.size}, "
           f"slab {thickness:.2f} thick")
     chosen = pick_patches(s, args.size, args.tiles, up, args.stride,
-                          thickness, args.max_tilt, args.max_below)
+                          thickness, args.max_tilt, args.max_below,
+                          features=args.features, edge_flat=args.edge_flat,
+                          edge_margin=args.edge_margin,
+                          min_separation=args.min_separation,
+                         min_cover=args.min_cover,
+                         cover_margin=args.cover_margin,
+                         extract_margin=args.extract_margin)
     if len(chosen) < args.tiles:
         print(f"  only {len(chosen)} patches passed; loosen --max-tilt, "
               f"raise --radius-pct, or shrink --size")

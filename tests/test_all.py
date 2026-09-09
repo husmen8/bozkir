@@ -27,6 +27,9 @@ from bozkir.render import rasterize_rgba, over, flatten        # noqa: E402
 from bozkir.tile import (extract_patch, translate, merge,      # noqa: E402
                          grid, render_global, render_tiled, seam_camera)
 from bozkir.scene import SceneConfig, config_from_args           # noqa: E402
+from bozkir.pack import pack, STRIDE                             # noqa: E402
+from bozkir.patches import (band_stats, clip_slab, coverage,     # noqa: E402
+                            pick_patches, score_patch)
 from bozkir.wang import (region_weights, build_tile,             # noqa: E402
                          build_tile_set, layout, check_layout,
                          edge_gaussians)
@@ -754,6 +757,467 @@ def test_layout_is_aperiodic_and_uses_the_whole_set():
     assert not np.array_equal(g, layout(codes, 32, 32, seed=2))
 
 
+# ---------------------------------------------------------- graphcut.py
+
+def _blobs(seed, r=96):
+    """A texture with structure a cut can route around."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:r, 0:r]
+    img = np.zeros((r, r, 3))
+    for _ in range(80):
+        cx, cy = rng.uniform(0, r, 2)
+        rad = rng.uniform(r * 0.03, r * 0.09)
+        img[((xx - cx) ** 2 + (yy - cy) ** 2) < rad ** 2] = rng.uniform(0.25, 0.8, 3)
+    return np.clip(img + rng.normal(0, 0.03, (r, r, 3)) + 0.25, 0, 1)
+
+
+def test_two_label_cut_respects_its_constraints():
+    from bozkir.graphcut import two_label_cut
+    r = 64
+    a, b = _blobs(2, r), _blobs(7, r)
+    take_a = np.zeros((r, r), bool); take_a[:, :3] = True
+    take_b = np.zeros((r, r), bool); take_b[:, -3:] = True
+    use_b = two_label_cut(a, b, take_a, take_b)
+    assert not use_b[:, :3].any()
+    assert use_b[:, -3:].all()
+
+
+def test_two_label_cut_beats_a_straight_one():
+    from bozkir.graphcut import two_label_cut, cut_cost
+    r = 96
+    a, b = _blobs(2, r), _blobs(7, r)
+    take_a = np.zeros((r, r), bool); take_a[:, :3] = True
+    take_b = np.zeros((r, r), bool); take_b[:, -3:] = True
+    use_b = two_label_cut(a, b, take_a, take_b)
+    straight = np.zeros((r, r), bool); straight[:, r // 2:] = True
+    assert cut_cost(a, b, use_b) < 0.8 * cut_cost(a, b, straight)
+
+
+def test_cut_routes_around_a_feature():
+    """The point of the method: go round the stone, not through it."""
+    from bozkir.graphcut import two_label_cut
+    r = 96
+    yy, xx = np.mgrid[0:r, 0:r]
+    base = RNG.random((r, r, 3)) * 0.15 + 0.35
+    a, b = base.copy(), base.copy()
+    disc = ((xx - r * 0.5) ** 2 + (yy - r * 0.5) ** 2) < (r * 0.16) ** 2
+    b[disc] = [0.95, 0.9, 0.2]
+    take_a = np.zeros((r, r), bool); take_a[:, :3] = True
+    take_b = np.zeros((r, r), bool); take_b[:, -3:] = True
+    use_b = two_label_cut(a, b, take_a, take_b)
+
+    def boundary(m):
+        e = np.zeros_like(m)
+        e[:, :-1] |= m[:, :-1] != m[:, 1:]
+        e[:-1, :] |= m[:-1, :] != m[1:, :]
+        return e
+
+    assert (boundary(use_b) & disc).sum() == 0
+
+
+def test_tile_labels_keep_the_edges_pure():
+    """A cut leaking into an edge strip would break tile matching."""
+    from bozkir.graphcut import tile_labels, edge_purity
+    labels = tile_labels([_blobs(s, 96) for s in (2, 7, 11, 19)],
+                         size=1.0, band=0.14)
+    for name, purity in edge_purity(labels).items():
+        assert purity == 1.0, (name, purity)
+    assert set(np.unique(labels)) == {0, 1, 2, 3}
+
+
+def test_per_gaussian_overhang_beats_a_flat_distance():
+    """Sizes have a long tail, and the big ones cover the most ground.
+
+    One distance for everything keeps the small Gaussians that barely
+    matter and cuts the large ones that do.
+    """
+    from bozkir.graphcut import render_patch
+    size = 1.5
+
+    def over(seed, n=4000):
+        r = np.random.default_rng(seed)
+        xy = r.uniform(-size / 2 * 1.35, size / 2 * 1.35, (n, 2))
+        s = scene(np.concatenate([xy, r.normal(0, 0.02, (n, 1))], 1),
+                  scale=np.exp(r.normal(-5.2, 0.8, (n, 3))).astype(np.float32),
+                  opacity=np.full(n, 0.8, np.float32))
+        s.sh_dc[:] = r.normal(0, 0.4, (n, 3))
+        return s
+
+    tiles, _ = build_tile_set([over(1), over(2)], [over(3), over(4)],
+                              size, cut=True, resolution=48, band=0.14)
+    t0 = tiles[0]
+
+    def cover(keep):
+        a = render_patch(t0.subset(keep), size, 96)[1]
+        return float(np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]]).mean())
+
+    everything = cover(np.ones(len(t0), bool))
+    out = np.abs(t0.xyz[:, :2]).max(axis=1) - size / 2
+    per_splat = cover(out <= 2.5 * t0.scale.max(axis=1))
+    flat = cover(np.all(np.abs(t0.xyz[:, :2]) <= size * 0.509, axis=1))
+
+    assert per_splat >= flat, (per_splat, flat)
+    assert everything - per_splat < 0.02, (everything, per_splat)
+    # and it must actually be cheaper than keeping the lot
+    assert (out <= 2.5 * t0.scale.max(axis=1)).mean() < 0.9
+
+
+def test_overhang_needed_is_set_by_splat_size_not_tile_size():
+    """Coverage saturates after a couple of splat widths; overlap does not.
+
+    Too little and the boundary strip is bare. Too much and both neighbours
+    draw it, then swap which is in front as the camera turns.
+    """
+    from bozkir.graphcut import render_patch
+    size = 1.5
+
+    def over(seed, n=4000):
+        r = np.random.default_rng(seed)
+        xy = r.uniform(-size / 2 * 1.35, size / 2 * 1.35, (n, 2))
+        s = scene(np.concatenate([xy, r.normal(0, 0.02, (n, 1))], 1),
+                  scale=np.full((n, 3), 0.010, np.float32),
+                  opacity=np.full(n, 0.8, np.float32))
+        s.sh_dc[:] = r.normal(0, 0.4, (n, 3))
+        return s
+
+    tiles, _ = build_tile_set([over(1), over(2)], [over(3), over(4)],
+                              size, cut=True, resolution=48, band=0.14)
+    w = float(np.median(np.concatenate([t.scale.max(1) for t in tiles])))
+
+    def edge_cover(frac):
+        reach = size * (0.5 + frac)
+        t = tiles[0].subset(np.all(np.abs(tiles[0].xyz[:, :2]) <= reach, axis=1))
+        a = render_patch(t, size, 96)[1]
+        return float(np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]]).mean())
+
+    bare = edge_cover(0.0)
+    enough = edge_cover(2.5 * w / size)
+    lavish = edge_cover(0.30)
+    assert enough > bare, (bare, enough)
+    # Past a couple of splat widths there is nothing more to gain.
+    assert abs(lavish - enough) < 0.02, (enough, lavish)
+
+
+def test_trimming_overhang_keeps_edges_matching():
+    """A finished tile needs some overhang to cover the seam, not all of it.
+
+    Keeping the whole wide cut means both neighbours draw the same boundary
+    strip and fight over which is in front as the camera moves.
+    """
+    size = 1.5
+
+    def over(seed, n=5000):
+        r = np.random.default_rng(seed)
+        xy = r.uniform(-size / 2 * 1.35, size / 2 * 1.35, (n, 2))
+        s = scene(np.concatenate([xy, r.normal(0, 0.02, (n, 1))], 1),
+                  scale=np.full((n, 3), 0.008, np.float32),
+                  opacity=np.full(n, 0.7, np.float32))
+        s.sh_dc[:] = r.normal(0, 0.4, (n, 3))
+        return s
+
+    tiles, codes = build_tile_set([over(1), over(2)], [over(3), over(4)],
+                                  size, cut=True, resolution=48, band=0.14)
+    full = np.mean([len(t) for t in tiles])
+    for overhang in (0.30, 0.06, 0.0):
+        reach = size * (0.5 + overhang)
+        cut = [t.subset(np.all(np.abs(t.xyz[:, :2]) <= reach, axis=1))
+               for t in tiles]
+        for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+            groups = {}
+            for t, c in zip(cut, codes):
+                groups.setdefault(c[col], []).append(
+                    edge_gaussians(t, size, edge=edge, margin=0.03))
+            for g in groups.values():
+                for other in g:
+                    assert np.array_equal(g[0], other), (overhang, edge)
+    tight = np.mean([len(t.subset(
+        np.all(np.abs(t.xyz[:, :2]) <= size * 0.56, axis=1))) for t in tiles])
+    assert tight < full, "trimming should actually remove something"
+
+
+def test_overflowing_patches_do_not_break_edge_matching():
+    """Levelling rotates a patch, so it no longer fits the tile square.
+
+    Clamping the overflow to the nearest border pixel silently breaks
+    matching: that pixel's label differs between tiles, so the same
+    Gaussian is kept in one and dropped in another.
+    """
+    size = 1.5
+
+    def over(seed, factor, n=6000):
+        r = np.random.default_rng(seed)
+        xy = r.uniform(-size / 2 * factor, size / 2 * factor, (n, 2))
+        s = scene(np.concatenate([xy, r.normal(0, 0.03, (n, 1))], 1),
+                  scale=np.full((n, 3), 0.006, np.float32),
+                  opacity=np.full(n, 0.7, np.float32))
+        s.sh_dc[:] = r.normal(0, 0.4, (n, 3))
+        return s
+
+    for factor in (1.0, 1.15, 1.4):
+        h = [over(1, factor), over(2, factor)]
+        v = [over(3, factor), over(4, factor)]
+        tiles, codes = build_tile_set(h, v, size, cut=True, resolution=64,
+                                      band=0.14)
+        for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+            groups = {}
+            for t, c in zip(tiles, codes):
+                groups.setdefault(c[col], []).append(
+                    edge_gaussians(t, size, edge=edge, margin=0.03))
+            for g in groups.values():
+                for other in g:
+                    assert np.array_equal(g[0], other), (factor, edge)
+
+        # The overhang has to survive, or every edge gets a bare strip.
+        beyond = (np.abs(tiles[0].xyz[:, :2]).max(axis=1) > size / 2).mean()
+        if factor > 1.0:
+            assert beyond > 0.02, (factor, beyond)
+
+
+def test_graph_cut_tiles_still_match_at_their_edges():
+    from bozkir.graphcut import render_patch  # noqa: F401
+    h = [_exemplar(0, n=8000), _exemplar(1, n=8000)]
+    v = [_exemplar(2, n=8000), _exemplar(3, n=8000)]
+    tiles, codes = build_tile_set(h, v, 1.0, cut=True, resolution=64, band=0.14)
+    assert len(tiles) == 16
+    for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+        groups = {}
+        for t, c in zip(tiles, codes):
+            groups.setdefault(c[col], []).append(
+                edge_gaussians(t, 1.0, edge=edge))
+        for g in groups.values():
+            for other in g:
+                assert np.array_equal(g[0], other), edge
+
+
+# ---------------------------------------------------------------- pack.py
+
+def test_stratified_keep_respects_its_budget_and_spreads():
+    """The splat cap has to actually cap, and not pile up in one corner."""
+    from bozkir.patches import stratified_keep
+    size, n = 2.0, 60_000
+    xy = RNG.uniform(-size / 2, size / 2, (n, 2))
+    s = scene(np.concatenate([xy, RNG.normal(0, 0.02, (n, 1))], 1),
+              scale=np.exp(RNG.normal(-4, 0.7, (n, 3))).astype(np.float32),
+              opacity=RNG.uniform(0.2, 0.9, n).astype(np.float32))
+    for budget in (50_000, 10_000, 2_000):
+        keep = stratified_keep(s, budget, size)
+        assert len(keep) <= budget
+        q = s.subset(keep)
+        g = 12
+        ij = np.clip(((q.xyz[:, :2] + size / 2) / size * g).astype(int), 0, g - 1)
+        filled = len(np.unique(ij[:, 0] * g + ij[:, 1])) / (g * g)
+        assert filled > 0.9, (budget, filled)
+
+
+
+def test_splat_pack_round_trips():
+    """Positions and scales exact; colour and rotation within quantisation."""
+    n = 500
+    q = RNG.normal(size=(n, 4)).astype(np.float32)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    s = scene(RNG.normal(0, 3, (n, 3)),
+              opacity=RNG.random(n).astype(np.float32),
+              scale=np.exp(RNG.normal(-3, 1, (n, 3))).astype(np.float32),
+              rot=q)
+    s.sh_dc[:] = RNG.normal(0, 0.5, (n, 3))
+
+    buf = pack(s).reshape(-1, STRIDE)
+    assert buf.shape == (n, 32)
+
+    pos = buf[:, 0:12].copy().view(np.float32).reshape(-1, 3)
+    scl = buf[:, 12:24].copy().view(np.float32).reshape(-1, 3)
+    assert np.array_equal(pos, s.xyz)
+    assert np.array_equal(scl, s.scale)
+
+    rgba = buf[:, 24:28].astype(np.float32) / 255.0
+    assert np.abs(rgba[:, :3] - s.base_rgb).max() < 1.5 / 255
+    assert np.abs(rgba[:, 3] - s.opacity).max() < 1.5 / 255
+
+    rot = (buf[:, 28:32].astype(np.float32) - 128.0) / 128.0
+    rot /= np.linalg.norm(rot, axis=1, keepdims=True)
+    dots = np.abs((rot * s.rot).sum(axis=1))       # q and -q are one rotation
+    assert np.degrees(2 * np.arccos(np.clip(dots, 0, 1))).max() < 1.5
+
+
+def test_subsampled_coverage_matches_a_full_render():
+    """Rendering a subset and undoing the density has to give the same answer.
+
+    Per pixel, not overall: correcting the average instead reports a
+    half-empty patch as full, which is the case the check exists for.
+    """
+    from bozkir.patches import rendered_coverage
+    size = 1.5
+    for kind in ("full", "half"):
+        n = 60_000
+        xy = RNG.uniform(-size / 2, size / 2, (n, 2))
+        if kind == "half":
+            xy[:, 0] = np.abs(xy[:, 0]) - size / 2
+        s = scene(np.concatenate([xy, RNG.normal(0, 0.02, (n, 1))], 1),
+                  opacity=RNG.uniform(0.3, 0.9, n).astype(np.float32),
+                  scale=np.exp(RNG.normal(-4.3, 0.6, (n, 3))).astype(np.float32))
+        full = rendered_coverage(s, size, cap=n + 1)
+        fast = rendered_coverage(s, size, cap=8000)
+        assert abs(full - fast) < 0.05, (kind, full, fast)
+    assert rendered_coverage(scene(np.zeros((0, 3))), size) == 0.0
+
+
+def test_estimating_coverage_first_picks_the_same_patches():
+    """The fast path has to agree with the slow one, or it is not a shortcut."""
+    from bozkir.patches import pick_patches
+    size, n = 1.5, 120_000
+    xy = RNG.uniform(-5, 5, (n, 2))
+    hole = np.zeros(len(xy), bool)
+    for _ in range(10):
+        c = RNG.uniform(-5, 5, 2)
+        hole |= np.linalg.norm(xy - c, axis=1) < 1.0
+    xy = xy[~hole]
+    m = len(xy)
+    s = scene(np.concatenate([xy, RNG.normal(0, 0.03, (m, 1))], 1),
+              opacity=RNG.uniform(0.3, 0.9, m).astype(np.float32),
+              scale=np.exp(RNG.normal(-4.3, 0.6, (m, 3))).astype(np.float32))
+
+    def centres(margin):
+        got = pick_patches(s, size, 5, 2, stride=0.6, thickness=0.4,
+                           max_tilt=25, min_separation=0.5, min_cover=0.8,
+                           cover_margin=margin, verbose=False)
+        return [(round(x, 3), round(y, 3)) for _, (x, y), _, _ in got]
+
+    assert centres(99.0) == centres(0.10)
+
+
+# ------------------------------------------------------- feature tiles
+
+def test_rim_tilt_does_not_depend_on_slab_thickness():
+    """Fitting a plane to the whole rim band measures a shell, not ground.
+
+    Once the slab is thick enough to hold anything standing up, that fit
+    returns a near-random angle and every candidate gets rejected.
+    """
+    from bozkir.patches import band_stats, clip_slab
+    from bozkir.tile import extract_patch
+
+    size, n = 1.5, 120_000
+    xyz = np.stack([RNG.uniform(-5, 5, n), RNG.uniform(-5, 5, n),
+                    RNG.normal(0, 0.03, n)], 1)
+    s = scene(xyz, scale=np.full((n, 3), 0.01, np.float32),
+              opacity=np.full(n, 0.7, np.float32))
+
+    tilts = []
+    for thickness in (0.3, 0.6, 1.0, 1.5):
+        p = extract_patch(s, [3.0, 3.0], size, up_axis=2)
+        p, _ = clip_slab(p, 2, thickness)
+        tilts.append(band_stats(p, 2, size)[1])
+    assert max(tilts) < 5.0, tilts
+
+
+def test_coverage_separates_a_solid_patch_from_a_holed_one():
+    """Bin occupancy calls a half-empty patch full; area coverage does not."""
+    size, n = 1.5, 40_000
+    solid = scene(np.concatenate(
+        [RNG.uniform(-size / 2, size / 2, (n, 2)),
+         RNG.normal(0, 0.02, (n, 1))], 1),
+        scale=np.full((n, 3), 0.02, np.float32),
+        opacity=np.full(n, 0.8, np.float32))
+    # Same splats, same density, half the area.
+    xy = RNG.uniform(-size / 2, size / 2, (n, 2))
+    xy[:, 0] = np.abs(xy[:, 0]) - size / 2
+    holed = scene(np.concatenate([xy, RNG.normal(0, 0.02, (n, 1))], 1),
+                  scale=np.full((n, 3), 0.02, np.float32),
+                  opacity=np.full(n, 0.8, np.float32))
+
+    assert coverage(solid, size) > 0.95
+    assert coverage(holed, size) < coverage(solid, size)
+    assert coverage(scene(np.zeros((0, 3))), size) == 0.0
+
+
+def test_feature_scoring_prefers_something_in_the_middle():
+    from bozkir.patches import score_patch
+    from bozkir.tile import extract_patch
+
+    size, n = 1.5, 200_000
+    ground = np.stack([RNG.uniform(-5, 5, n), RNG.uniform(-5, 5, n),
+                       RNG.normal(0, 0.02, n)], 1)
+    m = 30_000
+    a = RNG.uniform(0, 2 * np.pi, m)
+    rad = RNG.uniform(0, 1, m) ** 0.5 * 0.45
+    rock = np.stack([rad * np.cos(a), rad * np.sin(a),
+                     RNG.uniform(0, 0.5, m)], 1)
+    s = scene(np.vstack([ground, rock]),
+              scale=np.full((n + m, 3), 0.01, np.float32),
+              opacity=np.full(n + m, 0.7, np.float32))
+
+    bare = extract_patch(s, [3.5, 3.5], size, up_axis=2)
+    middle = extract_patch(s, [0.0, 0.0], size, up_axis=2)
+    rim = extract_patch(s, [size / 2, 0.0], size, up_axis=2)
+
+    flat_bare = score_patch(bare, 2, size, features=False)[0]
+    flat_mid = score_patch(middle, 2, size, features=False)[0]
+    feat_bare = score_patch(bare, 2, size, features=True)[0]
+    feat_mid = score_patch(middle, 2, size, features=True)[0]
+    feat_rim = score_patch(rim, 2, size, features=True)[0]
+
+    assert flat_bare > flat_mid, "flat scoring should prefer bare ground"
+    assert feat_mid > feat_bare, "feature scoring should prefer the object"
+    assert feat_mid > feat_rim, "an object on the rim must not win"
+
+
+# --------------------------------------------------------------- presets
+
+def test_presets_save_replay_and_yield_to_explicit_flags():
+    import argparse
+    import json
+    import tempfile
+    from bozkir.presets import add_preset_args, apply as apply_preset
+
+    def parser():
+        ap = argparse.ArgumentParser()
+        ap.add_argument("path", type=Path)
+        ap.add_argument("--size", type=float, default=1.5)
+        ap.add_argument("--cut", action="store_true")
+        ap.add_argument("--lod", type=int, default=4)
+        add_preset_args(ap)
+        return ap
+
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.json"
+        apply_preset(parser(), ["x.ply", "--size", "2.5", "--cut",
+                                "--lod", "3", "--save-preset", "demo"], path=f)
+        assert json.loads(f.read_text())["demo"]["size"] == 2.5
+
+        a = apply_preset(parser(), ["y.ply", "--preset", "demo"], path=f)
+        assert a.size == 2.5 and a.cut and a.lod == 3
+
+        # An explicit flag has to beat the preset, or overriding is impossible.
+        b = apply_preset(parser(), ["y.ply", "--preset", "demo",
+                                    "--size", "9.0"], path=f)
+        assert b.size == 9.0
+
+        try:
+            apply_preset(parser(), ["y.ply", "--preset", "nope"], path=f)
+            raise AssertionError("unknown preset should fail")
+        except SystemExit:
+            pass
+
+
+def test_preset_keys_a_script_lacks_are_skipped():
+    """One preset per scene has to work with every script."""
+    import argparse
+    import json
+    import tempfile
+    from bozkir.presets import add_preset_args, apply as apply_preset
+
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.json"
+        f.write_text(json.dumps({"s": {"size": 3.0, "cut": True,
+                                       "not_an_option_here": 7}}))
+        ap = argparse.ArgumentParser()
+        ap.add_argument("path", type=Path)
+        ap.add_argument("--size", type=float, default=1.5)
+        add_preset_args(ap)
+        a = apply_preset(ap, ["x.ply", "--preset", "s"], path=f)
+        assert a.size == 3.0
+
+
 # ----------------------------------------------------------- integration
 
 def test_align_then_render_end_to_end():
@@ -767,6 +1231,63 @@ def test_align_then_render_end_to_end():
     assert p["kept"] > 1000
     assert (img.sum(axis=2) > 0.01).mean() > 0.05          # something is drawn
     assert np.isfinite(img).all()
+
+
+def test_every_script_declares_the_flags_it_reads():
+    """Catch args.something with no matching add_argument.
+
+    A helper gains a parameter, the callers gain a flag, and one script gets
+    missed. Nothing notices until that script is run with the right options.
+    """
+    import ast as _ast
+    root = Path(__file__).resolve().parents[1]
+    problems = []
+    for path in sorted((root / "scripts").glob("*.py")):
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        declared = set()
+        for node in _ast.walk(tree):
+            if (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "add_argument"):
+                for a in node.args:
+                    if isinstance(a, _ast.Constant) and isinstance(a.value, str):
+                        declared.add(a.value.lstrip("-").replace("-", "_"))
+                for kw in node.keywords:
+                    if kw.arg == "dest" and isinstance(kw.value, _ast.Constant):
+                        declared.add(kw.value.value)
+        # Flags the shared helpers attach.
+        declared |= {"raw", "clean", "radius_pct", "floater_std",
+                     "max_extent_pct", "sh", "up_axis", "flip", "no_cache",
+                     "preset", "save_preset", "list_presets"}
+
+        used = {n.attr for n in _ast.walk(tree)
+                if isinstance(n, _ast.Attribute)
+                and isinstance(n.value, _ast.Name) and n.value.id == "args"}
+        missing = sorted(used - declared)
+        if missing:
+            problems.append(f"{path.name}: {', '.join(missing)}")
+    assert not problems, "flags read but never declared -> " + "; ".join(problems)
+
+
+def test_every_script_builds_its_parser():
+    """Run each script with --help.
+
+    Importing a module does not build its argument parser, so an import
+    check misses a flag declared twice, a bad default, or a helper that
+    attaches an option something else already added. Those only surface
+    when the script is actually run.
+    """
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    failures = []
+    for path in sorted((root / "scripts").glob("*.py")):
+        r = subprocess.run([sys.executable, str(path), "--help"],
+                           cwd=root, capture_output=True, text=True,
+                           timeout=120)
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout).strip().splitlines()[-1:]
+            failures.append(f"{path.name}: {' '.join(tail)}")
+    assert not failures, "; ".join(failures)
 
 
 def test_every_script_imports():
