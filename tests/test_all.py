@@ -825,6 +825,78 @@ def test_tile_labels_keep_the_edges_pure():
     assert set(np.unique(labels)) == {0, 1, 2, 3}
 
 
+def test_cutting_at_the_square_leaves_nothing_overlapping():
+    """A Gaussian in the neighbour's half is a strip both tiles draw.
+
+    Reaching over on two sides does not help - the tile that reaches still
+    lands on ground its neighbour covers. Only cutting at the square leaves
+    nothing shared, and it costs almost no coverage because Gaussians still
+    spread across the join from their own side.
+    """
+    from bozkir.graphcut import render_patch
+    from bozkir.tile import translate, merge
+    size = 1.5
+
+    def over(seed, n=5000):
+        r = np.random.default_rng(seed)
+        xy = r.uniform(-size / 2 * 1.35, size / 2 * 1.35, (n, 2))
+        s = scene(np.concatenate([xy, r.normal(0, 0.02, (n, 1))], 1),
+                  scale=np.exp(r.normal(-4.6, 0.5, (n, 3))).astype(np.float32),
+                  opacity=np.full(n, 0.8, np.float32))
+        s.sh_dc[:] = r.normal(0, 0.4, (n, 3))
+        return s
+
+    tiles, codes = build_tile_set([over(1), over(2)], [over(3), over(4)],
+                                  size, cut=True, resolution=48, band=0.14)
+    h = size / 2
+
+    def trim(t):
+        return t.subset(np.abs(t.xyz[:, :2]).max(axis=1) <= h)
+
+    cut = [trim(t) for t in tiles]
+
+    # Two tiles side by side: neither may put a Gaussian in the other's half.
+    a, b = cut[0], translate(cut[1], [size, 0, 0])
+    assert not (a.xyz[:, 0] > h + 1e-6).any()
+    assert not (b.xyz[:, 0] < h - 1e-6).any()
+
+    # And the join has to be as well covered as it would be if both tiles
+    # reached over it. An absolute threshold would only measure how dense
+    # the test patches happen to be.
+    def join_cover(left, right):
+        m = merge(left, translate(right, [size, 0, 0]))
+        band = m.subset(np.abs(m.xyz[:, 0] - h) < 0.12)
+        band = band.subset(np.arange(len(band)))
+        band.xyz = (band.xyz - np.float32([h, 0, 0])).astype(np.float32)
+        return float(render_patch(band, 0.24, 64)[1].mean())
+
+    def both_sides(t):
+        allow = 2.5 * t.scale.max(axis=1)
+        return t.subset((np.abs(t.xyz[:, 0]) <= h + allow)
+                        & (np.abs(t.xyz[:, 1]) <= h + allow))
+
+    # How much coverage the join loses depends on how dense the tiles are:
+    # at the ~50k a real tile carries it is about a tenth of a percent, but
+    # these test tiles are sparse enough that the same cut shows up larger.
+    one = join_cover(cut[0], cut[1])
+    two = join_cover(both_sides(tiles[0]), both_sides(tiles[1]))
+    assert one > two - 0.15, (one, two)
+
+    # And the overlapping version really does share ground, which is the
+    # thing being avoided.
+    ov = both_sides(tiles[0])
+    assert (np.abs(ov.xyz[:, 0]) > h).any()
+
+    for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+        groups = {}
+        for t, c in zip(cut, codes):
+            groups.setdefault(c[col], []).append(
+                edge_gaussians(t, size, edge=edge, margin=0.03))
+        for g in groups.values():
+            for other in g:
+                assert np.array_equal(g[0], other), edge
+
+
 def test_per_gaussian_overhang_beats_a_flat_distance():
     """Sizes have a long tail, and the big ones cover the most ground.
 
@@ -1159,6 +1231,42 @@ def test_feature_scoring_prefers_something_in_the_middle():
     assert flat_bare > flat_mid, "flat scoring should prefer bare ground"
     assert feat_mid > feat_bare, "feature scoring should prefer the object"
     assert feat_mid > feat_rim, "an object on the rim must not win"
+
+
+def test_axis_split_keeps_both_directions_alike():
+    """One set of patches runs north-south, the other east-west.
+
+    Splitting by score puts the odd one out on a single axis, so every
+    boundary running that way is made of different material from the ones
+    across it - a grain in the grid that shows as the scene changing
+    character each quarter turn.
+    """
+    from bozkir.patches import balanced_split, appearance
+
+    def flat(mean, n=1500):
+        r = np.random.default_rng(int(mean[0] * 1000))
+        s = scene(r.uniform(-0.75, 0.75, (n, 3)),
+                  scale=np.full((n, 3), 0.01, np.float32),
+                  opacity=np.full(n, 0.7, np.float32))
+        s.sh_dc[:] = (np.float32(mean) + r.normal(0, 0.01, (n, 3)) - 0.5) / SH_C0
+        return s
+
+    # three alike and one clearly darker, as a real scene gives
+    ps = [flat([0.36, 0.36, 0.35]), flat([0.35, 0.36, 0.34]),
+          flat([0.35, 0.35, 0.33]), flat([0.31, 0.32, 0.31])]
+    f = [appearance(p) for p in ps]
+    by_score = float(np.linalg.norm(np.mean(f[:2], axis=0)
+                                    - np.mean(f[2:], axis=0)))
+    (h, v), gap = balanced_split(ps, 2)
+
+    assert len(h) == 2 and len(v) == 2
+    assert {id(x) for x in h} | {id(x) for x in v} == {id(x) for x in ps}
+    assert gap < by_score, (gap, by_score)
+
+    # already-alike patches should not be made worse
+    same = [flat([0.35, 0.35, 0.35]) for _ in range(4)]
+    _, g2 = balanced_split(same, 2)
+    assert g2 < 0.02
 
 
 # --------------------------------------------------------------- presets

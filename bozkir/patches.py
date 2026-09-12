@@ -43,6 +43,121 @@ def mass_below(p, up_axis, g, thickness, below=0.25):
     h = p.xyz[:, up_axis]
     return float((h < g - thickness * below).mean())
 
+def ground_field(p, size, up_axis=2, grid=12, low_pct=20.0):
+    """A coarse height map of the ground across a patch.
+
+    clip_slab uses one level for the whole patch, which is fine on a flat
+    square and wrong on anything that undulates: a flat band cuts into the
+    high ground and takes air over the low ground. Estimating a height per
+    bin instead lets the band follow the surface.
+
+    Bins take a low percentile rather than a minimum, since reconstructions
+    leave junk underneath, and the result is median-filtered because a bin
+    holding only a few splats is not to be trusted. Empty bins are filled
+    from the patch as a whole.
+
+    Returns a (grid, grid) array of heights.
+    """
+    plane = [i for i in range(3) if i != up_axis]
+    half = size / 2.0
+    xy = p.xyz[:, plane]
+    h = p.xyz[:, up_axis]
+
+    ij = np.clip(((xy + half) / max(size, 1e-9) * grid).astype(int), 0, grid - 1)
+    key = ij[:, 0] * grid + ij[:, 1]
+
+    field = np.full(grid * grid, np.nan)
+    order = np.lexsort((h, key))
+    ks, starts = np.unique(key[order], return_index=True)
+    ends = np.append(starts[1:], len(order))
+    for k, a, b in zip(ks, starts, ends):
+        if b - a >= 8:
+            field[k] = np.percentile(h[order[a:b]], low_pct)
+
+    field = field.reshape(grid, grid)
+    fallback = float(np.nanmedian(field)) if np.isfinite(field).any() \
+        else float(np.percentile(h, low_pct))
+    field = np.where(np.isfinite(field), field, fallback)
+
+    # 3x3 median, so one odd bin cannot pull the surface with it.
+    padded = np.pad(field, 1, mode="edge")
+    stack = np.stack([padded[i:i + grid, j:j + grid]
+                      for i in range(3) for j in range(3)])
+    return np.median(stack, axis=0)
+
+
+def height_above_ground(p, field, size, up_axis=2):
+    """Each Gaussian's height above the local ground, by bilinear lookup."""
+    plane = [i for i in range(3) if i != up_axis]
+    grid = field.shape[0]
+    half = size / 2.0
+    u = np.clip((p.xyz[:, plane[0]] + half) / max(size, 1e-9) * grid - 0.5,
+                0, grid - 1)
+    v = np.clip((p.xyz[:, plane[1]] + half) / max(size, 1e-9) * grid - 0.5,
+                0, grid - 1)
+    i0, j0 = u.astype(int), v.astype(int)
+    i1 = np.minimum(i0 + 1, grid - 1)
+    j1 = np.minimum(j0 + 1, grid - 1)
+    fu, fv = u - i0, v - j0
+    g = (field[i0, j0] * (1 - fu) * (1 - fv) + field[i1, j0] * fu * (1 - fv)
+         + field[i0, j1] * (1 - fu) * fv + field[i1, j1] * fu * fv)
+    return p.xyz[:, up_axis] - g
+
+
+def clip_surface(p, up_axis, size, above, below=0.25, grid=12,
+                 drop_standing=None):
+    """Keep a thin skin following the ground, rather than a flat slab.
+
+    On a slope or a mound, a flat band beheads whatever stands on the high
+    side and swallows air on the low side. Following the surface keeps the
+    same thickness of ground everywhere.
+
+    A band alone still slices anything standing on the ground: a bush half a
+    metre tall leaves its bottom few centimetres behind, which reads as a
+    stump. With `drop_standing`, bins whose mass sits clear of the ground by
+    more than that fraction are treated as occupied and pared back to a much
+    thinner layer, so the object goes rather than being cut off at the
+    ankles.
+
+    Returns (patch, field).
+    """
+    field = ground_field(p, size, up_axis, grid)
+    d = height_above_ground(p, field, size, up_axis)
+    keep = (d >= -below * above) & (d <= above)
+
+    if drop_standing is not None:
+        occupied = standing_fraction(p, size, up_axis, above, grid) > drop_standing
+        plane = [i for i in range(3) if i != up_axis]
+        half = size / 2.0
+        ij = np.clip(((p.xyz[:, plane] + half) / max(size, 1e-9)
+                      * grid).astype(int), 0, grid - 1)
+        here = occupied[ij[:, 0], ij[:, 1]]
+        # In an occupied bin, keep only what is unambiguously ground.
+        keep &= ~here | (d <= above * 0.2)
+
+    return p.subset(keep), field
+
+
+def standing_fraction(p, size, up_axis=2, above=0.3, grid=12):
+    """Per bin, how much of its mass stands clear of the local ground.
+
+    A bin near zero is bare ground. A high one has something on it - a
+    bush, a rock, a bike. Useful for deciding whether a patch is ground
+    with a feature on it or ground with a wall through it.
+    """
+    field = ground_field(p, size, up_axis, grid)
+    d = height_above_ground(p, field, size, up_axis)
+    plane = [i for i in range(3) if i != up_axis]
+    half = size / 2.0
+    ij = np.clip(((p.xyz[:, plane] + half) / max(size, 1e-9) * grid).astype(int),
+                 0, grid - 1)
+    key = ij[:, 0] * grid + ij[:, 1]
+    total = np.bincount(key, minlength=grid * grid).astype(float)
+    tall = np.bincount(key, weights=(d > above).astype(float),
+                       minlength=grid * grid)
+    return (tall / np.maximum(total, 1)).reshape(grid, grid)
+
+
 def clip_slab(p, up_axis, thickness, below=0.25):
     """Keep a slab around the ground, discarding whatever stands on it.
 
@@ -409,6 +524,41 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         print(f"  {len(cands)} viable -> {len(chosen)} after keeping centres "
               f"{gap:.2f} apart (lower --min-separation for more)")
     return chosen
+
+def balanced_split(patches, colours):
+    """Split the chosen patches into the two axes so both look alike.
+
+    One set supplies the north and south edge colours, the other east and
+    west. Taking them in score order puts the best two on one axis and the
+    rest on the other, so if any patch is darker or rougher than its
+    fellows, every boundary running one way is made of different material
+    from every boundary running the other. The grid then has a grain, and
+    the scene changes character each quarter turn of the camera.
+
+    Every way of dealing the patches into two sets is tried, and the one
+    whose halves match closest is kept. With four patches that is three
+    splits; it stays small for the sizes a tile set is ever built at.
+    """
+    import itertools
+
+    n = len(patches)
+    if n != 2 * colours or colours < 1:
+        return patches[:colours], patches[colours:2 * colours]
+
+    feats = [appearance(p) for p in patches]
+    best, best_gap = None, None
+    for combo in itertools.combinations(range(n), colours):
+        if 0 not in combo:          # each split appears twice; keep one
+            continue
+        rest = [i for i in range(n) if i not in combo]
+        gap = float(np.linalg.norm(np.mean([feats[i] for i in combo], axis=0)
+                                   - np.mean([feats[i] for i in rest], axis=0)))
+        if best_gap is None or gap < best_gap:
+            best, best_gap = (combo, rest), gap
+
+    combo, rest = best
+    return ([patches[i] for i in combo], [patches[i] for i in rest]), best_gap
+
 
 def appearance(p):
     """A patch's colour signature: per-channel mean and spread.

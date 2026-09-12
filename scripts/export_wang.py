@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.patches import (appearance, level_patch, part_ink,  # noqa: E402
+from bozkir.patches import (appearance, balanced_split,  # noqa: E402
+                            level_patch, part_ink,  # noqa: E402
                             pick_patches, select_similar, stratified_keep)
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
@@ -83,8 +84,14 @@ def main():
                          "cover the seam. Much more and neighbours draw the "
                          "same strip twice and swap which is in front as the "
                          "camera turns; much less and the strip is bare.")
-    ap.add_argument("--overhang-splats", type=float, default=2.5,
-                    help="with automatic overhang: how many splat widths")
+    ap.add_argument("--overhang-splats", type=float, default=0.0,
+                    help="how far past the square a tile may reach, in splat "
+                         "widths. Zero is the default and means no two tiles "
+                         "ever cover the same ground, which is what stops the "
+                         "shared strip swapping as the camera turns. It costs "
+                         "about a tenth of a percent of coverage at the join, "
+                         "because Gaussians still spread over it from their "
+                         "own side.")
     ap.add_argument("--extract-margin", type=float, default=0.35,
                     help="cut candidates this much larger than the tile, so "
                          "levelling has material to rotate in from")
@@ -186,8 +193,16 @@ def main():
               f"{rgb[0]:.2f} {rgb[1]:.2f} {rgb[2]:.2f}"
               f"  overhang {over:>4.0%}")
 
-    h_patches = patches[:args.colours]
-    v_patches = patches[args.colours:need]
+    # Which patches supply which axis is not arbitrary: put the odd one out
+    # on one axis and every boundary running that way is made of different
+    # material from the ones running across it.
+    (h_patches, v_patches), axis_gap = balanced_split(patches, args.colours)
+    naive = float(np.linalg.norm(
+        np.mean([appearance(p) for p in patches[:args.colours]], axis=0)
+        - np.mean([appearance(p) for p in patches[args.colours:need]], axis=0)))
+    print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
+          f"({naive:.3f} if split by score)"
+          + ("  <- the grid would have a grain" if naive > 0.05 else ""))
 
     if args.cut:
         print(f"\n  assembling tiles (graph cut, {args.cut_res}px, "
@@ -241,8 +256,20 @@ def main():
             reach = args.size * (0.5 + args.tile_overhang)
             keep = np.all(np.abs(t.xyz[:, plane2]) <= reach, axis=1)
         else:
+            # Any Gaussian of one tile sitting inside its neighbour's half is
+            # a strip both tiles draw. One of them wins, and which one flips
+            # when their depths cross - for a whole row at once when the view
+            # runs down it.
+            #
+            # Reaching over on two sides only does not help: the tile that
+            # reaches still lands on ground its neighbour also covers.
+            # Cutting at the square is the only arrangement where nothing
+            # overlaps, and it costs almost nothing, because a Gaussian
+            # centred just inside still spreads across the join from its own
+            # side.
+            allow = args.overhang_splats * t.scale.max(axis=1)
             out = np.abs(t.xyz[:, plane2]).max(axis=1) - args.size / 2.0
-            keep = out <= args.overhang_splats * t.scale.max(axis=1)
+            keep = out <= allow
         trimmed.append(t.subset(keep))
 
     before = sum(len(t) for t in tiles)
@@ -252,8 +279,9 @@ def main():
     else:
         out = np.concatenate([np.abs(t.xyz[:, plane2]).max(axis=1)
                               - args.size / 2.0 for t in trimmed])
-        how = (f"{args.overhang_splats:g} of each Gaussian's own width "
-               f"(up to {max(out.max(), 0) / args.size:.1%} of the tile)")
+        how = ("cut at the square, so no two tiles cover the same ground"
+               if args.overhang_splats <= 0 else
+               f"{args.overhang_splats:g} of each Gaussian's own width")
     print(f"  overhang: {how}")
     print(f"  trimmed {before:,} -> {after:,} splats ({after / before:.0%})")
     tiles = trimmed
