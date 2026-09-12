@@ -32,6 +32,14 @@ let patches = null;     // [{start, count}, ...]
 let order = null;       // Uint32Array, scratch for one pass
 let depths = null;      // Int32Array, scratch
 let dist = null;        // Float32Array, scratch
+// Packing constants, duplicated from merge.js rather than imported: this
+// worker is a classic worker, not a module, so it cannot import. They are
+// asserted equal in tests/test_web.mjs so the two copies cannot drift.
+const SLOT_BITS = 3;
+const INDEX_BITS = 32 - SLOT_BITS;
+const INDEX_MASK = (1 << INDEX_BITS) - 1;
+
+let groupDepth = null, groupSlot = null, groupLocal = null;
 const counts = new Uint32Array(65536);
 const starts = new Uint32Array(65536);
 
@@ -94,6 +102,87 @@ function sortPatch(p, dir, eye, out) {
     for (let i = a; i < b; i++) out[starts[depths[i]]++] = i;
 }
 
+/** One sorted stream for a merged group of cells. GSWT Section 3.4.
+ *
+ *  Where two cells straddle a boundary the camera is standing in, neither
+ *  can be drawn in front of the other and their splats have to interleave.
+ *  That means one order over the union of the group rather than one order
+ *  per cell.
+ *
+ *  GSWT builds that order by merging the cells' cached orders using stored
+ *  per-Gaussian projected depths, and falls back to a full sort only when
+ *  tiles are very close to the camera. Here the full sort is cheaper than
+ *  the merge, because the sort is a counting sort and the merge is not.
+ *  Measured on this machine, far to near, total splats in the group:
+ *
+ *      splats     k-way merge     counting sort over the union
+ *       300k          9.5 ms                3.8 ms
+ *       600k         26.8 ms                7.9 ms
+ *      1200k         76.8 ms               25.6 ms
+ *
+ *  The merge is O(n k) with a linear scan over k heads; the counting sort
+ *  is O(n) and touches memory in one pass. So the union is sorted directly
+ *  and `kwayMerge` in merge.js stays as the exact reference the tests check
+ *  this against - the same arrangement as the CPU renderer standing behind
+ *  the GPU one.
+ *
+ *  Every cell is a translated copy of its patch, and translation shifts all
+ *  of that patch's depths by the same amount, so a cell contributes its
+ *  patch's depths plus one constant. That is exact while tiles are flat and
+ *  approximate once they are warped, in the same way and for the same
+ *  reason as the live order itself.
+ *
+ *  `cells` is [{patch, start, count, offset:[x,y,z]}], at most MAX_GROUP of
+ *  them. The result packs each cell's slot in the group into the high bits
+ *  of the index so one draw call can place them all.
+ */
+function sortGroup(cells, dir, eye) {
+    const [fx, fy, fz] = dir;
+    let total = 0;
+    for (const c of cells) total += c.count;
+    const out = new Uint32Array(total);
+    if (!total) return out;
+
+    // Depths first, into a scratch big enough for the union.
+    if (!groupDepth || groupDepth.length < total) {
+        groupDepth = new Float32Array(total);
+        groupSlot = new Uint8Array(total);
+        groupLocal = new Uint32Array(total);
+    }
+    let w = 0, min = Infinity, max = -Infinity;
+    for (let s = 0; s < cells.length; s++) {
+        const c = cells[s];
+        const shift = c.offset[0] * fx + c.offset[1] * fy + c.offset[2] * fz;
+        const a = c.start, b = c.start + c.count;
+        for (let i = a; i < b; i++) {
+            const d = (positions[3 * i] - eye[0]) * fx
+                + (positions[3 * i + 1] - eye[1]) * fy
+                + (positions[3 * i + 2] - eye[2]) * fz + shift;
+            groupDepth[w] = d;
+            groupSlot[w] = s;
+            groupLocal[w] = i;
+            if (d < min) min = d;
+            if (d > max) max = d;
+            w++;
+        }
+    }
+
+    const scale = max > min ? 65535 / (max - min) : 0;
+    counts.fill(0);
+    const q = new Int32Array(total);
+    for (let i = 0; i < total; i++) {
+        const v = (groupDepth[i] - min) * scale | 0;
+        q[i] = v; counts[v]++;
+    }
+    starts[65535] = 0;
+    for (let v = 65535; v > 0; v--) starts[v - 1] = starts[v] + counts[v];
+    for (let i = 0; i < total; i++) {
+        out[starts[q[i]]++] = ((groupSlot[i] << INDEX_BITS)
+            | (groupLocal[i] & INDEX_MASK)) >>> 0;
+    }
+    return out;
+}
+
 self.onmessage = (e) => {
     const msg = e.data;
 
@@ -125,6 +214,20 @@ self.onmessage = (e) => {
             type: 'cached', views: dirs.length, dirs, stride: n,
             order: all.buffer, ms: performance.now() - t0,
         }, [all.buffer]);
+        return;
+    }
+
+    if (msg.type === 'mergeGroups') {
+        // One stream per group. Groups with a single cell are handled by
+        // the normal per-cell path and should not be sent here.
+        const t0 = performance.now();
+        const out = [], sizes = [];
+        for (const g of msg.groups) {
+            const buf = sortGroup(g, msg.forward, msg.eye);
+            out.push(buf.buffer); sizes.push(buf.length);
+        }
+        self.postMessage({ type: 'mergedGroups', orders: out, sizes,
+                           seq: msg.seq, ms: performance.now() - t0 }, out);
         return;
     }
 

@@ -6,7 +6,9 @@
 // implementations comparable means the slow Python renderer can serve as
 // ground truth when this one looks wrong.
 
-const BUILD = 'bozkir viewer 2.9 (symmetric tiebreak)';
+import { drawOrder } from './order.js';
+
+const BUILD = 'bozkir viewer 3.0 (topological tile order)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -786,7 +788,8 @@ function buildGrid() {
       const a = gridAngle * Math.PI / 180;
       const x = Math.cos(a) * lx - Math.sin(a) * ly;
       const y = Math.sin(a) * lx + Math.cos(a) * ly;
-      cells.push({ x, y, z: height(x, y), warp: tangentFrame(x, y), patch: pick });
+      cells.push({ i, j, x, y, z: height(x, y),
+                   warp: tangentFrame(x, y), patch: pick });
     }
   }
 }
@@ -1139,6 +1142,14 @@ function drawGizmo(b) {
 // optical flow and compare, which handles translation too. Rotating in
 // place needs no flow, so a direct difference is enough.
 const POP_W = 192, POP_H = 108;
+// Set each frame by the topological sort: how many pairwise constraints it
+// had, how many it declined to enforce because the eye sits in the boundary
+// plane (merging's job), and whether relief tilted planes enough to make
+// three cells disagree. A non-zero `cycles` is worth knowing about; it means
+// the sort fell back to the depth key for some cells.
+let orderStats = { cycles: 0, weak: 0, constrained: 0 };
+let cycleWarned = false;
+
 let popPrev = null, popPixels = null;
 let popRate = 0, popPeak = 0, popPeakAge = 0;
 let popLastAz = 0, popLastEl = 0, popOn = false;
@@ -1293,12 +1304,39 @@ function frame() {
       visible.push({ c, near, dist, side: Math.abs(sx) + Math.abs(sy) });
     }
 
-    // Far to near. Equal depths need a tiebreak, and it has to read the
-    // same from either side: the cell's own index runs with +x and +y, so
-    // using it draws a tied row in the right order seen from one end and
-    // backwards from the other. Distance from the middle of the view does
-    // not care which way the camera faces.
-    visible.sort((p, q) => (q.near - p.near) || (q.side - p.side));
+    // Far to near.
+    //
+    // Ranking cells by `near` alone is degenerate: when the view direction
+    // lines up with a grid axis every cell in a row projects to the same
+    // value, bit for bit, and whatever breaks the tie decides the whole row
+    // at once. Rotating through alignment then reverses nine cells in one
+    // frame, which is the row-wide repaint the pop meter sees. Measured at
+    // 27, 54 and 27 reversed pairs at 0, 89 and 90 degrees (probe_order.py).
+    //
+    // order.js replaces the ranking with one constraint per adjacent pair,
+    // decided by which side of their shared boundary plane the eye is on -
+    // a sign test, so two cells at identical depth are still separable -
+    // then topologically sorts. `near` is demoted to a tiebreak among cells
+    // that share no boundary and therefore cannot overlap, which is exactly
+    // where its degeneracy is harmless. Those three counts go to zero.
+    //
+    // What remains is a boundary the camera genuinely crosses, where the
+    // sign passes through zero and no order is right. That is merging's
+    // half of Section 3.4, and merge.js is not wired in yet.
+    //
+    // `window.bozkirTopo = false` in the console restores the old ranking,
+    // so the pop meter can be read against both without a rebuild.
+    if (window.bozkirTopo === false) {
+      visible.sort((p, q) => (q.near - p.near) || (q.side - p.side));
+    } else {
+      const vc = visible.map((v) => v.c);
+      const r = drawOrder(vc, b.eye, { key: visible.map((v) => v.near) });
+      orderStats = { cycles: r.cycles, weak: r.weak.length,
+                     constrained: r.constrained };
+      const reordered = r.order.map((k) => visible[k]);
+      visible.length = 0;
+      for (const v of reordered) visible.push(v);
+    }
 
     lodCounts = new Array(lodLevels).fill(0);
     for (const { c, dist } of visible) {
@@ -1402,6 +1440,16 @@ function frame() {
       ui.lodinfo.textContent = lodLevels < 2 ? 'not in this file'
         : (lodOn ? lodCounts.map((n, i) => `L${i}:${n}`).join('  ')
                  : 'off, all cells at level 0');
+    }
+    // No DOM id for these, so they go to the console rather than the panel.
+    // `window.bozkirOrderStats` holds the latest; a cycle is reported once
+    // per run because it means the sort fell back to the depth key and the
+    // guarantee above does not hold for those cells.
+    window.bozkirOrderStats = orderStats;
+    if (orderStats.cycles > 0 && !cycleWarned) {
+      cycleWarned = true;
+      console.warn(`tile order: ${orderStats.cycles} cycle(s) broken by depth `
+                 + `key - relief has tilted boundary planes into disagreement`);
     }
     frames = 0; fpsTime = now;
   }
