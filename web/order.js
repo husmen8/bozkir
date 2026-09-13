@@ -30,51 +30,8 @@
 //
 // No WebGL, so it runs under node and is tested there.
 
-/** The shared boundary of two adjacent cells: midpoint and unit normal.
- *
- *  Same construction as merge.js - the normal is taken from the line between
- *  the two centres rather than a grid axis, so it survives a rotated layout
- *  and tilts with the terrain when relief lifts the two cells unequally.
- *  Kept as its own function here rather than imported so this module stays
- *  usable on its own. */
-export function boundary(a, b) {
-    const dx = b.x - a.x, dy = b.y - a.y, dz = (b.z || 0) - (a.z || 0);
-    const len = Math.hypot(dx, dy, dz) || 1;
-    return {
-        mid: [(a.x + b.x) / 2, (a.y + b.y) / 2, ((a.z || 0) + (b.z || 0)) / 2],
-        normal: [dx / len, dy / len, dz / len],
-    };
-}
-
-/** Signed distance from the eye to the plane of the boundary between a and b.
- *
- *  The normal runs a to b, so a positive value puts the camera on b's side:
- *  b is the nearer cell and must be drawn after a in back-to-front order.
- *  The magnitude is how firmly that holds, and it is the quantity GSWT
- *  thresholds for merging. */
-export function boundarySign(a, b, eye) {
-    const { mid, normal } = boundary(a, b);
-    return normal[0] * (eye[0] - mid[0])
-        + normal[1] * (eye[1] - mid[1])
-        + normal[2] * (eye[2] - mid[2]);
-}
-
-/** Adjacent pairs of a grid of cells, each cell carrying integer `i`, `j`. */
-export function neighbourPairs(cells) {
-    const byIJ = new Map();
-    for (let k = 0; k < cells.length; k++) {
-        byIJ.set(`${cells[k].i},${cells[k].j}`, k);
-    }
-    const pairs = [];
-    for (let k = 0; k < cells.length; k++) {
-        const c = cells[k];
-        for (const [di, dj] of [[1, 0], [0, 1]]) {
-            const n = byIJ.get(`${c.i + di},${c.j + dj}`);
-            if (n !== undefined) pairs.push([k, n]);
-        }
-    }
-    return pairs;
-}
+import { boundarySign, neighbourPairs } from './grid.js';
+export { boundary, boundarySign, neighbourPairs } from './grid.js';
 
 /** The pairwise constraints for one camera position.
  *

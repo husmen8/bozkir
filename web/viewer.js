@@ -7,8 +7,11 @@
 // ground truth when this one looks wrong.
 
 import { drawOrder } from './order.js';
+import { mergeGroups, MAX_GROUP } from './merge.js';
+import { openDrop, describe } from './tileset.js';
+import { Capture } from './capture.js';
 
-const BUILD = 'bozkir viewer 3.0 (topological tile order)';
+const BUILD = 'bozkir viewer 3.6 (resizable panel)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -26,7 +29,10 @@ uniform sampler2D uData;      // RGBA32F, 3 texels per splat
 uniform sampler2D uColour;    // RGBA8,   1 texel per splat
 uniform mat3 uView;           // world -> camera, rows are the camera axes
 uniform vec3 uEye;
-uniform vec2 uCellXY;         // this tile's centre on the ground plane
+// Tile centres on the ground plane, one per slot in a merged group.
+// An unmerged draw uses slot 0 and ignores the rest, so both paths read
+// the same way and the shader has no branch for it.
+uniform vec2 uCellXY[8];
 uniform float uRelief;        // height field amplitude
 uniform float uWave;          // height field wavelength, world units
 uniform vec2 uGridRot;        // cos, sin of the grid's rotation
@@ -46,7 +52,12 @@ uniform float uGain;
 uniform float uNear;
 
 in vec2 aCorner;              // quad corner, -2..2
-in uint aIndex;               // splat index, from the sorted order buffer
+// Splat index, from the sorted order buffer. The top 3 bits hold the slot
+// of the cell this splat belongs to; a merged group interleaves splats from
+// several cells into one stream, so the index alone no longer says where
+// the splat sits. 29 bits is 536 million splats, which is not the limit
+// that will bite first.
+in uint aIndex;
 
 out vec2 vCorner;
 out vec4 vColour;
@@ -105,9 +116,13 @@ vec4 fetch(uint i, int slot) {
 }
 
 void main() {
-  vec4 a = fetch(aIndex, 0);  // position.xyz, opacity
-  vec4 b = fetch(aIndex, 1);  // scale.xyz
-  vec4 q = fetch(aIndex, 2);  // rotation w,x,y,z
+  uint slot = aIndex >> 29u;
+  uint sid = aIndex & 0x1FFFFFFFu;
+  vec2 cellXY = uCellXY[int(slot)];
+
+  vec4 a = fetch(sid, 0);     // position.xyz, opacity
+  vec4 b = fetch(sid, 1);     // scale.xyz
+  vec4 q = fetch(sid, 2);     // rotation w,x,y,z
 
   // GSWT Eq. 4-5 places a tile on a surface using one tangent frame taken
   // at its centre. That warp is a linearisation: exact in the middle and
@@ -143,7 +158,7 @@ void main() {
                      0.0, float(uSubdiv) - 1.0);
     anchorLocal = (idx + 0.5) * sub - uTileSize * 0.5;
   }
-  vec2 anchorWorld = uCellXY + anchorLocal;
+  vec2 anchorWorld = cellXY + anchorLocal;
 
   vec2 grad = terrainGrad(anchorWorld);
   mat3 warp = terrainFrame(grad);
@@ -204,7 +219,7 @@ void main() {
   gl_Position = vec4(2.0 * px.x / uViewport.x,
                      -2.0 * px.y / uViewport.y, 0.0, 1.0);
   vCorner = aCorner;
-  int ci = int(aIndex);
+  int ci = int(sid);
   vec4 col = texelFetch(uColour, ivec2(ci & 2047, ci >> 11), 0);
   vec3 rgb = col.rgb;
 
@@ -323,15 +338,18 @@ const overlay = document.getElementById('overlay');
 const bar = document.querySelector('#bar i');
 const ui = {};
 for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
-                  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
-                  'wangnote', 'edges', 'diagonals', 'tints', 'identity',
-                  'relief', 'reliefn', 'reliefscale', 'reliefscalen',
-                  'band', 'bandn', 'subdiv', 'subdivn', 'seam',
-                  'sortmode', 'views', 'viewsn', 'recache', 'sorterr',
-                  'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
-                  'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
-                  'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
-                  'speedn']) {
+  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
+  'wangnote', 'edges', 'diagonals', 'tints', 'identity',
+  'relief', 'reliefn', 'reliefscale', 'reliefscalen',
+  'band', 'bandn', 'subdiv', 'subdivn', 'seam',
+  'sortmode', 'views', 'viewsn', 'recache', 'sorterr',
+  'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
+  'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
+  'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
+  'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
+  'mergestat', 'capture', 'captureboth', 'capframes',
+  'capframesn', 'capcentre', 'caparc', 'caparcn',
+  'capstepn']) {
   ui[id] = document.getElementById(id);
 }
 
@@ -342,6 +360,75 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
  *  index.html takes the whole viewer down at load with nothing on screen.
  *  A missing control should cost that control, not the renderer.
  */
+// Every slider draws its own filled portion, from a CSS variable this sets
+// on input. Done generically rather than per control: there are a dozen
+// sliders and each already has a handler doing something else, so folding
+// the paint into those would mean a dozen chances to forget one.
+// --- panel size ---------------------------------------------------------
+//
+// Width by dragging the panel's left edge, text size by the two buttons in
+// its header. Both write a CSS variable and nothing else: row height is
+// derived from the text size in the stylesheet, so the sliders whose labels
+// are written inside them grow to fit rather than clipping.
+//
+// resize() already runs every frame, so the canvas follows the new width by
+// itself and there is nothing to notify.
+const PANEL_MIN = 180, PANEL_MAX = 560;
+const FS_MIN = 9, FS_MAX = 17;
+
+function setPanelWidth(px) {
+  const w = Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, px)));
+  document.documentElement.style.setProperty('--panel-w', w + 'px');
+}
+
+function setFontSize(px) {
+  const v = Math.min(FS_MAX, Math.max(FS_MIN, px));
+  document.documentElement.style.setProperty('--fs', v + 'px');
+  return v;
+}
+
+{
+  let fs = 11;
+  on('fsup', 'click', () => { fs = setFontSize(fs + 1); });
+  on('fsdown', 'click', () => { fs = setFontSize(fs - 1); });
+
+  const grip = document.getElementById('grip');
+  if (grip) {
+    grip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      // Capture on the grip, so a fast drag that outruns the pointer keeps
+      // sending events here instead of to whatever it passed over.
+      grip.setPointerCapture(e.pointerId);
+      document.body.classList.add('sizing');
+    });
+    grip.addEventListener('pointermove', (e) => {
+      if (!grip.hasPointerCapture(e.pointerId)) return;
+      setPanelWidth(window.innerWidth - e.clientX);
+    });
+    const stop = (e) => {
+      if (grip.hasPointerCapture(e.pointerId)) {
+        grip.releasePointerCapture(e.pointerId);
+      }
+      document.body.classList.remove('sizing');
+    };
+    grip.addEventListener('pointerup', stop);
+    grip.addEventListener('pointercancel', stop);
+    // Back to the width it started at, for when a drag goes wrong.
+    grip.addEventListener('dblclick', () => setPanelWidth(232));
+  }
+}
+
+function paintSliders() {
+  for (const el of document.querySelectorAll('.s input[type=range]')) {
+    const lo = +el.min, hi = +el.max;
+    const f = hi > lo ? ((+el.value - lo) / (hi - lo)) * 100 : 0;
+    el.parentElement.style.setProperty('--f', f.toFixed(2));
+  }
+}
+document.addEventListener('input', (e) => {
+  if (e.target.type === 'range') paintSliders();
+});
+
 function on(id, event, fn) {
   const el = document.getElementById(id);
   if (!el) {
@@ -379,10 +466,10 @@ function compile(src, type) {
     const m = log.match(/ERROR:\s*\d+:(\d+)/);
     const lines = src.split('\n');
     const ctx = m ? lines.slice(Math.max(0, m[1] - 3), +m[1] + 1)
-                         .map((l, i) => `${Math.max(1, m[1] - 2) + i}: ${l}`)
-                         .join('\n') : '';
+      .map((l, i) => `${Math.max(1, m[1] - 2) + i}: ${l}`)
+      .join('\n') : '';
     throw new Error(`${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} ` +
-                    `shader failed\n${log}\n${ctx}`);
+      `shader failed\n${log}\n${ctx}`);
   }
   return s;
 }
@@ -400,7 +487,13 @@ function program(vs, fs) {
 
 function uniforms(p, names) {
   const out = {};
-  for (const n of names) out[n] = gl.getUniformLocation(p, 'u' + n[0].toUpperCase() + n.slice(1));
+  for (const n of names) {
+    const u = 'u' + n[0].toUpperCase() + n.slice(1);
+    // An array uniform is addressed by its first element. Asking for the
+    // bare name works on most drivers and returns null on some, which
+    // shows up as a tile stuck at the origin rather than as an error.
+    out[n] = gl.getUniformLocation(p, u) || gl.getUniformLocation(p, u + '[0]');
+  }
   return out;
 }
 
@@ -474,15 +567,15 @@ class Orbit {
   dir() {
     const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
     return [-Math.cos(el) * Math.cos(az), -Math.cos(el) * Math.sin(az),
-            -Math.sin(el)];
+    -Math.sin(el)];
   }
 
   eye() {
     if (this.fly) return this.pos.slice();
     const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
     return [this.target[0] + this.distance * Math.cos(el) * Math.cos(az),
-            this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
-            this.target[2] + this.distance * Math.sin(el)];
+    this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
+    this.target[2] + this.distance * Math.sin(el)];
   }
 
   /** Keep the view unchanged when the mode changes. */
@@ -492,7 +585,7 @@ class Orbit {
     else {
       const e = this.pos, f = this.dir();
       this.target = [e[0] + f[0] * this.distance, e[1] + f[1] * this.distance,
-                     e[2] + f[2] * this.distance];
+      e[2] + f[2] * this.distance];
     }
     this.fly = on;
   }
@@ -502,11 +595,11 @@ class Orbit {
     const f = this.dir();
     const up = Math.abs(f[2]) > 0.999 ? [1, 0, 0] : [0, 0, 1];
     let r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2],
-             f[0] * up[1] - f[1] * up[0]];
+    f[0] * up[1] - f[1] * up[0]];
     const rl = Math.hypot(...r) || 1;
     r = r.map(v => v / rl);
     const d = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2],
-               f[0] * r[1] - f[1] * r[0]];
+    f[0] * r[1] - f[1] * r[0]];
     return { right: r, down: d, forward: f, eye: e };
   }
 }
@@ -523,10 +616,10 @@ console.log('shaders compiled');
 
 const splatU = uniforms(splatProg,
   ['view', 'eye', 'cellXY', 'relief', 'wave', 'subdiv',
-   'focal', 'viewport', 'gain', 'near',
-   'data', 'colour', 'tileSize', 'edgeMark', 'fade',
-   'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot',
-   'edgeN', 'edgeE', 'edgeS', 'edgeW']);
+    'focal', 'viewport', 'gain', 'near',
+    'data', 'colour', 'tileSize', 'edgeMark', 'fade',
+    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot',
+    'edgeN', 'edgeE', 'edgeS', 'edgeW']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -579,7 +672,7 @@ gl.bindVertexArray(null);
 gl.disable(gl.DEPTH_TEST);
 gl.enable(gl.BLEND);
 gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA,
-                     gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 gl.clearColor(0, 0, 0, 1);
 
 // ================================================================= state
@@ -640,7 +733,7 @@ function tangentFrame(x, y) {
   const a = [1 / la, 0, dx / la];
   const b = [0, 1 / lb, dy / lb];
   let c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
-           a[0] * b[1] - a[1] * b[0]];
+  a[0] * b[1] - a[1] * b[0]];
   const lc = Math.hypot(...c) || 1;
   c = c.map(v => v / lc);
   return new Float32Array([a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]);
@@ -661,13 +754,19 @@ let showIdentity = false;
 // choosing six numbers, and the fog has to match the horizon or the
 // terrain ends against a colour the sky never has.
 const SKIES = {
-  none:     { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
-  overcast: { top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
-              ground: [0.10, 0.10, 0.11], fog: 0.020 },
-  dusk:     { top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
-              ground: [0.05, 0.05, 0.07], fog: 0.030 },
-  clear:    { top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
-              ground: [0.08, 0.09, 0.10], fog: 0.012 },
+  none: { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
+  overcast: {
+    top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
+    ground: [0.10, 0.10, 0.11], fog: 0.020
+  },
+  dusk: {
+    top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
+    ground: [0.05, 0.05, 0.07], fog: 0.030
+  },
+  clear: {
+    top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
+    ground: [0.08, 0.09, 0.10], fog: 0.012
+  },
 };
 let sky = 'overcast';
 let fogScale = 1.0;
@@ -676,8 +775,8 @@ let orbiting = false;
 // Green through red as detail drops, the convention every engine's LOD
 // debug view uses.
 const LOD_RGB = [[0.30, 0.85, 0.35], [0.95, 0.85, 0.25],
-                 [0.98, 0.58, 0.20], [0.92, 0.30, 0.30],
-                 [0.75, 0.35, 0.85], [0.40, 0.60, 0.95]];
+[0.98, 0.58, 0.20], [0.92, 0.30, 0.30],
+[0.75, 0.35, 0.85], [0.40, 0.60, 0.95]];
 
 /** A fixed hue per tile index, spread by the golden angle so neighbouring
  *  indices look different. Which tile a cell uses is decided once, when the
@@ -736,6 +835,15 @@ worker.onmessage = (e) => {
     return;
   }
 
+  if (m.type === 'mergedGroups') {
+    if (m.seq !== mergeSeq) return;          // a later frame overtook it
+    mergeHave = m.orders.map((b) => new Uint32Array(b));
+    mergeHaveKey = mergeKey;
+    mergeStats.ms = m.ms;
+    mergeStats.splats = mergeHave.reduce((t, o) => t + o.length, 0);
+    return;
+  }
+
   if (m.type !== 'sorted') return;
   if (!sortingEnabled) { sortPending = false; return; }
   gl.bindVertexArray(splatVAO);
@@ -760,7 +868,7 @@ function buildGrid() {
   cells = [];
   if (!tileSize) { cells = [{ x: 0, y: 0, z: 0, warp: FLAT, patch: 0 }]; return; }
   usedPatches = Math.max(1, Math.min(usedPatches || patches.length,
-                                     patches.length));
+    patches.length));
   let s = seed;
   const rand = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const half = (gridN - 1) / 2;
@@ -788,8 +896,10 @@ function buildGrid() {
       const a = gridAngle * Math.PI / 180;
       const x = Math.cos(a) * lx - Math.sin(a) * ly;
       const y = Math.sin(a) * lx + Math.cos(a) * ly;
-      cells.push({ i, j, x, y, z: height(x, y),
-                   warp: tangentFrame(x, y), patch: pick });
+      cells.push({
+        i, j, x, y, z: height(x, y),
+        warp: tangentFrame(x, y), patch: pick
+      });
     }
   }
 }
@@ -825,8 +935,8 @@ function buildOverlay() {
       for (const [lu, lv] of [[u0, v0], [u1, v1]]) {
         const u = ca * lu - sa * lv, v = sa * lu + ca * lv;
         pos.push(O[0] + W[0] * u + W[3] * v + W[6] * lift,
-                 O[1] + W[1] * u + W[4] * v + W[7] * lift,
-                 O[2] + W[2] * u + W[5] * v + W[8] * lift);
+          O[1] + W[1] * u + W[4] * v + W[7] * lift,
+          O[2] + W[2] * u + W[5] * v + W[8] * lift);
         rgb.push(c[0], c[1], c[2]);
       }
     };
@@ -866,9 +976,9 @@ function placeSplat(cellX, cellY, local) {
   } else {
     const sub = tileSize / subdiv;
     const ix = Math.min(Math.max(Math.floor((local[0] + tileSize / 2) / sub), 0),
-                        subdiv - 1);
+      subdiv - 1);
     const iy = Math.min(Math.max(Math.floor((local[1] + tileSize / 2) / sub), 0),
-                        subdiv - 1);
+      subdiv - 1);
     ax = (ix + 0.5) * sub - tileSize / 2;
     ay = (iy + 0.5) * sub - tileSize / 2;
   }
@@ -876,8 +986,8 @@ function placeSplat(cellX, cellY, local) {
   const W = tangentFrame(wx, wy);
   const d = [local[0] - ax, local[1] - ay, local[2]];
   return [wx + W[0] * d[0] + W[3] * d[1] + W[6] * d[2],
-          wy + W[1] * d[0] + W[4] * d[1] + W[7] * d[2],
-          height(wx, wy) + W[2] * d[0] + W[5] * d[1] + W[8] * d[2]];
+  wy + W[1] * d[0] + W[4] * d[1] + W[7] * d[2],
+  height(wx, wy) + W[2] * d[0] + W[5] * d[1] + W[8] * d[2]];
 }
 
 /** How far apart two neighbouring tiles put the same point on their shared
@@ -900,9 +1010,9 @@ function measureSeams(samples = 9) {
       for (let i = 0; i < samples; i++) {
         const s = (i / (samples - 1) - 0.5) * 2 * h * 0.98;
         const a = dx ? placeSplat(c.x, c.y, [h, s, 0])
-                     : placeSplat(c.x, c.y, [s, h, 0]);
+          : placeSplat(c.x, c.y, [s, h, 0]);
         const b = dx ? placeSplat(nb.x, nb.y, [-h, s, 0])
-                     : placeSplat(nb.x, nb.y, [s, -h, 0]);
+          : placeSplat(nb.x, nb.y, [s, -h, 0]);
         const d = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
         worst = Math.max(worst, d);
         total += d; count++;
@@ -931,19 +1041,19 @@ function measureSortError(cell, sample = 4000) {
   const W = cell.warp;
   const idx = sortMode === 'cached' && cacheReady
     ? (() => {
-        const f = b.forward;
-        const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
-                       W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
-                       W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
-        let best = 0, bd = -2;
-        for (let k = 0; k < cacheDirs.length; k++) {
-          const d = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
-                  + cacheDirs[k][2] * local[2];
-          if (d > bd) { bd = d; best = k; }
-        }
-        return cacheBuf.subarray(best * cacheStride,
-                                 (best + 1) * cacheStride);
-      })()
+      const f = b.forward;
+      const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
+      W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
+      W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
+      let best = 0, bd = -2;
+      for (let k = 0; k < cacheDirs.length; k++) {
+        const d = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
+          + cacheDirs[k][2] * local[2];
+        if (d > bd) { bd = d; best = k; }
+      }
+      return cacheBuf.subarray(best * cacheStride,
+        (best + 1) * cacheStride);
+    })()
     : lastOrder;
   if (!idx) return null;
 
@@ -953,13 +1063,13 @@ function measureSortError(cell, sample = 4000) {
     const s = idx[i];
     // Where this splat actually ends up, and how deep that is.
     const x = positionsRef[3 * s], y = positionsRef[3 * s + 1],
-          z = positionsRef[3 * s + 2];
+      z = positionsRef[3 * s + 2];
     const wx = cell.x + W[0] * x + W[3] * y + W[6] * z;
     const wy = cell.y + W[1] * x + W[4] * y + W[7] * z;
     const wz = cell.z + W[2] * x + W[5] * y + W[8] * z;
     const d = (wx - b.eye[0]) * b.forward[0]
-            + (wy - b.eye[1]) * b.forward[1]
-            + (wz - b.eye[2]) * b.forward[2];
+      + (wy - b.eye[1]) * b.forward[1]
+      + (wz - b.eye[2]) * b.forward[2];
     if (prev !== null) {
       // The order runs far to near, so depth should fall as it is walked.
       // A pair where it rises is a splat drawn in front of something that
@@ -1055,7 +1165,7 @@ function load(buffer, manifest) {
     return a[Math.floor(p * (a.length - 1))];
   };
   cam.target = [(q(xs, .25) + q(xs, .75)) / 2, (q(ys, .25) + q(ys, .75)) / 2,
-                (q(zs, .25) + q(zs, .75)) / 2];
+  (q(zs, .25) + q(zs, .75)) / 2];
   cam.distance = Math.max(
     2.5 * Math.max(q(xs, .75) - q(xs, .25), q(ys, .75) - q(ys, .25)), 0.5);
   if (tileSize) { cam.target = [0, 0, cam.target[2]]; cam.elevation = 20; }
@@ -1069,7 +1179,7 @@ function load(buffer, manifest) {
     for (const [start, count] of p.levels) ranges.push({ start, count });
   }
   worker.postMessage({ type: 'init', positions: pos.buffer, patches: ranges },
-                     [pos.buffer]);
+    [pos.buffer]);
   cacheReady = false;
   worker.postMessage({ type: 'cache', views: cacheViews });
 
@@ -1087,7 +1197,7 @@ function load(buffer, manifest) {
   regenerate();
   overlay.classList.add('hidden');
   console.log(`loaded ${n} splats, ${patches.length} patches, ` +
-              `tile size ${tileSize}, wang ${!!wangCodes}`);
+    `tile size ${tileSize}, wang ${!!wangCodes}`);
 }
 
 // ================================================================= gizmo
@@ -1150,6 +1260,33 @@ const POP_W = 192, POP_H = 108;
 let orderStats = { cycles: 0, weak: 0, constrained: 0 };
 let cycleWarned = false;
 
+// Selective merging. GSWT Section 3.4, second half.
+//
+// Where the camera stands in the plane of a shared boundary neither cell is
+// in front and no draw order is right, so the pair is drawn as one stream
+// with their splats interleaved. The worker builds that stream; this side
+// decides which cells to group, asks for it, and draws the answer.
+//
+// The request is asynchronous, so a merged stream always describes the
+// previous frame's camera. That is fine - it is one frame of lag on a
+// boundary the camera is barely moving across - but it means a group can
+// arrive that no longer matches the grouping this frame. `mergeKey` is the
+// signature the result has to match; when it does not, the cells are drawn
+// separately, which is what the renderer did before merging existed. There
+// is no failure mode here worse than the status quo.
+// Both of these are driven from the panel. They stay plain variables with
+// window mirrors rather than reading window every frame, so the controls
+// are the source of truth and the console overrides still work for anyone
+// used to them.
+let topoOrder = true;
+let mergeOn = true;
+let mergeThreshold = 0.5;   // in tiles
+let mergeSeq = 0, mergeKey = '', mergeHave = null, mergeHaveKey = '';
+let mergeStats = { groups: 0, cells: 0, ms: 0, splats: 0 };
+const mergeBuf = gl.createBuffer();
+// Room for eight tile centres, refilled per draw.
+const cellXYArr = new Float32Array(2 * MAX_GROUP);
+
 let popPrev = null, popPixels = null;
 let popRate = 0, popPeak = 0, popPeakAge = 0;
 let popLastAz = 0, popLastEl = 0, popOn = false;
@@ -1169,8 +1306,8 @@ function measurePop() {
   let sum = 0;
   for (let i = 0; i < popPixels.length; i += 4) {
     sum += Math.abs(popPixels[i] - popPrev[i])
-         + Math.abs(popPixels[i + 1] - popPrev[i + 1])
-         + Math.abs(popPixels[i + 2] - popPrev[i + 2]);
+      + Math.abs(popPixels[i + 1] - popPrev[i + 1])
+      + Math.abs(popPixels[i + 2] - popPrev[i + 2]);
   }
   const diff = sum / (POP_W * POP_H * 3 * 255);
 
@@ -1246,7 +1383,7 @@ function frame() {
     gl.uniform1i(splatU.subdiv, subdiv);
     gl.uniform1f(splatU.tileSize, tileSize);
     gl.uniform2f(splatU.gridRot, Math.cos(gridAngle * Math.PI / 180),
-                 Math.sin(gridAngle * Math.PI / 180));
+      Math.sin(gridAngle * Math.PI / 180));
     gl.uniform3fv(splatU.fogColour, new Float32Array(S.horizon));
     gl.uniform1f(splatU.fogDensity, S.fog * fogScale);
 
@@ -1296,7 +1433,7 @@ function frame() {
       // (Section 3.4). That is the fix; this is only a better ordering.
       let near = Infinity;
       for (const [ox, oy] of [[-half, -half], [half, -half],
-                              [-half, half], [half, half]]) {
+      [-half, half], [half, half]]) {
         const kx = dx + ox, ky = dy + oy;
         const kz = kx * b.forward[0] + ky * b.forward[1] + dz * b.forward[2];
         if (kz < near) near = kz;
@@ -1321,28 +1458,135 @@ function frame() {
     // where its degeneracy is harmless. Those three counts go to zero.
     //
     // What remains is a boundary the camera genuinely crosses, where the
-    // sign passes through zero and no order is right. That is merging's
-    // half of Section 3.4, and merge.js is not wired in yet.
+    // sign passes through zero and no order is right. That is what the
+    // merging below is for.
     //
     // `window.bozkirTopo = false` in the console restores the old ranking,
     // so the pop meter can be read against both without a rebuild.
-    if (window.bozkirTopo === false) {
+    if (!topoOrder) {
       visible.sort((p, q) => (q.near - p.near) || (q.side - p.side));
     } else {
       const vc = visible.map((v) => v.c);
       const r = drawOrder(vc, b.eye, { key: visible.map((v) => v.near) });
-      orderStats = { cycles: r.cycles, weak: r.weak.length,
-                     constrained: r.constrained };
+      orderStats = {
+        cycles: r.cycles, weak: r.weak.length,
+        constrained: r.constrained
+      };
       const reordered = r.order.map((k) => visible[k]);
       visible.length = 0;
       for (const v of reordered) visible.push(v);
     }
 
+    // --- selective merging ------------------------------------------
+    //
+    // Group the visible cells by how near the eye is to each shared
+    // boundary plane, and ask the worker for one interleaved stream per
+    // group. The threshold is a distance in world units; a tile is the
+    // natural unit for it, since it is the tile that decides how far a
+    // splat reaches past its own boundary.
+    //
+    // Merged cells are drawn at level 0 with no cross-fade. Merging only
+    // fires where the eye is practically on a boundary, which is the
+    // nearest ground there is, so level 0 is what those cells would have
+    // been given anyway - and a per-slot fade would need eight more
+    // uniforms to express something no camera will see.
+    let groupOf = null, groups = null;
+    if (mergeOn && tileSize && visible.length > 1) {
+      const vc = visible.map((v) => v.c);
+      const ar = gridAngle * Math.PI / 180;
+      const ga = { c: Math.cos(ar), s: Math.sin(ar) };
+      const g = mergeGroups(vc, b.eye, { threshold: tileSize * mergeThreshold });
+      const multi = g.groups.filter((x) => x.length > 1);
+      if (multi.length) {
+        groupOf = g.groupOf; groups = g.groups;
+        mergeStats.groups = multi.length;
+        mergeStats.cells = multi.reduce((t, x) => t + x.length, 0);
+
+        // The signature a returned stream has to match: which cells, in
+        // which groups, and roughly which way the camera faces. Without
+        // the direction a stream built for the opposite heading would be
+        // accepted and drawn back to front.
+        const dir = b.forward.map((v) => Math.round(v * 24)).join(',');
+        const key = dir + '|' + groups.map((x) => x.map(
+          (k) => `${vc[k].i}.${vc[k].j}`).join('+')).join('/');
+        if (key !== mergeKey) {
+          mergeKey = key;
+          mergeSeq++;
+          worker.postMessage({
+            type: 'mergeGroups', eye: [0, 0, 0], seq: mergeSeq,
+            // The view direction turned into the tile's own frame, because
+            // stored splat positions are tile-local and the layout may be
+            // rotated. Everything world-space - where the cell sits, where
+            // the eye is - goes into the per-cell shift instead.
+            forward: [ga.c * b.forward[0] + ga.s * b.forward[1],
+            -ga.s * b.forward[0] + ga.c * b.forward[1],
+            b.forward[2]],
+            groups: groups.map((x) => x.map((k) => {
+              const c = vc[k], pp = patches[c.patch];
+              const [start, count] = pp.levels[0];
+              const shift = (c.x - b.eye[0]) * b.forward[0]
+                + (c.y - b.eye[1]) * b.forward[1]
+                + (c.z - b.eye[2]) * b.forward[2];
+              return { patch: c.patch, start, count, shift };
+            })),
+          });
+        }
+      } else {
+        // Nothing to merge from here. The key has to be cleared, not left
+        // as it was: anything asking whether a merged stream is current
+        // compares mergeHaveKey against it, and a key describing a
+        // grouping that no longer exists can never be matched. The capture
+        // waits on exactly that and would wait for ever.
+        mergeKey = '';
+        mergeStats.groups = 0; mergeStats.cells = 0;
+      }
+    } else {
+      mergeKey = '';
+      mergeStats.groups = 0; mergeStats.cells = 0;
+    }
+    const canMerge = groups && mergeHave && mergeHaveKey === mergeKey
+      && mergeHave.length === groups.length;
+    const groupDrawn = canMerge ? new Uint8Array(groups.length) : null;
+
     lodCounts = new Array(lodLevels).fill(0);
-    for (const { c, dist } of visible) {
+    for (let vi = 0; vi < visible.length; vi++) {
+      const { c, dist } = visible[vi];
       const p = patches[c.patch];
       if (!p || !p.count) continue;
-      gl.uniform2f(splatU.cellXY, c.x, c.y);
+
+      // A merged group is drawn whole, at the position of whichever of its
+      // cells comes first in the order, and skipped thereafter.
+      if (canMerge) {
+        const gi = groupOf[vi];
+        if (groups[gi].length > 1) {
+          if (groupDrawn[gi]) continue;
+          groupDrawn[gi] = 1;
+          const stream = mergeHave[gi];
+          if (stream && stream.length) {
+            cellXYArr.fill(0);
+            groups[gi].forEach((k, slot) => {
+              if (slot >= MAX_GROUP) return;
+              cellXYArr[2 * slot] = visible[k].c.x;
+              cellXYArr[2 * slot + 1] = visible[k].c.y;
+            });
+            gl.uniform2fv(splatU.cellXY, cellXYArr);
+            gl.uniform1f(splatU.fade, 1.0);
+            gl.uniform1f(splatU.edgeMark, 0.0);
+            gl.uniform1f(splatU.tintAmount, 0.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, mergeBuf);
+            gl.bufferData(gl.ARRAY_BUFFER, stream, gl.DYNAMIC_DRAW);
+            gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, 0);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stream.length);
+            drawnSplats += stream.length; drawCalls++;
+            lodCounts[0] += groups[gi].length;
+            continue;
+          }
+          // Nothing usable arrived; fall through and draw this cell alone.
+        }
+      }
+
+      cellXYArr[0] = c.x; cellXYArr[1] = c.y;
+      gl.uniform2fv(splatU.cellXY, cellXYArr.subarray(0, 2));
       if (showIdentity) {
         const c2 = tileRGB(c.patch);
         gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
@@ -1373,12 +1617,12 @@ function frame() {
       if (sortMode === 'cached' && cacheReady) {
         const W = c.warp, f = b.forward;
         const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
-                       W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
-                       W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
+        W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
+        W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
         let best = 0, bestDot = -2;
         for (let k = 0; k < cacheDirs.length; k++) {
           const d2 = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
-                   + cacheDirs[k][2] * local[2];
+            + cacheDirs[k][2] * local[2];
           if (d2 > bestDot) { bestDot = d2; best = k; }
         }
         buf = cacheIndexBuf;
@@ -1399,7 +1643,7 @@ function frame() {
           gl.uniform1f(splatU.tintAmount, 0.6);
         }
         gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0,
-                                (base + start) * 4);
+          (base + start) * 4);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
         drawnSplats += count; drawCalls++;
       }
@@ -1439,17 +1683,25 @@ function frame() {
     if (ui.lodinfo) {
       ui.lodinfo.textContent = lodLevels < 2 ? 'not in this file'
         : (lodOn ? lodCounts.map((n, i) => `L${i}:${n}`).join('  ')
-                 : 'off, all cells at level 0');
+          : 'off, all cells at level 0');
     }
     // No DOM id for these, so they go to the console rather than the panel.
     // `window.bozkirOrderStats` holds the latest; a cycle is reported once
     // per run because it means the sort fell back to the depth key and the
     // guarantee above does not hold for those cells.
     window.bozkirOrderStats = orderStats;
+    window.bozkirMergeStats = mergeStats;
+    if (ui.mergestat) {
+      ui.mergestat.textContent = !mergeOn ? 'off'
+        : (mergeStats.groups
+          ? `${mergeStats.groups} group${mergeStats.groups > 1 ? 's' : ''}, `
+          + `${mergeStats.cells} cells, ${mergeStats.ms.toFixed(0)} ms`
+          : 'none here');
+    }
     if (orderStats.cycles > 0 && !cycleWarned) {
       cycleWarned = true;
       console.warn(`tile order: ${orderStats.cycles} cycle(s) broken by depth `
-                 + `key - relief has tilted boundary planes into disagreement`);
+        + `key - relief has tilted boundary planes into disagreement`);
     }
     frames = 0; fpsTime = now;
   }
@@ -1464,6 +1716,10 @@ function frame() {
     `--fov ${cam.fov.toFixed(0)}`;
 
   if (orbiting) cam.azimuth = (cam.azimuth + 0.08) % 360;
+
+  // After the draw and inside the same animation frame: the context has
+  // no preserveDrawingBuffer, so the colour buffer is only readable here.
+  if (capture.active) capture.step();
 
   requestAnimationFrame(frame);
 }
@@ -1534,19 +1790,84 @@ setInterval(() => {
   if (held.has('q')) cam.target[2] -= step;
 }, 16);
 
-on('file', 'change', async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
+// Opening a tileset: from the file dialog, or dropped anywhere on the page.
+//
+// The old path took a .splat and then went looking in web/data for a .json
+// of the same name, which only ever worked for scenes already exported into
+// the repo. tileset.js takes a zip, or the .splat and .json together, so a
+// tileset built on someone else's machine opens here.
+async function openTileset(fileList) {
+  const list = [...(fileList || [])];
+  if (!list.length) return;
   overlay.classList.remove('hidden');
-  overlay.querySelector('.msg b').textContent = 'loading ' + f.name;
-  bar.style.width = '30%';
-  const buf = await f.arrayBuffer();
-  bar.style.width = '70%';
-  const m = await fetch(`./data/${f.name.replace(/\.splat$/, '.json')}`)
-    .then(r => (r.ok ? r.json() : null)).catch(() => null);
-  load(buf, m);
-  bar.style.width = '100%';
+  const msg = overlay.querySelector('.msg b');
+  msg.textContent = 'opening ' + list[0].name;
+  bar.style.width = '20%';
+  try {
+    const t = await openDrop(list);
+    bar.style.width = '70%';
+    const d = describe(t.meta);
+    // A .splat has no header, so without metadata the tile size is a guess,
+    // and a wrong tile size reads as a broken export rather than a missing
+    // file. Say which it is.
+    if (d.note) console.warn(`${t.name}: ${d.note}; tiling may be wrong`);
+    msg.textContent = 'loading ' + t.name;
+    load(t.buffer, t.meta);
+    bar.style.width = '100%';
+  } catch (err) {
+    console.error(err);
+    msg.textContent = 'could not open: ' + err.message;
+    bar.style.width = '0%';
+    setTimeout(() => overlay.classList.add('hidden'), 4000);
+  }
+}
+
+on('file', 'change', (e) => openTileset(e.target.files));
+
+// Drop anywhere. Dragover has to be cancelled on both the enter and the
+// over event or the browser navigates away to the file instead, which
+// loses the page and looks like a crash.
+for (const ev of ['dragenter', 'dragover']) {
+  window.addEventListener(ev, (e) => {
+    e.preventDefault();
+    document.body.classList.add('dropping');
+  });
+}
+for (const ev of ['dragleave', 'drop']) {
+  window.addEventListener(ev, (e) => {
+    e.preventDefault();
+    if (ev === 'dragleave' && e.relatedTarget) return;   // moved, not left
+    document.body.classList.remove('dropping');
+  });
+}
+window.addEventListener('drop', (e) => {
+  if (e.dataTransfer && e.dataTransfer.files.length) {
+    openTileset(e.dataTransfer.files);
+  }
 });
+
+// The drop hint and its styling are built here rather than added to
+// index.html, so the page keeps working unchanged if this module is not
+// loaded.
+{
+  const style = document.createElement('style');
+  style.textContent = `
+    #drophint { position: fixed; inset: 0; display: none; z-index: 50;
+      align-items: center; justify-content: center; pointer-events: none;
+      background: rgba(10,10,12,0.72);
+      font: 500 15px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      color: #e8e2d8; letter-spacing: 0.02em; text-align: center; }
+    body.dropping #drophint { display: flex; }
+    #drophint span { border: 1px dashed #c8a05a; border-radius: 10px;
+      padding: 28px 40px; }`;
+  document.head.appendChild(style);
+  const hint = document.createElement('div');
+  hint.id = 'drophint';
+  hint.innerHTML = '<span>drop a tileset<br>'
+    + '<small style="opacity:.65">a .zip, or the .splat and .json together'
+    + '</small></span>';
+  document.body.appendChild(hint);
+}
 
 document.getElementById('fov').addEventListener('input',
   (e) => { cam.fov = +e.target.value; });
@@ -1588,12 +1909,12 @@ on('freefly', 'change', (e) => {
   cam.setFly(e.target.checked);
   ui.flynote.textContent = cam.fly
     ? 'drag looks around, WASD flies, Q/E down and up, shift is faster, '
-      + 'scroll changes speed'
+    + 'scroll changes speed'
     : 'drag orbits, WASD slides the centre, scroll zooms';
   if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
 });
 for (const [id, elev, dist] of [['viewGround', 3, 8], ['viewWalk', 12, 6],
-                                ['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
+['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
   on(id, 'click', () => {
     if (cam.fly) { cam.setFly(false); ui.freefly.checked = false; }
     cam.elevation = elev;
@@ -1673,12 +1994,153 @@ on('reset', 'click', () => {
   cam.azimuth = 45; cam.elevation = 25;
 });
 
+// --- ordering controls ------------------------------------------------
+
+on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
+on('merging', 'change', (e) => {
+  mergeOn = e.target.checked;
+  // A stale stream would otherwise be drawn the moment merging came back on.
+  mergeKey = ''; mergeHave = null; mergeHaveKey = '';
+});
+on('mergethr', 'input', (e) => {
+  mergeThreshold = +e.target.value;
+  ui.mergethrn.textContent = mergeThreshold.toFixed(2);
+  mergeKey = '';
+});
+function showSweep() {
+  const arc = +ui.caparc.value, frames = +ui.capframes.value;
+  ui.caparcn.textContent = arc;
+  ui.capframesn.textContent = frames;
+  ui.capstepn.textContent = (arc / frames).toFixed(2);
+}
+on('capframes', 'input', showSweep);
+on('caparc', 'input', showSweep);
+showSweep();
+
+// Kept because they were the only way to reach these before the panel
+// existed, and because typing one is quicker than finding the control.
+Object.defineProperty(window, 'bozkirTopo', {
+  get: () => topoOrder,
+  set: (v) => { topoOrder = v !== false; if (ui.tileorder) ui.tileorder.value = topoOrder ? 'topological' : 'depth'; },
+});
+Object.defineProperty(window, 'bozkirMerge', {
+  get: () => mergeOn,
+  set: (v) => { mergeOn = v !== false; if (ui.merging) ui.merging.checked = mergeOn; mergeKey = ''; },
+});
+
+// --- capturing a sweep, for scripts/pop_metric.py ----------------------
+//
+// Each pose is held until nothing is in flight: a sort takes a frame or
+// more to come back, and a merged group another, so a frame grabbed the
+// moment the camera moves shows the previous pose's ordering. That would
+// measure worker latency rather than the ordering being compared, and it
+// would do it to both runs, hiding the difference the capture exists to
+// find.
+const capture = new Capture({
+  gl, canvas, cam,
+  isBusy: () => sortPending || !sortedReady
+    || (mergeOn && mergeKey !== '' && mergeHaveKey !== mergeKey),
+  onProgress: (done, total) => {
+    if (ui.capture) ui.capture.textContent = `capturing ${done} / ${total}`;
+  },
+  onDone: (count, file) => {
+    if (ui.capture) ui.capture.textContent = 'capture sweep';
+    console.log(`captured ${count} frames to ${file}`);
+    if (queuedRun) { const q = queuedRun; queuedRun = null; q(); }
+  },
+});
+
+/** The middle of the laid-out terrain, for the sweep to orbit.
+ *
+ *  Not the camera's own target: WASD slides that, and a target nudged off
+ *  the terrain sends the sweep around a point in mid air, through the
+ *  ground on one side and into empty sky on the other. The grid's own
+ *  centre is the same place every time, which is also what makes a capture
+ *  repeatable across sessions.
+ *
+ *  Height is taken from the cells rather than assumed zero, so a warped
+ *  surface is orbited about its own middle and not about the flat plane it
+ *  was displaced from.
+ */
+function sceneCentre() {
+  if (!cells.length) return cam.target.slice();
+  let x = 0, y = 0, z = 0;
+  for (const c of cells) { x += c.x; y += c.y; z += c.z; }
+  return [x / cells.length, y / cells.length, z / cells.length];
+}
+
+/** The folder name the zip should unpack into, named for what produced it
+ *  so two runs cannot be confused once they are in the downloads folder. */
+function runName() {
+  return (topoOrder ? 'topological' : 'depth') + (mergeOn ? '' : '_unmerged');
+}
+
+let queuedRun = null;
+
+function beginSweep() {
+  if (!splatCount) { console.warn('nothing loaded to capture'); return false; }
+  const frames = ui.capframes ? +ui.capframes.value : 48;
+  const arc = ui.caparc ? +ui.caparc.value : 20;
+  const centred = !ui.capcentre || ui.capcentre.checked;
+  const target = centred ? sceneCentre() : cam.target.slice();
+  if (!capture.start({ frames, arc, settle: 1, name: runName(), target })) {
+    return false;
+  }
+  // Everything needed to repeat this run, in one line to paste into notes.
+  console.log(`sweep ${arc}\u00b0 in ${frames} frames `
+    + `(${(arc / frames).toFixed(2)}\u00b0 each) about `
+    + `[${target.map((v) => v.toFixed(2)).join(', ')}], `
+    + `az ${cam.azimuth.toFixed(1)}, el ${cam.elevation.toFixed(1)}, `
+    + `dist ${cam.distance.toFixed(2)}`);
+  if (ui.capture) ui.capture.textContent = `capturing 0 / ${frames}`;
+  return true;
+}
+
+on('capture', 'click', () => {
+  if (capture.active) {
+    queuedRun = null;
+    capture.cancel();
+    ui.capture.textContent = 'capture sweep';
+    return;
+  }
+  beginSweep();
+});
+
+// Both orderings, back to back, from this same camera. The comparison is
+// only meaningful if the two runs travel the same path, and doing it in one
+// press is the difference between a measurement anyone can repeat and one
+// that depends on not touching the mouse in between.
+on('captureboth', 'click', () => {
+  if (capture.active) return;
+  if (!splatCount) { console.warn('nothing loaded to capture'); return; }
+  const restore = topoOrder;
+  topoOrder = true;
+  if (ui.tileorder) ui.tileorder.value = 'topological';
+  queuedRun = () => {
+    topoOrder = false;
+    if (ui.tileorder) ui.tileorder.value = 'depth';
+    // A frame's grace so the panel and the next sort settle before the
+    // second run starts posing the camera.
+    setTimeout(() => {
+      queuedRun = () => {
+        topoOrder = restore;
+        if (ui.tileorder) ui.tileorder.value = restore ? 'topological' : 'depth';
+        console.log('both runs captured; unzip each into its own folder, then\n'
+          + '  python scripts/pop_metric.py frames/topological --against frames/depth');
+      };
+      beginSweep();
+    }, 250);
+  };
+  beginSweep();
+});
+
 const wanted = new URLSearchParams(location.search).get('scene');
 for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
   Promise.all([
     fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
     fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null)).catch(() => null),
-  ]).then(([b, m]) => { if (b && !splatCount) load(b, m); }).catch(() => {});
+  ]).then(([b, m]) => { if (b && !splatCount) load(b, m); }).catch(() => { });
 }
 
+paintSliders();
 frame();

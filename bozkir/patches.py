@@ -104,58 +104,8 @@ def height_above_ground(p, field, size, up_axis=2):
     return p.xyz[:, up_axis] - g
 
 
-def clip_surface(p, up_axis, size, above, below=0.25, grid=12,
-                 drop_standing=None):
-    """Keep a thin skin following the ground, rather than a flat slab.
-
-    On a slope or a mound, a flat band beheads whatever stands on the high
-    side and swallows air on the low side. Following the surface keeps the
-    same thickness of ground everywhere.
-
-    A band alone still slices anything standing on the ground: a bush half a
-    metre tall leaves its bottom few centimetres behind, which reads as a
-    stump. With `drop_standing`, bins whose mass sits clear of the ground by
-    more than that fraction are treated as occupied and pared back to a much
-    thinner layer, so the object goes rather than being cut off at the
-    ankles.
-
-    Returns (patch, field).
-    """
-    field = ground_field(p, size, up_axis, grid)
-    d = height_above_ground(p, field, size, up_axis)
-    keep = (d >= -below * above) & (d <= above)
-
-    if drop_standing is not None:
-        occupied = standing_fraction(p, size, up_axis, above, grid) > drop_standing
-        plane = [i for i in range(3) if i != up_axis]
-        half = size / 2.0
-        ij = np.clip(((p.xyz[:, plane] + half) / max(size, 1e-9)
-                      * grid).astype(int), 0, grid - 1)
-        here = occupied[ij[:, 0], ij[:, 1]]
-        # In an occupied bin, keep only what is unambiguously ground.
-        keep &= ~here | (d <= above * 0.2)
-
-    return p.subset(keep), field
 
 
-def standing_fraction(p, size, up_axis=2, above=0.3, grid=12):
-    """Per bin, how much of its mass stands clear of the local ground.
-
-    A bin near zero is bare ground. A high one has something on it - a
-    bush, a rock, a bike. Useful for deciding whether a patch is ground
-    with a feature on it or ground with a wall through it.
-    """
-    field = ground_field(p, size, up_axis, grid)
-    d = height_above_ground(p, field, size, up_axis)
-    plane = [i for i in range(3) if i != up_axis]
-    half = size / 2.0
-    ij = np.clip(((p.xyz[:, plane] + half) / max(size, 1e-9) * grid).astype(int),
-                 0, grid - 1)
-    key = ij[:, 0] * grid + ij[:, 1]
-    total = np.bincount(key, minlength=grid * grid).astype(float)
-    tall = np.bincount(key, weights=(d > above).astype(float),
-                       minlength=grid * grid)
-    return (tall / np.maximum(total, 1)).reshape(grid, grid)
 
 
 def clip_slab(p, up_axis, thickness, below=0.25):

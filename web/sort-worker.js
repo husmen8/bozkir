@@ -132,7 +132,15 @@ function sortPatch(p, dir, eye, out) {
  *  approximate once they are warped, in the same way and for the same
  *  reason as the live order itself.
  *
- *  `cells` is [{patch, start, count, offset:[x,y,z]}], at most MAX_GROUP of
+ *  Each cell gives `shift`, the constant its patch's depths move by: the
+ *  cell's own position projected on the view direction, minus the eye's.
+ *  The viewer computes it because only the viewer knows the grid rotation -
+ *  a splat's stored position is in the tile's own frame and the layout may
+ *  be turned, so `dir` arrives already rotated into that frame and `shift`
+ *  carries everything that happens in world space. An `offset` vector is
+ *  accepted instead for tests, which have no grid.
+ *
+ *  `cells` is [{patch, start, count, shift}], at most MAX_GROUP of
  *  them. The result packs each cell's slot in the group into the high bits
  *  of the index so one draw call can place them all.
  */
@@ -152,7 +160,8 @@ function sortGroup(cells, dir, eye) {
     let w = 0, min = Infinity, max = -Infinity;
     for (let s = 0; s < cells.length; s++) {
         const c = cells[s];
-        const shift = c.offset[0] * fx + c.offset[1] * fy + c.offset[2] * fz;
+        const shift = typeof c.shift === 'number' ? c.shift
+            : c.offset[0] * fx + c.offset[1] * fy + c.offset[2] * fz;
         const a = c.start, b = c.start + c.count;
         for (let i = a; i < b; i++) {
             const d = (positions[3 * i] - eye[0]) * fx

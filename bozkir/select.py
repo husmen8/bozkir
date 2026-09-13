@@ -87,37 +87,3 @@ def remove_floaters(s, k=8, std_ratio=2.0, weight_by_opacity=True):
     if weight_by_opacity:
         keep |= s.opacity > 0.9                   # dense solid geometry stays
     return s.subset(keep), keep
-
-
-def auto_clean(s, up_axis=2, radius_pct=60.0, max_extent_pct=99.0,
-               floater_std=2.0, verbose=True):
-    """A reasonable default cleanup for framing a captured subject.
-
-    Three passes, cheapest first: crop to the dense middle, drop the
-    background shell by size, then remove what is left floating.
-    """
-    n0 = len(s)
-    plane = [i for i in range(3) if i != up_axis]
-
-    centre = np.median(s.xyz, axis=0)
-    d = np.linalg.norm(s.xyz[:, plane] - centre[plane], axis=1)
-    radius = float(np.percentile(d, radius_pct))
-    s, _ = crop_cylinder(s, centre, radius, up_axis=up_axis)
-    n1 = len(s)
-
-    max_extent = float(np.percentile(s.scale.max(axis=1), max_extent_pct))
-    s, _ = remove_large(s, max_extent)
-    n2 = len(s)
-
-    s, _ = remove_floaters(s, std_ratio=floater_std)
-    n3 = len(s)
-
-    if verbose:
-        print(f"  crop to r={radius:.2f}:      {n0:,} -> {n1:,} "
-              f"({n1 / n0:.0%})")
-        print(f"  drop splats > {max_extent:.3f}:  {n1:,} -> {n2:,} "
-              f"({n2 / n1:.0%})")
-        print(f"  remove floaters:        {n2:,} -> {n3:,} "
-              f"({n3 / n2:.0%})")
-        print(f"  kept {n3 / n0:.0%} of the scene")
-    return s

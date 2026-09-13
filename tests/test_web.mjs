@@ -9,6 +9,7 @@
 import {
   boundarySign, constraints, drawOrder, violations,
 } from '../web/order.js';
+import { readZip, pickTileset, describe, writeZip } from '../web/tileset.js';
 import {
   SLOT_BITS, MAX_GROUP, INDEX_BITS, INDEX_MASK,
   packIndex, unpackSlot, unpackIndex,
@@ -61,8 +62,8 @@ function nearKey(cells, eye, forward, tile = 1) {
 function camera(azDeg, elDeg, dist) {
   const az = azDeg * Math.PI / 180, el = elDeg * Math.PI / 180;
   const eye = [dist * Math.cos(el) * Math.cos(az),
-               dist * Math.cos(el) * Math.sin(az),
-               dist * Math.sin(el)];
+  dist * Math.cos(el) * Math.sin(az),
+  dist * Math.sin(el)];
   const n = Math.hypot(...eye);
   return { eye, forward: eye.map((v) => -v / n) };
 }
@@ -340,10 +341,10 @@ test('the cheapest boundaries are the ones that survive the cap', () => {
 test('a k-way merge interleaves far to near and keeps every splat', () => {
   const out = kwayMerge([
     { slot: 0, order: [0, 1, 2], depth: [9, 5, 1] },
-    { slot: 1, order: [7, 8],    depth: [7, 3] },
+    { slot: 1, order: [7, 8], depth: [7, 3] },
   ]);
   eq(Array.from(out).map((v) => [unpackSlot(v), unpackIndex(v)]),
-     [[0, 0], [1, 7], [0, 1], [1, 8], [0, 2]]);
+    [[0, 0], [1, 7], [0, 1], [1, 8], [0, 2]]);
 });
 
 test('the merged depths are non-increasing for any stream count', () => {
@@ -437,7 +438,7 @@ wtest('a merged group is sorted far to near across all its cells', async () => {
     const c = cells[unpackSlot(v)], i = unpackIndex(v);
     const sh = c.offset[0] * fwd[0] + c.offset[1] * fwd[1] + c.offset[2] * fwd[2];
     return (pos[3 * i] - eye[0]) * fwd[0] + (pos[3 * i + 1] - eye[1]) * fwd[1]
-         + (pos[3 * i + 2] - eye[2]) * fwd[2] + sh;
+      + (pos[3 * i + 2] - eye[2]) * fwd[2] + sh;
   };
   // Quantised to 16 bits, so the guarantee is monotonic within one bucket.
   let prev = Infinity, span = 0;
@@ -503,7 +504,7 @@ wtest('the counting sort agrees with kwayMerge, the exact reference', async () =
   for (let i = 0; i < dg.length; i++) maxGap = Math.max(maxGap, Math.abs(dg[i] - dw[i]));
   const span = Math.max(...dw) - Math.min(...dw);
   ok(maxGap < 3 * span / 65535,
-     `counting sort strays ${(maxGap / span * 65535).toFixed(1)} buckets from exact`);
+    `counting sort strays ${(maxGap / span * 65535).toFixed(1)} buckets from exact`);
 });
 
 wtest('an eight-cell group stays inside the slot budget', async () => {
@@ -511,7 +512,8 @@ wtest('an eight-cell group stays inside the slot budget', async () => {
   const { pos, patches } = scene(8000, MAX_GROUP);
   await w.send({ type: 'init', positions: pos.buffer.slice(0), patches });
   const cells = patches.map((p, s) => ({
-    patch: s, start: p.start, count: p.count, offset: [s * 0.1, 0, 0] }));
+    patch: s, start: p.start, count: p.count, offset: [s * 0.1, 0, 0]
+  }));
   const r = await w.send({ type: 'mergeGroups', forward: [1, 0, 0], eye: [-4, 0, 0], groups: [cells], seq: 4 });
   const order = new Uint32Array(r.orders[0]);
   eq(order.length, 8000);
@@ -525,9 +527,12 @@ wtest('several groups come back in the order they were sent', async () => {
   const { pos, patches } = scene(6000, 3);
   await w.send({ type: 'init', positions: pos.buffer.slice(0), patches });
   const g = (ks) => ks.map((k, s) => ({
-    patch: k, start: patches[k].start, count: patches[k].count, offset: [s, 0, 0] }));
-  const r = await w.send({ type: 'mergeGroups', forward: [1, 0, 0], eye: [-9, 0, 0],
-                           groups: [g([0, 1]), g([2])], seq: 5 });
+    patch: k, start: patches[k].start, count: patches[k].count, offset: [s, 0, 0]
+  }));
+  const r = await w.send({
+    type: 'mergeGroups', forward: [1, 0, 0], eye: [-9, 0, 0],
+    groups: [g([0, 1]), g([2])], seq: 5
+  });
   eq(r.sizes, [4000, 2000]);
   eq(r.seq, 5, 'the sequence number must come back so stale frames can be dropped');
 });
@@ -536,9 +541,169 @@ wtest('an empty group is survived', async () => {
   const w = await loadWorker();
   const { pos, patches } = scene(2000, 2);
   await w.send({ type: 'init', positions: pos.buffer.slice(0), patches });
-  const r = await w.send({ type: 'mergeGroups', forward: [1, 0, 0], eye: [0, 0, 0],
-                           groups: [[]], seq: 6 });
+  const r = await w.send({
+    type: 'mergeGroups', forward: [1, 0, 0], eye: [0, 0, 0],
+    groups: [[]], seq: 6
+  });
   eq(r.sizes, [0]);
+});
+
+
+// -------------------------------------------------------- tileset.js
+
+/** Build a zip in memory. Stored entries only, which is all the reader
+ *  needs to be handed to prove it walks the central directory correctly;
+ *  deflated archives are covered by the fixtures written from python. */
+function zipOf(entries) {
+  const enc = new TextEncoder();
+  const locals = [], central = [];
+  let offset = 0;
+  for (const [name, data] of entries) {
+    const nb = enc.encode(name);
+    const body = typeof data === 'string' ? enc.encode(data) : data;
+    const lh = new Uint8Array(30 + nb.length);
+    const lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(8, 0, true);                 // stored
+    lv.setUint32(18, body.length, true);
+    lv.setUint32(22, body.length, true);
+    lv.setUint16(26, nb.length, true);
+    lh.set(nb, 30);
+    locals.push(lh, body);
+
+    const ch = new Uint8Array(46 + nb.length);
+    const cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint32(20, body.length, true);
+    cv.setUint32(24, body.length, true);
+    cv.setUint16(28, nb.length, true);
+    cv.setUint32(42, offset, true);
+    ch.set(nb, 46);
+    central.push(ch);
+    offset += lh.length + body.length;
+  }
+  const cdSize = central.reduce((t, c) => t + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+  const parts = [...locals, ...central, eocd];
+  const total = parts.reduce((t, p) => t + p.length, 0);
+  const out = new Uint8Array(total);
+  let w = 0;
+  for (const p of parts) { out.set(p, w); w += p.length; }
+  return out.buffer;
+}
+
+const META = JSON.stringify({ size: 1.5, wang: true, lod: 4 });
+
+wtest('a stored zip round-trips to the same bytes', async () => {
+  const splat = new Uint8Array(64).map((_, i) => i * 3 % 251);
+  const m = await readZip(zipOf([['a.splat', splat], ['a.json', META]]));
+  eq(m.size, 2);
+  eq(Array.from(m.get('a.splat')), Array.from(splat), 'splat bytes changed');
+});
+
+wtest('the tileset is picked out of a folder with junk beside it', async () => {
+  const splat = new Uint8Array(64).fill(7);
+  const m = await readZip(zipOf([
+    ['bigsur/bigsur.splat', splat],
+    ['bigsur/bigsur.json', META],
+    ['__MACOSX/._bigsur.splat', 'junk'],
+    ['bigsur/.DS_Store', 'junk'],
+  ]));
+  const t = pickTileset(m);
+  eq(t.name, 'bigsur.splat', 'picked the shadow file or the wrong one');
+  eq(t.buffer.byteLength, 64);
+  eq(t.meta.size, 1.5);
+});
+
+wtest('the largest .splat wins when several are present', async () => {
+  const m = await readZip(zipOf([
+    ['small.splat', new Uint8Array(16)],
+    ['big.splat', new Uint8Array(256)],
+    ['big.json', META],
+  ]));
+  eq(pickTileset(m).name, 'big.splat');
+});
+
+wtest('the .json matching the chosen .splat is preferred', async () => {
+  const m = await readZip(zipOf([
+    ['big.splat', new Uint8Array(256)],
+    ['other.json', JSON.stringify({ size: 99 })],
+    ['big.json', META],
+  ]));
+  eq(pickTileset(m).meta.size, 1.5, 'took the wrong json');
+});
+
+wtest('a tileset with no metadata opens, and says so', async () => {
+  const m = await readZip(zipOf([['a.splat', new Uint8Array(32)]]));
+  const t = pickTileset(m);
+  eq(t.meta, null);
+  const d = describe(t.meta);
+  eq(d.size, null, 'a guessed tile size would be worse than none');
+  ok(d.note, 'the caller has to be able to tell the person');
+});
+
+wtest('broken JSON is refused by name rather than silently dropped', async () => {
+  const m = await readZip(zipOf([['a.splat', new Uint8Array(32)], ['a.json', '{oops']]));
+  let msg = '';
+  try { pickTileset(m); } catch (e) { msg = e.message; }
+  ok(msg.includes('a.json'), `unhelpful error: ${msg}`);
+});
+
+wtest('a zip with no .splat is refused', async () => {
+  const m = await readZip(zipOf([['readme.txt', 'hello']]));
+  let threw = false;
+  try { pickTileset(m); } catch (e) { threw = true; }
+  ok(threw, 'an empty tileset should not load');
+});
+
+wtest('something that is not a zip is refused', async () => {
+  let msg = '';
+  try { await readZip(new Uint8Array(400).buffer); } catch (e) { msg = e.message; }
+  ok(msg.includes('zip'), `unhelpful error: ${msg}`);
+});
+
+wtest('a trailing comment does not hide the end record', async () => {
+  // The end record is found by scanning back, so a comment after it must
+  // not stop the scan.
+  const base = new Uint8Array(zipOf([['a.splat', new Uint8Array(8)]]));
+  const withComment = new Uint8Array(base.length + 300);
+  withComment.set(base);
+  new DataView(withComment.buffer).setUint16(base.length - 22 + 20, 300, true);
+  const m = await readZip(withComment.buffer);
+  eq(m.size, 1);
+});
+
+
+wtest('a written zip reads back through our own reader', async () => {
+  const splat = new Uint8Array(300).map((_, i) => (i * 7) % 251);
+  const z = writeZip([['x.splat', splat], ['x.json', new TextEncoder().encode(META)]]);
+  const back = await readZip(z.buffer.slice(z.byteOffset, z.byteOffset + z.length));
+  eq(back.size, 2);
+  eq(Array.from(back.get('x.splat')), Array.from(splat), 'bytes changed');
+  eq(pickTileset(back).meta.size, 1.5);
+});
+
+wtest('a written zip carries correct CRCs', async () => {
+  // The reader ignores the CRC field; an archiver does not. A zip that
+  // only our own code can open would be useless for handing frames to
+  // pop_metric.py.
+  const z = writeZip([['a.txt', new TextEncoder().encode('hello world')]]);
+  const view = new DataView(z.buffer, z.byteOffset, z.byteLength);
+  // Local header CRC sits at offset 14, and 'hello world' has a known one.
+  eq(view.getUint32(14, true) >>> 0, 0x0d4a1185, 'CRC-32 is wrong');
+});
+
+wtest('an empty zip is still a valid zip', async () => {
+  const z = writeZip([]);
+  const back = await readZip(z.buffer.slice(z.byteOffset, z.byteOffset + z.length));
+  eq(back.size, 0);
 });
 
 // ------------------------------------------------------------------ report
