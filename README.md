@@ -1,132 +1,116 @@
 # bozkır
 
-**Photograph a few square metres of ground. Get terrain that runs to the horizon.**
+Procedural terrain from captured Gaussian splats.
 
-A drone photographs a patch of coastal ground. That capture is reconstructed
-as 3D Gaussians, cut into square tiles whose edges match, and laid out as
-Wang tiles — so the ground repeats without looking like it repeats, and
-without a seam anywhere.
+A capture of a few square metres of ground is cut into square tiles whose
+edges match, and those tiles are laid out as Wang tiles into terrain that
+does not repeat visibly and has no seams.
 
-Real material, real parallax between the pebbles, real self-shadowing in the
-grass. None of it modelled by anyone.
+A reimplementation of *Gaussian Splatting Wang Tiles* (Zeng, Ma and Sander,
+SIGGRAPH Asia 2025), taking the boundary artifacts their paper lists as
+unsolved a little further.
 
-Two captures, one pipeline:
-
-| coastal cobble | desert scrub |
-|:--:|:--:|
+| bigsur | desert |
+|---|---|
 | ![bigsur](docs/hero.jpg) | ![desert](docs/hero-2.jpg) |
-| a drone over a bluff | an aerial survey, 38 photographs |
 
 ---
 
-## Try it
+## Running it
+
+The renderer needs a static server, since ES modules will not load from
+`file://`:
 
 ```bash
 cd web && python -m http.server 8000
 ```
 
-Open `http://localhost:8000`. A scene loads by itself. Drag to orbit, WASD to
-move, scroll to zoom.
+Then `http://localhost:8000`. A tileset loads by default; drop a zip on the
+page to view another.
 
-To view your own capture, drop a tileset zip onto the page.
-
----
-
-## How it works
-
-**Find four squares that look alike.**
-
-![Candidate patches](docs/patches.jpg)
-
-The pipeline searches the capture for flat, dense, uniform squares and shows
-what it found. Four that look like each other tile into ground; four that do
-not tile into patchwork. You pick.
-
-**Cut them so the edges match.**
-
-Wang tiles need edges that pair up. Patches are recombined so each tile edge
-carries one of a small set of codes, and a min-cut seam places the join where
-the two patches already agree — down a shadow or a crack, never a straight
-line.
-
-**Lay them out.**
-
-![Edge colours showing the matching constraint](docs/edges.jpg)
-
-Every shared edge carries the same code on both sides. The debug view above
-paints those codes: a boundary that reads as one colour is a boundary that
-matches.
-
----
-
-## What is measured
-
-Everything below is a number from a script, not an impression.
-
-**Ordering tiles by depth breaks at axis-aligned views.** When the camera
-lines up with the grid, every cell in a row projects to an identical depth —
-81 cells collapse to 9 distinct values — so whatever breaks the tie flips the
-whole row in one frame. GSWT's topological sort removes it:
-
-```
-    az    depth key    topological
-   0.0         27            0
-  22.5          0            8     <- a boundary the camera really crosses
-  90.0         27            0
-```
-
-`python scripts/probe_order.py`
-
-**One sorted order per tile is not enough** once there is any relief — 47% of
-adjacent pairs come out wrong. Sorting along the view direction expressed in
-the tile's own frame gives exactly zero error, which is an answer rather than
-an approximation.
-
-**The tile frame must be the true Jacobian**, not a normalised rotation.
-Normalising drops a stretch factor and the material thins on slopes by
-precisely that amount.
-
-**Merged tiles match an exact sort** to under one quantisation bucket,
-checked against splats placed in world space exactly as the shader places
-them.
-
----
-
-## Two halves, joined by a file
-
-```
-  capture (.ply)  ──▶  Python constructor  ──▶  tileset (.splat + .json)
-                                                        │
-                                                        ▼
-                                                 browser renderer
-```
-
-No server between them. The constructor writes a tileset; the page reads one.
-The same arrangement GSWT ships with, and it means the demo works for a
-capture the author has never seen.
-
-**Constructor** — align to the ground, clean, search for patches, cut, seam,
-build the tile set, pack.
+The constructor needs `numpy`, `plyfile` and `Pillow`:
 
 ```bash
 python scripts/preview_patches.py data/raw/scene.ply --save-preset scene
 python scripts/export_wang.py data/raw/scene.ply --preset scene --patches 0,2,4,5
 ```
 
-The search loosens whichever filter is rejecting and says what it changed, so
-a capture needing different settings still works without anyone knowing the
-flags. A capture that cannot work at any setting says so.
+`preview_patches` searches for candidate tiles and writes a sheet of
+thumbnails; you pick four and pass their indices to `export_wang`, which
+writes `web/data/scene.splat` and `.json`. `--help` on any script lists the
+rest.
 
-**Renderer** — WebGL2, per-tile counting sort in a worker, surface warping,
-LOD with cross-fade, sky and haze, six debug views, and a scripted camera
-sweep for measurement.
+Tests:
+
+```bash
+python tests/run_all.py
+```
+
+---
+
+## What the pipeline does
+
+Align the capture to its ground plane, remove floaters and background, then
+search for square regions that are flat enough, dense enough, and similar
+enough to be interchangeable. The search loosens whichever filter is
+rejecting most and reports what it changed, so a capture that needs
+different settings still works; one that cannot work at any setting says so.
+
+Wang tiles need edges that pair up, so patches are cut and recombined until
+each tile edge carries one of a small set of codes. A min-cut seam
+(`bozkir/graphcut.py`) places each join where the two patches already agree
+rather than down a straight line.
+
+`bozkir/wang.py` builds the tile set and lays out a grid where every shared
+edge carries the same code on both sides.
+
+The renderer is WebGL2: per-tile counting sort in a worker, surface warping
+onto a height field, LOD with cross-fade, six debug views, and a scripted
+camera sweep used for measurement.
+
+---
+
+## Results
+
+**Ordering tiles by depth is degenerate at axis-aligned views.** The minimum
+projected depth over a cell's footprint is identical for every cell in a
+row when the view lines up with a grid axis — 81 cells collapse to 9 distinct
+keys — so whatever breaks the tie decides the whole row at once, and rotating
+through alignment reverses nine cells in one frame. A topological sort over
+shared-boundary constraints removes it (`scripts/probe_order.py`):
+
+```
+    az    depth key    topological
+   0.0         27            0
+  22.5          0            8
+  89.0         54            0
+  90.0         27            0
+```
+
+The eight at 22.5° are a boundary plane the camera genuinely crosses, all at
+`|n·(eye−edge)| = 0.254`, which is where selective merging takes over.
+
+**One sorted order per tile is not enough** once there is relief: 47% of
+adjacent pairs come out wrong at one frame per tile. Sorting along the view
+direction expressed in the tile's own frame gives exactly zero error.
+
+**The tile frame must be the true Jacobian**, not a normalised rotation.
+Normalising discards a stretch of `sqrt(1+|∇h|²)` and material thins on
+slopes by that factor.
+
+**A merged group matches an exact world-space sort** to under one bucket of
+the 16-bit counting sort, grid rotation included.
+
+**Boundary gap from surface warping** is proportional to curvature times
+span and zero in the continuous limit; halving the frames per tile halves
+it across a 16x range.
 
 ---
 
 ## Screening a capture
 
-Not every capture can become tiles. `inspect_ply.py` says whether one can,
-before you spend an evening finding out:
+Not every capture can become tiles. `scripts/inspect_ply.py` reports the
+quantities that decide it:
 
 ```
 planarity ratio   0.0012   plane-like
@@ -135,46 +119,74 @@ size / spacing      1.75   overlapping
 occupied columns   84.5%
 ```
 
-Of five scenes tried, one passed. The four that failed each failed for a
-specific, measurable reason — a sea stack is not ground, an aerial survey is
-captured around a subject, a Minecraft scan has no material to preserve.
+Of five scenes tried, one passed. The others failed for specific reasons: a
+sea stack is not ground, an aerial survey shot around a subject yields one
+usable region rather than four, a scan of synthetic geometry has no material
+to preserve.
 
 ---
 
-## What it cannot do
+## Measuring popping
 
-**Splats cannot be relit.** The lighting is baked at capture. No time of day,
-no dynamic lights. Fine for fixed-lighting work — archviz, previs, simulation
-— and a hard limit everywhere else.
+`bozkir/popping.py` separates what changed because the camera moved from
+what changed for another reason: estimate the motion, undo it, and the
+residual is what motion cannot explain. Capture a sweep from the viewer,
+then:
 
-**Tiles are surfaces, so there is no underside.** Looking up from below shows
-the far side of the same Gaussians.
+```bash
+python scripts/pop_metric.py frames/topological --against frames/depth
+```
 
-**Shadows in the capture become part of the pattern.** A capture under hard
-sun tiles its own shadows. Shoot under overcast.
+This is weaker than the published instrument and the difference matters.
+StopThePop uses RAFT for flow and FLIP for the weighting; here the global
+translation comes from phase correlation and the local refinement from block
+matching, which is integer-accurate at best. On splat terrain a sub-pixel
+registration error lights up a fifth of the frame, and that floor is
+currently larger than the effect being measured. The numbers compare
+orderings on one camera path and are not comparable to published figures.
 
 ---
 
-## Reading
+## Limitations
+
+Splats cannot be relit — the lighting is baked at capture, so there is no
+time of day and no dynamic lights.
+
+Tiles are surfaces, so there is no underside; looking up from below shows
+the far side of the same Gaussians. GSWT names this first among their own
+limitations and points at Wang Cubes.
+
+Shadows in the capture become part of the repeating pattern. Captures under
+overcast light tile better than captures under hard sun.
+
+The order within a merged group assumes flat tiles: a cell contributes its
+patch's depths plus one constant, exact under translation and approximate
+once the surface is warped.
+
+---
+
+## Layout
+
+```
+bozkir/     the constructor: ply, transform, select, patches, graphcut,
+            tile, wang, pack, scene, presets, camera, render, popping
+scripts/    thin CLI wrappers; none imports another
+web/        the renderer: viewer, sort-worker, grid, order, merge,
+            tileset, capture
+tests/      run_all.py runs all four suites
+```
+
+---
+
+## References
 
 Zeng, Ma, Sander. *Gaussian Splatting Wang Tiles.* SIGGRAPH Asia 2025.
-The paper this reimplements, and the source of the ordering and merging.
 
 Zeng, Ma, Sander. *Hybrid Gaussian Wang Tiles for Class-aware Authoring and
 Rendering.* SIGGRAPH 2026.
 
-Radl et al. *StopThePop.* SIGGRAPH 2024. Where the popping metric comes from.
+Radl, Steiner, Parger, Weinrauch, Kerbl, Steinberger. *StopThePop: Sorted
+Gaussian Splatting for View-Consistent Real-time Rendering.* SIGGRAPH 2024.
 
-Kerbl et al. *3D Gaussian Splatting for Real-Time Radiance Field Rendering.*
-SIGGRAPH 2023.
-
----
-
-## Tests
-
-```bash
-python tests/run_all.py
-```
-
-Four suites — the Python package, the popping metric, the patch search, and
-the browser modules. A missing dependency reports as skipped, not failed.
+Kerbl, Kopanas, Leimkühler, Drettakis. *3D Gaussian Splatting for Real-Time
+Radiance Field Rendering.* SIGGRAPH 2023.
