@@ -56,6 +56,12 @@ enough to be interchangeable. The search loosens whichever filter is
 rejecting most and reports what it changed, so a capture that needs
 different settings still works; one that cannot work at any setting says so.
 
+![candidate patches from the desert capture](docs/patches_desert.jpg)
+
+`preview_patches.py` writes this sheet. Four patches that look alike tile
+into ground; four that do not tile into patchwork, so the choice is made by
+eye rather than by score alone.
+
 Wang tiles need edges that pair up, so patches are cut and recombined until
 each tile edge carries one of a small set of codes. A min-cut seam
 (`bozkir/graphcut.py`) places each join where the two patches already agree
@@ -63,6 +69,12 @@ rather than down a straight line.
 
 `bozkir/wang.py` builds the tile set and lays out a grid where every shared
 edge carries the same code on both sides.
+
+![edge colours](docs/edges.jpg)
+
+One of the viewer's debug views paints those codes. A boundary that reads as
+a single colour is a boundary whose two tiles match; two colours meeting
+would be a layout error.
 
 The renderer is WebGL2: per-tile counting sort in a worker, surface warping
 onto a height field, LOD with cross-fade, six debug views, and a scripted
