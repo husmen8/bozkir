@@ -22,8 +22,12 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.patches import (clip_slab, ground_level, level_patch,  # noqa: E402
-                            pick_patches, score_patch)
+from bozkir import presets as presets_mod  # noqa: E402
+from bozkir.patches import (apply_settings, auto_pick,  # noqa: E402
+                            clip_slab, describe_trail, ground_level,
+                            level_patch, pick_patches, score_patch,
+                            search_kwargs, cached_search, choose,
+                            rendered_coverage)
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.tile import extract_patch  # noqa: E402
@@ -63,6 +67,18 @@ def main():
     ap.add_argument("--extract-margin", type=float, default=0.35,
                     help="cut candidates this much larger than the tile, so "
                          "levelling has material to rotate in from")
+    ap.add_argument("--auto", dest="auto", action="store_true", default=True,
+                    help="when the settings given find too few patches, "
+                         "loosen whichever filter is doing the rejecting "
+                         "and say so. On by default; ignored when --patches "
+                         "names the candidates, since those indices depend "
+                         "on the settings")
+    ap.add_argument("--no-auto", dest="auto", action="store_false",
+                    help="use the settings exactly as given")
+    ap.add_argument("--no-search-cache", dest="search_cache",
+                    action="store_false", default=True,
+                    help="search again rather than recalling a stored "
+                         "candidate list for these settings")
     ap.add_argument("--min-separation", type=float, default=1.0,
                     help="how far apart chosen patches must be, in tiles. "
                          "Keeps the set varied, but on a small scene it "
@@ -92,17 +108,26 @@ def main():
 
     print(f"  cutting {args.tiles} patches of {args.size} x {args.size}, "
           f"slab {thickness:.2f} thick")
-    chosen = pick_patches(s, args.size, args.tiles, up, args.stride,
-                          thickness, args.max_tilt, args.max_below,
-                          features=args.features, edge_flat=args.edge_flat,
-                          edge_margin=args.edge_margin,
-                          min_separation=args.min_separation,
-                         min_cover=args.min_cover,
-                         cover_margin=args.cover_margin,
-                         extract_margin=args.extract_margin)
+    common = search_kwargs(args, thickness)
+    if args.auto:
+        chosen, trail = auto_pick(s, args.size, args.tiles, up,
+                                  cache=args.search_cache, **common)
+        print(describe_trail(trail, args.tiles, args.size))
+        apply_settings(args, trail[-1][1])
+        if args.save_preset:
+            presets_mod.save(args, args.save_preset, ap)
+    else:
+        sep = common.pop("min_separation", 1.0)
+        found, _, hit = cached_search(s, args.size, up, common,
+                                      cache=args.search_cache, verbose=True)
+        chosen = choose(found, args.tiles, args.size, sep)
+        for _, _, p, info in chosen:
+            info["cover"] = rendered_coverage(p, args.size, up)
+        if hit:
+            print(f"  recalled {len(found)} candidates")
     if len(chosen) < args.tiles:
-        print(f"  only {len(chosen)} patches passed; loosen --max-tilt, "
-              f"raise --radius-pct, or shrink --size")
+        print(f"  only {len(chosen)} patches passed; the tally above says "
+              f"which filter to loosen")
 
     parts, meta, cursor = [], [], 0
     print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "

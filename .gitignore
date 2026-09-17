@@ -17,6 +17,7 @@ out/
 *.ply
 data/
 scenes/
+downloads/
 
 # Exported tilesets.
 #
@@ -27,8 +28,10 @@ scenes/
 #
 # The others are not. They exist to compare against and can be rebuilt with
 #     python scripts/export_wang.py --preset bicycle
+
 web/data/*.splat
 !web/data/bigsur.splat
+!web/data/desert.splat
 
 # The .json beside each tileset stays in either case - a few kilobytes, and
 # it is the only written record of the format the browser reads.

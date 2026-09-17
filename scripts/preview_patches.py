@@ -26,7 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.graphcut import render_patch  # noqa: E402
-from bozkir.patches import appearance, level_patch, pick_patches  # noqa: E402
+from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
+                            cached_search, choose, describe_trail,
+                            level_patch, rendered_coverage, search_kwargs)
+from bozkir import presets as presets_mod  # noqa: E402
 
 
 def main():
@@ -57,6 +60,21 @@ def main():
     ap.add_argument("--extract-margin", type=float, default=0.35,
                     help="cut candidates this much larger than the tile, so "
                          "levelling has material to rotate in from")
+    ap.add_argument("--auto", dest="auto", action="store_true", default=True,
+                    help="when the settings given find fewer than --count "
+                         "patches, loosen whichever filter is doing the "
+                         "rejecting and say so. On by default")
+    ap.add_argument("--no-auto", dest="auto", action="store_false",
+                    help="use the settings exactly as given, and report what "
+                         "they found even if it is nothing")
+    ap.add_argument("--want", type=int, default=4,
+                    help="how many patches are actually needed; --auto stops "
+                         "loosening once it has this many. Four is a Wang "
+                         "set")
+    ap.add_argument("--no-search-cache", dest="search_cache",
+                    action="store_false", default=True,
+                    help="search again rather than recalling a stored "
+                         "candidate list for these settings")
     ap.add_argument("--min-separation", type=float, default=1.0,
                     help="how far apart chosen patches must sit, as a "
                          "fraction of --size. Lower it when a scene is small "
@@ -78,15 +96,62 @@ def main():
     up = args.up_axis
     thickness = args.thickness if args.thickness else args.size * 0.25
 
-    print(f"  searching for up to {args.count} candidates")
-    cands = pick_patches(s, args.size, args.count, up, args.stride,
-                         thickness, args.max_tilt, args.max_below,
-                         features=args.features, edge_flat=args.edge_flat,
-                         edge_margin=args.edge_margin,
-                         min_separation=args.min_separation,
-                         min_cover=args.min_cover,
-                         cover_margin=args.cover_margin,
-                         extract_margin=args.extract_margin)
+    # A search of a few thousand positions takes minutes, and printed
+    # nothing at all until it finished. One rewriting line is the whole fix:
+    # not knowing whether a run is working or hung is its own kind of bug.
+    width = [0]
+
+    def progress(done, total, viable):
+        msg = (f"\r  {done}/{total} positions, {viable} viable"
+               f"   {100.0 * done / total:4.0f}%")
+        width[0] = max(width[0], len(msg))
+        sys.stdout.write(msg.ljust(width[0]))
+        sys.stdout.flush()
+        if done == total:
+            sys.stdout.write("\r" + " " * width[0] + "\r")
+            sys.stdout.flush()
+
+    common = search_kwargs(args, thickness)
+
+    if args.auto:
+        want = min(args.want, args.count)
+        cands, trail = auto_pick(s, args.size, args.count, up,
+                                 progress=progress,
+                                 cache=args.search_cache, **common)
+        # auto_pick stops at --count; the question that matters is whether
+        # it reached --want, since four is what a Wang set needs.
+        print(describe_trail(trail, want, args.size))
+        # The indices printed below only mean anything alongside the
+        # settings that produced them, so record those settings on the
+        # namespace: --save-preset then stores what worked, and
+        # export_wang --preset reproduces the same candidate list.
+        apply_settings(args, trail[-1][1])
+        if args.save_preset:
+            presets_mod.save(args, args.save_preset, ap)
+            print(f"  saved these settings as --preset {args.save_preset}")
+        elif len(trail) > 1:
+            print("  pass the same settings to export_wang, or re-run with "
+                  "--save-preset NAME, or the indices below will point at "
+                  "different patches")
+        if len(cands) < want:
+            _, settings, stats, _ = trail[-1]
+            print(f"  rejected at the loosest setting tried: "
+                  f"{stats.get('sparse', 0)} too sparse, "
+                  f"{stats.get('holes', 0)} too many holes, "
+                  f"{stats.get('tilt', 0)} too tilted, "
+                  f"{stats.get('buried', 0)} ground buried")
+    else:
+        print(f"  searching for up to {args.count} candidates")
+        sep = common.pop("min_separation", 1.0)
+        found, stats, hit = cached_search(s, args.size, up, common,
+                                          cache=args.search_cache,
+                                          progress=progress, verbose=True)
+        cands = choose(found, args.count, args.size, sep)
+        for _, _, p, info in cands:
+            info["cover"] = rendered_coverage(p, args.size, up)
+        if hit:
+            print(f"  recalled {len(found)} candidates from a previous "
+                  f"search with these settings")
 
     thumbs, rows = [], []
     for i, (score, (x, y), p, info) in enumerate(cands):

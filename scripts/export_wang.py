@@ -20,9 +20,12 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.patches import (appearance, balanced_split,  # noqa: E402
-                            level_patch, part_ink,  # noqa: E402
-                            pick_patches, select_similar, stratified_keep)
+from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
+                            balanced_split, describe_trail, level_patch,
+                            part_ink, pick_patches, search_kwargs,
+                            select_similar, stratified_keep,
+                            cached_search, choose, rendered_coverage)
+from bozkir import presets as presets_mod  # noqa: E402
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.wang import (build_tile_set, layout, check_layout,  # noqa: E402
@@ -95,6 +98,18 @@ def main():
     ap.add_argument("--extract-margin", type=float, default=0.35,
                     help="cut candidates this much larger than the tile, so "
                          "levelling has material to rotate in from")
+    ap.add_argument("--auto", dest="auto", action="store_true", default=True,
+                    help="when the settings given find too few patches, "
+                         "loosen whichever filter is doing the rejecting "
+                         "and say so. On by default; ignored when --patches "
+                         "names the candidates, since those indices depend "
+                         "on the settings")
+    ap.add_argument("--no-auto", dest="auto", action="store_false",
+                    help="use the settings exactly as given")
+    ap.add_argument("--no-search-cache", dest="search_cache",
+                    action="store_false", default=True,
+                    help="search again rather than recalling a stored "
+                         "candidate list for these settings")
     ap.add_argument("--min-separation", type=float, default=1.0,
                     help="how far apart chosen patches must sit, as a "
                          "fraction of --size. Lower it when a scene is small "
@@ -127,16 +142,38 @@ def main():
     print(f"  need {need} patches for {args.colours} colours per axis")
     # Search widely, then narrow on appearance: a patch that scores well but
     # looks nothing like the others produces a tile with a visible X in it.
-    chosen = pick_patches(s, args.size, max(need * 4, 12), up, args.stride,
-                          thickness, args.max_tilt, args.max_below,
-                          features=args.features, edge_flat=args.edge_flat,
-                          edge_margin=args.edge_margin,
-                          min_separation=args.min_separation,
-                          min_cover=args.min_cover,
-                         cover_margin=args.cover_margin,
-                          extract_margin=args.extract_margin)
+    want = max(need * 4, 12)
+    common = search_kwargs(args, thickness)
+    if args.auto and not args.patches:
+        # Loosen only when choosing for ourselves. With --patches the
+        # indices came from a preview run, and they only mean anything
+        # against the settings that produced them - so those settings are
+        # used exactly as given, and a short list is an error rather than
+        # something to work around.
+        chosen, trail = auto_pick(s, args.size, want, up,
+                                  cache=args.search_cache, **common)
+        print(describe_trail(trail, need, args.size))
+        apply_settings(args, trail[-1][1])
+        if args.save_preset:
+            presets_mod.save(args, args.save_preset, ap)
+    else:
+        sep = common.pop("min_separation", 1.0)
+        found, _, hit = cached_search(s, args.size, up, common,
+                                      cache=args.search_cache, verbose=True)
+        chosen = choose(found, want, args.size, sep)
+        for _, _, p, info in chosen:
+            info["cover"] = rendered_coverage(p, args.size, up)
+        if hit:
+            print(f"  recalled {len(found)} candidates from the search "
+                  f"preview_patches.py already did")
     if len(chosen) < need:
-        raise SystemExit(f"  only {len(chosen)} patches passed, need {need}")
+        raise SystemExit(
+            f"  only {len(chosen)} patches passed, need {need}."
+            + ("\n  --patches was given, so the settings were used exactly "
+               "as supplied; re-run preview_patches.py and pass the same "
+               "settings, or a preset, to both." if args.patches else
+               "\n  This capture does not yield a tile set at any setting "
+               "tried. preview_patches.py shows what is rejecting."))
     if args.patches:
         want = [int(v) for v in args.patches.replace(" ", "").split(",") if v]
         if len(want) != need:

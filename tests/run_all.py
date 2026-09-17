@@ -28,6 +28,8 @@ SUITES = [
      'numpy and plyfile'),
     ('popping metric', [sys.executable, 'tests/test_popping.py'],
      'numpy'),
+    ('patch search', [sys.executable, 'tests/test_autopick.py'],
+     'numpy and plyfile'),
     ('browser modules', ['node', 'tests/test_web.mjs'],
      'node'),
 ]

@@ -9,6 +9,10 @@ It used to live inside scripts/export_tileset.py, which made it library code
 in a command-line tool - awkward to import and invisible to an editor.
 """
 
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 
 from .tile import extract_patch
@@ -359,7 +363,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                  max_tilt=12.0, max_below=0.5, features=False,
                  edge_flat=0.20, edge_margin=0.22, min_separation=1.0,
                  min_cover=0.80, extract_margin=0.35, cover_margin=0.10,
-                 verbose=True):
+                 verbose=True, stats=None, progress=None, screen_cap=4_000):
     """Search the ground plane for the k best non-overlapping patches.
 
     Each candidate is cut larger than the tile it will become, by
@@ -367,6 +371,32 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
     square leaves empty wedges along its edges - so the extra ring is the
     material those wedges are filled from. Scoring still looks only at the
     tile-sized middle, since that is what ends up on screen.
+
+    `stats`, if given, is filled with the rejection tally and the grid size.
+    The tally is not diagnostics for a human to read and forget: it says
+    which filter is doing the rejecting, which is exactly what a caller
+    needs to know to loosen the right one. `auto_pick` below reads it.
+
+    `progress` is called as progress(done, total, viable) every so often.
+    A search of a few thousand positions runs for minutes with nothing on
+    screen, which is indistinguishable from a hang.
+
+    `screen_cap` is how many splats the coverage render uses while
+    searching. The render loops per splat in Python, so it dominates the
+    search; a coarser sample is enough to sort the hopeless from the
+    plausible, and the survivors are measured again properly at the end.
+    Measured on a 891k-splat scene, about 25k splats to a tile:
+
+        screen_cap    search      patches
+          2,000       19.2 s        22
+          4,000       24.7 s        22      <- default
+         12,000       49.8 s        22      <- the previous behaviour
+          exact       91.0 s        22
+
+    Same patches, same coverage to three decimals, half the time. 2,000 is
+    faster still and was as accurate here, but a sparser capture has fewer
+    splats to spare and the margin for the estimate to be wrong is
+    correspondingly thinner, so the default keeps some room.
     """
     plane = [i for i in range(3) if i != up_axis]
     lo = np.percentile(s.xyz[:, plane], 2, axis=0)
@@ -379,11 +409,17 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         raise SystemExit(f"scene is smaller than one {size} patch")
 
     cands = []
+    records = []
     rendered = 0
     rejected = {"sparse": 0, "buried": 0, "tilt": 0, "rim": 0,
                 "holes": 0, "score": 0}
+    total = len(xs) * len(ys)
+    done = 0
     for x in xs:
         for y in ys:
+            done += 1
+            if progress is not None and (done % 25 == 0 or done == total):
+                progress(done, total, len(cands))
             # Cut wide, judge narrow.
             wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
                                  up_axis=up_axis)
@@ -421,7 +457,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
             if est < min_cover - cover_margin:
                 rejected["holes"] += 1
                 continue
-            info["cover"] = rendered_coverage(p, size, up_axis)
+            info["cover"] = rendered_coverage(p, size, up_axis,
+                                              cap=screen_cap)
             rendered += 1
             if info["cover"] < min_cover:
                 rejected["holes"] += 1
@@ -434,7 +471,21 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
             info["below"] = below
             info["wide"] = wide
             cands.append((sc, (float(x), float(y)), p, info))
-    if verbose or not cands:
+            # The same thing without the splats, so it can be written out
+            # and the patch cut again later instead of searched for again.
+            records.append({"score": float(sc), "x": float(x), "y": float(y),
+                            "info": {k: float(v) for k, v in info.items()
+                                     if isinstance(v, (int, float))}})
+    if stats is not None:
+        stats.update(rejected)
+        stats["positions"] = total
+        stats["viable"] = len(cands)
+        stats["rendered"] = rendered
+        stats["records"] = records
+    # Printed only when asked. A sweep calls this repeatedly and reports
+    # its own trail; the failure diagnostic below still travels with the
+    # exception, so a direct caller loses nothing.
+    if verbose:
         print(f"  searched {len(xs)}x{len(ys)} positions, "
               f"{len(cands)} viable")
         print(f"  rejected: {rejected['sparse']} too sparse, "
@@ -470,10 +521,379 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         if len(chosen) >= k:
             break
 
+    # The search screened with a coarse render; the handful that survived
+    # are cheap to measure properly, and it is their numbers that get shown
+    # and acted on.
+    for _, _, p, info in chosen:
+        info["cover"] = rendered_coverage(p, size, up_axis)
+
+    if stats is not None:
+        stats["chosen"] = len(chosen)
     if verbose and len(chosen) < min(k, len(cands)):
         print(f"  {len(cands)} viable -> {len(chosen)} after keeping centres "
               f"{gap:.2f} apart (lower --min-separation for more)")
     return chosen
+
+
+# What to loosen when a filter is doing all the rejecting.
+#
+# Each entry is the filter's tally key, the setting that governs it, and the
+# values to try in order. The order matters: the first value is the default,
+# and each step after it trades a little quality for a few more candidates.
+#
+# The numbers are not arbitrary. min_cover starts at 0.80 because a tile with
+# a fifth of it missing tiles with holes; but a capture of open ground is
+# never solid, and 0.55 is about where a patch stops reading as ground and
+# starts reading as lace. min_separation exists so the four patches are
+# genuinely different places rather than four views of one spot, and half a
+# tile is the least that still means anything.
+RELAXATIONS = [
+    ("holes", "min_cover", [0.80, 0.70, 0.60, 0.55]),
+    ("sparse", "size", None),          # handled separately: size changes the grid
+    ("tilt", "max_tilt", [12.0, 18.0, 25.0]),
+    ("buried", "max_below", [0.5, 0.65, 0.8]),
+]
+
+SETTING_NOTE = {
+    "min_cover": "coverage",
+    "max_tilt": "tilt limit",
+    "max_below": "buried-ground limit",
+    "min_separation": "separation",
+    "size": "tile size",
+}
+
+
+# --- remembering a search ------------------------------------------------
+#
+# The search itself is the slow part: a few thousand candidate positions,
+# most of them settled by a top-down render that loops per splat in Python.
+# Ten minutes is normal on a two-million-splat scene.
+#
+# It is also run twice for no reason. preview_patches searches so a person
+# can look at the thumbnails and choose four; export_wang then searches
+# again, with the same settings from the same preset, to turn those four
+# indices back into patches. The second search cannot find anything the
+# first did not - that is precisely why the indices mean anything - so it is
+# ten minutes spent reproducing a list that was on screen a moment ago.
+#
+# What is stored is the outcome of each accepted position: its score, its
+# centre, and the measurements already made there. Not the splats, which are
+# large and trivially recovered by cutting the scene at a centre again. So a
+# hit still does the extraction, and skips the searching and the rendering.
+#
+# The key covers the scene and every setting that moves a candidate. Getting
+# that wrong would be worse than the slowness it fixes: a stale list would
+# hand back patches from another scene, and `--patches 2` would quietly mean
+# something else. Hence the fingerprint below rather than a filename.
+
+SEARCH_CACHE_VERSION = 1
+
+
+def scene_fingerprint(s, sample=4096):
+    """A short hash of what a prepared scene contains.
+
+    Sampled rather than complete: hashing two million positions to decide
+    whether to avoid a ten-minute search is affordable, but the sample is
+    spread across the whole array and includes the count, so two scenes
+    that collide differ in neither length nor shape.
+    """
+    n = len(s)
+    if not n:
+        return "empty"
+    idx = np.linspace(0, n - 1, min(n, sample)).astype(np.int64)
+    h = hashlib.sha1()
+    h.update(f"{n}|".encode())
+    h.update(np.ascontiguousarray(s.xyz[idx], dtype=np.float32).tobytes())
+    return h.hexdigest()[:12]
+
+
+def search_key(s, size, up_axis, settings):
+    """Cache key for one search: the scene, the tile, and the settings.
+
+    `min_separation` is deliberately left out. It decides which of the
+    accepted candidates get kept, not which are accepted, so a run that
+    only changes it can reuse the list and re-select from it - which is
+    most of what the sweep does.
+    """
+    parts = [f"v={SEARCH_CACHE_VERSION}", f"scene={scene_fingerprint(s)}",
+             f"size={size}", f"up={up_axis}"]
+    parts += sorted(f"{k}={v}" for k, v in settings.items()
+                    if k != "min_separation")
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:16]
+
+
+def load_search(key, cache_dir="data/cache"):
+    """The stored candidate list for a key, or None."""
+    path = Path(cache_dir) / f"search_{key}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            blob = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if blob.get("version") != SEARCH_CACHE_VERSION:
+        return None
+    return blob
+
+
+def save_search(key, cands, stats, cache_dir="data/cache"):
+    """Store a candidate list. Failure to write is not failure to search."""
+    path = Path(cache_dir)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with open(path / f"search_{key}.json", "w") as f:
+            json.dump({"version": SEARCH_CACHE_VERSION,
+                       "stats": stats,
+                       "cands": cands}, f)
+    except OSError:
+        pass
+
+
+# The settings that define a search. Every script that looks for patches has
+# to pass the same ones, because a candidate list is only meaningful
+# alongside the settings that produced it: `--patches 0,1,2,4` chosen from a
+# preview indexes a list that a stricter export would never build, and the
+# four tiles that come out are then simply the wrong four, with nothing to
+# say so.
+SEARCH_KEYS = ("stride", "thickness", "max_tilt", "max_below", "features",
+               "edge_flat", "edge_margin", "min_separation", "min_cover",
+               "cover_margin", "extract_margin")
+
+
+def search_kwargs(args, thickness=None):
+    """The search settings out of a parsed argparse namespace."""
+    kw = {k: getattr(args, k) for k in SEARCH_KEYS if hasattr(args, k)}
+    if thickness is not None:
+        kw["thickness"] = thickness
+    return kw
+
+
+def apply_settings(args, settings):
+    """Write a search's resolved settings back onto the namespace.
+
+    So that --save-preset records what actually worked rather than what was
+    asked for, and a later --preset run reproduces it without the sweep.
+    """
+    for key, value in settings.items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+    return args
+
+
+def rebuild_candidates(s, records, size, up_axis, thickness,
+                       extract_margin=0.35):
+    """Cut the scene again at stored centres, in stored order.
+
+    The cheap half of a search. What was expensive was deciding which
+    centres were worth keeping - thousands of positions, each settled by a
+    render. Cutting a patch at a centre already known to be good is a mask
+    over the splat array and nothing more.
+    """
+    out = []
+    for rec in records:
+        x, y = rec["x"], rec["y"]
+        wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
+                             up_axis=up_axis)
+        p = extract_patch(wide, [0.0, 0.0], size, up_axis=up_axis,
+                          recentre=False)
+        g_level = ground_level(p.xyz[:, up_axis], thickness)
+        p, g = clip_slab(p, up_axis, thickness)
+        h_wide = wide.xyz[:, up_axis]
+        wide = wide.subset((h_wide >= g_level - thickness * 0.25)
+                           & (h_wide <= g_level + thickness))
+        info = dict(rec["info"])
+        info["ground"] = g
+        info["wide"] = wide
+        out.append((rec["score"], (x, y), p, info))
+    return out
+
+
+def choose(cands, k, size, min_separation=1.0):
+    """Take k candidates that are not on top of each other.
+
+    Separated out from the search because it is the part worth re-running:
+    the sweep changes the separation several times, and doing that against
+    a list already in hand costs nothing, while searching again costs
+    minutes.
+    """
+    ordered = sorted(cands, key=lambda c: -c[0])
+    chosen = []
+    gap = size * max(min_separation, 0.0)
+    for cand in ordered:
+        x, y = cand[1]
+        if any(abs(x - cx) < gap and abs(y - cy) < gap
+               for _, (cx, cy), _, _ in chosen):
+            continue
+        chosen.append(cand)
+        if len(chosen) >= k:
+            break
+    return chosen
+
+
+def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
+                  cache=True, progress=None, verbose=False):
+    """The candidate list for these settings, searched for or recalled.
+
+    Returns (cands, stats, hit). `hit` says which it was, because a run
+    that took two seconds instead of ten minutes should say why.
+    """
+    key = search_key(s, size, up_axis, settings)
+    if cache:
+        blob = load_search(key, cache_dir)
+        if blob is not None:
+            thickness = settings.get("thickness", size * 0.25)
+            cands = rebuild_candidates(
+                s, blob["cands"], size, up_axis, thickness,
+                settings.get("extract_margin", 0.35))
+            stats = dict(blob["stats"])
+            stats["records"] = blob["cands"]
+            return cands, stats, True
+
+    stats = {}
+    # k is irrelevant to the search itself; ask for everything and let
+    # choose() narrow it, so one stored list serves every caller.
+    pick_patches(s, size, 10 ** 9, up_axis, verbose=verbose, stats=stats,
+                 progress=progress, **settings)
+    cands = rebuild_candidates(
+        s, stats.get("records", []), size, up_axis,
+        settings.get("thickness", size * 0.25),
+        settings.get("extract_margin", 0.35))
+    if cache:
+        storable = {k: v for k, v in stats.items() if k != "records"}
+        save_search(key, stats.get("records", []), storable, cache_dir)
+    return cands, stats, False
+
+
+def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
+              cache=True, cache_dir="data/cache", **kw):
+    """Find k patches, loosening whichever filter is doing the rejecting.
+
+    The defaults are tuned for a clean capture of solid ground. A capture
+    that is sparser, or steeper, or has holes in it fails them - and fails
+    them silently, in the sense that it returns two patches and a tally
+    nobody reads. Somebody who knows the tool then tries `--min-cover 0.6`
+    and gets five hundred.
+
+    That step is a decision procedure, not a judgement: the tally says which
+    filter rejected the most positions, and each filter has one setting that
+    governs it. So it is done here, and reported, rather than left as
+    folklore. Every relaxation is printed with the number it produced, so
+    the run can be repeated by hand and the cost of each step is visible.
+
+    Returns (chosen, trail) where trail is the list of (setting, value,
+    viable, chosen) actually tried, first to last.
+    """
+    trail = []
+    settings = dict(kw)
+    settings.setdefault("min_cover", 0.80)
+    settings.setdefault("max_tilt", 12.0)
+    settings.setdefault("max_below", 0.5)
+    settings.setdefault("min_separation", 1.0)
+
+    def attempt(label):
+        # Separation only decides which of the accepted candidates are
+        # kept, so changing it re-selects from a list already in hand.
+        # Everything else changes what is accepted and searches again -
+        # from cache when the same settings have been seen before.
+        sep = settings.get("min_separation", 1.0)
+        search = {kk: vv for kk, vv in settings.items()
+                  if kk != "min_separation"}
+        try:
+            cands, stats, hit = cached_search(
+                s, size, up_axis, search, cache_dir=cache_dir, cache=cache,
+                progress=None if label.startswith("separation") else progress)
+            chosen = choose(cands, k, size, sep)
+            for _, _, p, info in chosen:
+                info["cover"] = rendered_coverage(p, size, up_axis)
+        except SystemExit:
+            chosen, stats, hit = [], {}, False
+        trail.append((label, dict(settings), stats, len(chosen)))
+        if verbose:
+            got = f"{len(chosen)} of {k}"
+            note = " (recalled)" if hit else ""
+            print(f"  {label:<28} {got:>10}   "
+                  f"({stats.get('viable', 0)} viable){note}")
+        return chosen, stats
+
+    if verbose:
+        print("  searching")
+    chosen, stats = attempt("defaults")
+    if len(chosen) >= k:
+        return chosen, trail
+
+    # Separation first. It throws away candidates that already passed every
+    # quality filter, so loosening it costs nothing but variety, while
+    # every other relaxation costs quality.
+    if stats.get("viable", 0) > len(chosen):
+        for sep in (0.75, 0.5):
+            settings["min_separation"] = sep
+            chosen, stats = attempt(f"separation {sep}")
+            if len(chosen) >= k:
+                return chosen, trail
+
+    # Then whichever filter is rejecting the most, in the order the tally
+    # ranks them rather than a fixed order - a sparse capture and a holed
+    # one need different things loosened first.
+    #
+    # A local copy: filters get retired from it as they run out of room, and
+    # RELAXATIONS is module state that the next call is entitled to find
+    # intact.
+    remaining = [r for r in RELAXATIONS if r[2]]
+    while remaining:
+        tally = {key: stats.get(key, 0) for key, _, _ in remaining}
+        if not any(tally.values()):
+            break
+        worst = max(tally, key=tally.get)
+        setting, steps = next((st, sp) for kk, st, sp in remaining
+                              if kk == worst)
+        cur = settings.get(setting)
+        # min_cover loosens downward, every other setting upward.
+        later = [v for v in steps
+                 if (v < cur if setting == "min_cover" else v > cur)]
+        if not later:
+            # This filter is as loose as it goes. Retire it and look at the
+            # next worst rather than stopping, since a second filter may be
+            # the one actually binding now.
+            remaining = [r for r in remaining if r[0] != worst]
+            continue
+        settings[setting] = later[0]
+        chosen, stats = attempt(f"{SETTING_NOTE[setting]} {later[0]}")
+        if len(chosen) >= k:
+            return chosen, trail
+
+    return chosen, trail
+
+
+def describe_trail(trail, k, size):
+    """One paragraph saying what was tried and what it cost.
+
+    Written for somebody who did not watch it run and has to decide whether
+    to trust the result.
+    """
+    if not trail:
+        return "nothing was searched"
+    label, settings, stats, got = trail[-1]
+    lines = []
+    if len(trail) == 1:
+        lines.append(f"  the defaults gave {got} patches")
+    else:
+        first = trail[0][3]
+        lines.append(f"  the defaults gave {first}; "
+                     f"{len(trail) - 1} setting(s) were loosened to reach {got}")
+        changed = []
+        base = trail[0][1]
+        for key, val in settings.items():
+            if base.get(key) != val:
+                changed.append(f"--{key.replace('_', '-')} {val}")
+        if changed:
+            lines.append("  to repeat this by hand: " + " ".join(changed))
+    if got < k:
+        lines.append(f"  still short of {k}. The tally below says what is "
+                     f"rejecting; a capture that cannot reach {k} at any "
+                     f"setting is not a tiling exemplar.")
+    return "\n".join(lines)
+
 
 def balanced_split(patches, colours):
     """Split the chosen patches into the two axes so both look alike.

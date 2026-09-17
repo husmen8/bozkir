@@ -42,9 +42,22 @@ class SceneConfig:
 
     sh_degree: int = None           # truncate colour; None keeps the file's
 
-    def key(self):
-        """Short stable hash of the settings, for cache filenames."""
+    def key(self, source=None):
+        """Short stable hash of the settings, for cache filenames.
+
+        `source`, when given, folds the input file's size and modification
+        time into the hash. Without it the key describes only how a scene
+        was processed, so retraining a capture and writing the result over
+        the same filename produces the same key - and the cache then hands
+        back the previous model, with nothing on screen to say so except a
+        splat count that nobody reads twice. Size and mtime are enough:
+        hashing the file itself would mean reading hundreds of megabytes to
+        decide whether to avoid reading them.
+        """
         parts = sorted(f"{k}={v}" for k, v in asdict(self).items())
+        if source is not None:
+            st = Path(source).stat()
+            parts.append(f"src={st.st_size}:{int(st.st_mtime)}")
         return hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
 
     def describe(self):
@@ -72,7 +85,7 @@ def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
     path = Path(path)
     cfg = cfg or SceneConfig()
 
-    cache_path = Path(cache_dir) / f"{path.stem}_{cfg.key()}.ply"
+    cache_path = Path(cache_dir) / f"{path.stem}_{cfg.key(path)}.ply"
     if cache and cache_path.exists():
         s = load_ply(cache_path)
         if verbose:

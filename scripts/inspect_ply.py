@@ -3,7 +3,9 @@ affects a later design decision.
 
 Run from the repo root:
 
-    python scripts/probe_ply.py data/raw/garden.ply
+    python scripts/inspect_ply.py data/raw/minecraft.ply 
+
+    
 
 Prints a report and writes out/probe_<name>.png. Nothing here modifies the
 scene; it only measures it.
