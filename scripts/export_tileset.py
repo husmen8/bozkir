@@ -24,14 +24,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir import presets as presets_mod  # noqa: E402
 from bozkir.patches import (apply_settings, auto_pick,  # noqa: E402
-                            clip_slab, describe_trail, ground_level,
-                            level_patch, pick_patches, score_patch,
-                            search_kwargs, cached_search, choose,
-                            rendered_coverage)
+                            cached_search, choose, describe_trail,
+                            level_patch, rendered_coverage, search_kwargs)
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
-from bozkir.tile import extract_patch  # noqa: E402
-from bozkir.transform import rotate, quat_between  # noqa: E402
 from bozkir.pack import pack, STRIDE  # noqa: E402
 
 

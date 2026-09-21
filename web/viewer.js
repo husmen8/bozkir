@@ -10,8 +10,11 @@ import { drawOrder } from './order.js';
 import { mergeGroups, MAX_GROUP } from './merge.js';
 import { openDrop, describe } from './tileset.js';
 import { Capture } from './capture.js';
+import { loadHeightField } from './heightfield.js';
+import { Benchmark, report } from './benchmark.js';
+import { classify, sampleGrid } from './landform.js';
 
-const BUILD = 'bozkir viewer 3.6 (resizable panel)';
+const BUILD = 'bozkir viewer 4.1 (16-bit heights, sediment)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -33,6 +36,24 @@ uniform vec3 uEye;
 // An unmerged draw uses slot 0 and ignores the rest, so both paths read
 // the same way and the shader has no branch for it.
 uniform vec2 uCellXY[8];
+
+// Per-splat class blending. Hybrid GSWT's Equation 1 selects a class at a
+// position using a priority that varies *within* the exemplar - per
+// Gaussian, not per tile. That is why their transitions look organic and a
+// per-tile choice cannot: a tile boundary is a straight line, so a class
+// boundary made of tile choices is a staircase however good the rule is.
+//
+// Here the same effect is had by drawing both classes in a cell near the
+// boundary and dissolving between them. Each splat gets a fixed pseudo
+// random priority from its own index, and survives only if that priority
+// falls on its class's side of the local mix. The dissolve is stable
+// because the priority is a function of the index and nothing else - a
+// splat does not flicker between frames, and two instances of the same
+// tile at different mixes keep different splats, which breaks up the
+// identical-twin look of repeated tiles as a side effect.
+//
+// uMix < 0 disables it: one class, every splat drawn, the old behaviour.
+uniform float uMix;
 uniform float uRelief;        // height field amplitude
 uniform float uWave;          // height field wavelength, world units
 uniform vec2 uGridRot;        // cos, sin of the grid's rotation
@@ -63,10 +84,61 @@ out vec2 vCorner;
 out vec4 vColour;
 
 // The height field, duplicated from height() in the JavaScript. The two
-// must agree exactly: the overlay lines are placed from the JS copy and
-// the geometry from this one.
+// must agree exactly: the overlay lines and the material rule are computed
+// from the JS copy and the geometry from this one, so any divergence means
+// material placed by one surface and drawn on another.
+//
+// That is not hypothetical. This function used to have only the analytic
+// branch, so a loaded height field reached the rule but never the GPU: the
+// classes were chosen from real drainage and then drawn on sine waves.
+// Everything looked periodic because it was.
+//
+// Sampled with texelFetch and interpolated by hand rather than with a
+// LINEAR sampler, because a single-channel float texture is not filterable
+// everywhere, and because doing it explicitly is the only way to be sure
+// it matches the bilinear in heightfield.js rather than merely resembling
+// it.
+uniform sampler2D uField;
+uniform vec2 uFieldSize;      // texels
+uniform float uFieldExtent;   // world units across the long edge
+uniform float uHasField;
+
+// Fold a coordinate back into 0..n by reflection, as HeightField does.
+// Mirroring rather than wrapping: the far edge meets itself, so a field
+// smaller than the grid repeats with no cliff along the join.
+float mirrorCoord(float t, float m) {
+  if (m <= 0.0) return 0.0;
+  float p = 2.0 * m;
+  float v = mod(t, p);
+  if (v < 0.0) v += p;
+  return v <= m ? v : p - v;
+}
+
+float fieldAt(vec2 world) {
+  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+  float scale = longEdge / max(uFieldExtent, 1e-6);
+  float u = world.x * scale + (uFieldSize.x - 1.0) * 0.5;
+  float v = (uFieldSize.y - 1.0) * 0.5 - world.y * scale;
+  u = mirrorCoord(u, uFieldSize.x - 1.0);
+  v = mirrorCoord(v, uFieldSize.y - 1.0);
+
+  ivec2 p0 = ivec2(floor(u), floor(v));
+  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
+  vec2 f = vec2(u, v) - vec2(p0);
+  float a = texelFetch(uField, ivec2(p0.x, p0.y), 0).r;
+  float b = texelFetch(uField, ivec2(p1.x, p0.y), 0).r;
+  float c = texelFetch(uField, ivec2(p0.x, p1.y), 0).r;
+  float d = texelFetch(uField, ivec2(p1.x, p1.y), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 float terrainHeight(vec2 p) {
   if (uRelief <= 0.0) return 0.0;
+  if (uHasField > 0.5) {
+    // Centred on zero so raising relief lifts and lowers about the middle
+    // rather than pushing the whole terrain upwards.
+    return uRelief * (fieldAt(p) - 0.5) * 2.0;
+  }
   float f = 1.0 / max(uWave, 0.01);
   return uRelief * (sin(f * p.x) * cos(f * p.y)
     + 0.5 * sin(2.3 * f * p.x + 1.7) * cos(1.9 * f * p.y + 0.4));
@@ -75,7 +147,13 @@ float terrainHeight(vec2 p) {
 // The surface gradient at a point, by central differences.
 vec2 terrainGrad(vec2 p) {
   if (uRelief <= 0.0) return vec2(0.0);
-  float e = max(uWave, 0.01) * 0.01;
+  // The step has to suit whichever surface is in use. For a sampled field
+  // the meaningful scale is one texel of ground, not the analytic
+  // wavelength: too large a step smooths real features away, too small and
+  // the difference is quantisation noise.
+  float e = uHasField > 0.5
+    ? max(uFieldExtent, 1e-6) / max(max(uFieldSize.x, uFieldSize.y), 2.0)
+    : max(uWave, 0.01) * 0.01;
   return vec2(
     (terrainHeight(p + vec2(e, 0.0)) - terrainHeight(p - vec2(e, 0.0))),
     (terrainHeight(p + vec2(0.0, e)) - terrainHeight(p - vec2(0.0, e)))
@@ -119,6 +197,21 @@ void main() {
   uint slot = aIndex >> 29u;
   uint sid = aIndex & 0x1FFFFFFFu;
   vec2 cellXY = uCellXY[int(slot)];
+
+  if (uMix >= 0.0) {
+    // A hash of the index: cheap, fixed per splat, and flat enough across
+    // the range that the dissolve threshold means what it says.
+    uint h = sid * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    float r = float((h >> 22u) ^ h) / 4294967296.0;
+    if (r > uMix) {
+      // Collapsed to nothing and placed behind the camera, which costs
+      // less than a discard in the fragment stage and keeps the fragment
+      // shader branch-free.
+      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+      return;
+    }
+  }
 
   vec4 a = fetch(sid, 0);     // position.xyz, opacity
   vec4 b = fetch(sid, 1);     // scale.xyz
@@ -338,18 +431,23 @@ const overlay = document.getElementById('overlay');
 const bar = document.querySelector('#bar i');
 const ui = {};
 for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
-  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
-  'wangnote', 'edges', 'diagonals', 'tints', 'identity',
-  'relief', 'reliefn', 'reliefscale', 'reliefscalen',
-  'band', 'bandn', 'subdiv', 'subdivn', 'seam',
-  'sortmode', 'views', 'viewsn', 'recache', 'sorterr',
-  'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
-  'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
-  'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
-  'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
-  'mergestat', 'capture', 'captureboth', 'capframes',
-  'capframesn', 'capcentre', 'caparc', 'caparcn',
-  'capstepn']) {
+                  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
+                  'wangnote', 'edges', 'diagonals', 'tints', 'identity',
+                  'relief', 'reliefn', 'reliefscale', 'reliefscalen',
+                  'band', 'bandn', 'subdiv', 'subdivn', 'seam',
+                  'sortmode', 'views', 'viewsn', 'recache', 'sorterr',
+                  'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
+                  'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
+                  'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
+                  'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
+                  'mergestat', 'capture', 'captureboth', 'capframes',
+                  'capframesn', 'capcentre', 'caparc', 'caparcn',
+                  'capstepn', 'fieldnote', 'bench', 'benchout',
+                  'classrule', 'classsharp', 'classsharpn',
+                  'classnote', 'classblend', 'blendwidth',
+                  'blendwidthn', 'classbalance', 'classbalancen',
+                  'classcoherence', 'classcoherencen',
+                  'classaltitude', 'classaltituden']) {
   ui[id] = document.getElementById(id);
 }
 
@@ -466,10 +564,10 @@ function compile(src, type) {
     const m = log.match(/ERROR:\s*\d+:(\d+)/);
     const lines = src.split('\n');
     const ctx = m ? lines.slice(Math.max(0, m[1] - 3), +m[1] + 1)
-      .map((l, i) => `${Math.max(1, m[1] - 2) + i}: ${l}`)
-      .join('\n') : '';
+                         .map((l, i) => `${Math.max(1, m[1] - 2) + i}: ${l}`)
+                         .join('\n') : '';
     throw new Error(`${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} ` +
-      `shader failed\n${log}\n${ctx}`);
+                    `shader failed\n${log}\n${ctx}`);
   }
   return s;
 }
@@ -567,15 +665,15 @@ class Orbit {
   dir() {
     const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
     return [-Math.cos(el) * Math.cos(az), -Math.cos(el) * Math.sin(az),
-    -Math.sin(el)];
+            -Math.sin(el)];
   }
 
   eye() {
     if (this.fly) return this.pos.slice();
     const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
     return [this.target[0] + this.distance * Math.cos(el) * Math.cos(az),
-    this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
-    this.target[2] + this.distance * Math.sin(el)];
+            this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
+            this.target[2] + this.distance * Math.sin(el)];
   }
 
   /** Keep the view unchanged when the mode changes. */
@@ -585,7 +683,7 @@ class Orbit {
     else {
       const e = this.pos, f = this.dir();
       this.target = [e[0] + f[0] * this.distance, e[1] + f[1] * this.distance,
-      e[2] + f[2] * this.distance];
+                     e[2] + f[2] * this.distance];
     }
     this.fly = on;
   }
@@ -595,11 +693,11 @@ class Orbit {
     const f = this.dir();
     const up = Math.abs(f[2]) > 0.999 ? [1, 0, 0] : [0, 0, 1];
     let r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2],
-    f[0] * up[1] - f[1] * up[0]];
+             f[0] * up[1] - f[1] * up[0]];
     const rl = Math.hypot(...r) || 1;
     r = r.map(v => v / rl);
     const d = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2],
-    f[0] * r[1] - f[1] * r[0]];
+               f[0] * r[1] - f[1] * r[0]];
     return { right: r, down: d, forward: f, eye: e };
   }
 }
@@ -616,10 +714,11 @@ console.log('shaders compiled');
 
 const splatU = uniforms(splatProg,
   ['view', 'eye', 'cellXY', 'relief', 'wave', 'subdiv',
-    'focal', 'viewport', 'gain', 'near',
-    'data', 'colour', 'tileSize', 'edgeMark', 'fade',
-    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot',
-    'edgeN', 'edgeE', 'edgeS', 'edgeW']);
+   'focal', 'viewport', 'gain', 'near',
+   'data', 'colour', 'tileSize', 'edgeMark', 'fade',
+   'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
+   'field', 'fieldSize', 'fieldExtent', 'hasField',
+   'edgeN', 'edgeE', 'edgeS', 'edgeW']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -672,7 +771,7 @@ gl.bindVertexArray(null);
 gl.disable(gl.DEPTH_TEST);
 gl.enable(gl.BLEND);
 gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA,
-  gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+                     gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 gl.clearColor(0, 0, 0, 1);
 
 // ================================================================= state
@@ -682,6 +781,38 @@ let splatCount = 0;
 let patches = [{ start: 0, count: 0 }];
 let identityOrder = null;
 let wangCodes = null;
+// The class each tile belongs to, and how many there are. With one class
+// this is all zeros and every decision below collapses to the old
+// behaviour.
+let tileClass = null;
+let classCount = 1;
+// Off by default so a scene loads looking the way it always did, and the
+// rule is something you turn on and see happen.
+let classOn = true;
+let classSharp = 2.0;
+// How much of the grid the first class takes. The rule's own arithmetic
+// gave whatever it gave - 27% in every scene tried, 6% on a synthetic
+// valley - which is no use to somebody who wants a third of their terrain
+// to be scrub. Balance decides how much; the rule still decides where.
+let classBalance = 0.5;
+// How large a patch of one material should be, in tiles. Without it,
+// neighbouring cells either side of the threshold make opposite choices
+// over a difference too small to mean anything, and the result is a
+// scatter of single tiles. A patch of scrub is a patch.
+let classCoherence = 2;
+// How much altitude counts against shape. Every terrain shader places
+// material by height first - snow above a line, grass below one - and it
+// was the input missing here: a hollow at the top of a mountain read the
+// same as a hollow at the bottom.
+let classAltitude = 0.4;
+// Off by default. It doubles the draw calls for cells near a class
+// boundary, and a scene should look the way it always did until somebody
+// asks for something else.
+let classBlend = false;
+let blendWidth = 0.35;
+let cellMix = null;
+let blendedCells = 0;
+let classStats = null;
 let tileSize = 0;
 let gridN = 1;
 let cells = [];
@@ -700,6 +831,14 @@ let cacheReady = false;
 let sortErr = null;           // measured order error, when asked for
 let showEdges = false, showDiagonals = false, showTints = false;
 let relief = 0, reliefScale = 6, edgeBand = 0.12, subdiv = 1;
+// Set once somebody drags the scale slider, after which the grid stops
+// adjusting it for them. Guessing on their behalf is helpful until they
+// have said what they want, and rude afterwards.
+let reliefScaleTouched = false;
+// The height field on the GPU. Single channel float, fetched by texel and
+// interpolated in the shader, so what the geometry is displaced by is the
+// same arithmetic the rule read on the CPU.
+let fieldTex = null;
 
 // Turning the whole layout off the world axes. Worth having, but it does
 // not remove the alignment effect - it moves it. A grid turned 22 degrees
@@ -710,8 +849,24 @@ const FLAT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
 /** Ground height at a point. Two octaves is enough to bend tiles without
  *  turning the terrain into noise. */
+// A measured height field, when the tileset came with one. Null otherwise,
+// and then the analytic surface below is used.
+let field = null;
+
 function height(x, y) {
   if (relief <= 0) return 0;
+  if (field) {
+    // Centred on zero so raising relief lifts and lowers about the middle
+    // rather than pushing the whole terrain upwards.
+    //
+    // `reliefScale` means the same thing here as for the analytic surface
+    // below: how many tiles a landform spans. A sixteen-metre survey has no
+    // hills in it, so laying it across the whole grid gives one gentle
+    // swell and a control that does nothing. Letting it set the field's
+    // extent instead makes the same terrain readable at any size, and the
+    // field mirrors beyond its edge so there is no seam where it repeats.
+    return relief * (field.sample(x, y) - 0.5) * 2.0;
+  }
   // Wavelength is measured in tiles, so the terrain keeps the same shape
   // relative to the tiling whatever the tile size happens to be. In world
   // units a fixed number puts a 3x3 grid inside a single hill, which reads
@@ -726,14 +881,21 @@ function height(x, y) {
  *  Not `frame` - that name is the render loop. */
 function tangentFrame(x, y) {
   if (relief <= 0) return FLAT;
-  const e = Math.max(reliefScale * (tileSize || 1), 0.01) * 0.01;
+  // The step has to suit whichever surface is being differenced. For a
+  // sampled field the meaningful scale is one texel of ground: a step
+  // sized for the analytic wavelength is either far larger than a texel,
+  // which smooths real features out of the normal, or far smaller, which
+  // reads quantisation noise. Matches the shader's terrainGrad.
+  const e = field
+    ? Math.max(field.extent, 1e-6) / Math.max(field.w, field.h, 2)
+    : Math.max(reliefScale * (tileSize || 1), 0.01) * 0.01;
   const dx = (height(x + e, y) - height(x - e, y)) / (2 * e);
   const dy = (height(x, y + e) - height(x, y - e)) / (2 * e);
   const la = Math.hypot(1, dx), lb = Math.hypot(1, dy);
   const a = [1 / la, 0, dx / la];
   const b = [0, 1 / lb, dy / lb];
   let c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0]];
+           a[0] * b[1] - a[1] * b[0]];
   const lc = Math.hypot(...c) || 1;
   c = c.map(v => v / lc);
   return new Float32Array([a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]);
@@ -754,19 +916,13 @@ let showIdentity = false;
 // choosing six numbers, and the fog has to match the horizon or the
 // terrain ends against a colour the sky never has.
 const SKIES = {
-  none: { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
-  overcast: {
-    top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
-    ground: [0.10, 0.10, 0.11], fog: 0.020
-  },
-  dusk: {
-    top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
-    ground: [0.05, 0.05, 0.07], fog: 0.030
-  },
-  clear: {
-    top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
-    ground: [0.08, 0.09, 0.10], fog: 0.012
-  },
+  none:     { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
+  overcast: { top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
+              ground: [0.10, 0.10, 0.11], fog: 0.020 },
+  dusk:     { top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
+              ground: [0.05, 0.05, 0.07], fog: 0.030 },
+  clear:    { top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
+              ground: [0.08, 0.09, 0.10], fog: 0.012 },
 };
 let sky = 'overcast';
 let fogScale = 1.0;
@@ -775,8 +931,8 @@ let orbiting = false;
 // Green through red as detail drops, the convention every engine's LOD
 // debug view uses.
 const LOD_RGB = [[0.30, 0.85, 0.35], [0.95, 0.85, 0.25],
-[0.98, 0.58, 0.20], [0.92, 0.30, 0.30],
-[0.75, 0.35, 0.85], [0.40, 0.60, 0.95]];
+                 [0.98, 0.58, 0.20], [0.92, 0.30, 0.30],
+                 [0.75, 0.35, 0.85], [0.40, 0.60, 0.95]];
 
 /** A fixed hue per tile index, spread by the golden angle so neighbouring
  *  indices look different. Which tile a cell uses is decided once, when the
@@ -864,15 +1020,81 @@ worker.onmessage = (e) => {
  *  its left and its south colour by the cell below; north and east stay
  *  free. A complete set always has a tile that fits, so this never
  *  backtracks, and the free choices are what stop the terrain repeating. */
+/** A tile of the same code but a different class, for blending against.
+ *
+ *  The codes are what make this possible: every class carries the same
+ *  set, so the alternative to any tile is the tile with its code in
+ *  another class, and swapping between them cannot break the matching.
+ */
+function alternateTile(c, p) {
+  if (!wangCodes || !tileClass) return -1;
+  const code = wangCodes[c.patch];
+  for (let k = 0; k < wangCodes.length; k++) {
+    if (tileClass[k] === tileClass[c.patch]) continue;
+    const o = wangCodes[k];
+    if (o[0] === code[0] && o[1] === code[1]
+        && o[2] === code[2] && o[3] === code[3]) return k;
+  }
+  return -1;
+}
+
 function buildGrid() {
   cells = [];
   if (!tileSize) { cells = [{ x: 0, y: 0, z: 0, warp: FLAT, patch: 0 }]; return; }
   usedPatches = Math.max(1, Math.min(usedPatches || patches.length,
-    patches.length));
+                                     patches.length));
   let s = seed;
   const rand = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const half = (gridN - 1) / 2;
   const chosen = new Int32Array(gridN * gridN).fill(-1);
+
+  // Which material each cell should carry, from the shape of the ground
+  // under it. Computed once here rather than per frame: the decision
+  // changes when the terrain or the layout does, and neither changes while
+  // the camera moves.
+  //
+  // Every class was built over the same edge codes, so the code and the
+  // class are independent: the matching constraint picks the code from the
+  // neighbours, and the terrain picks the class, and neither can overrule
+  // the other. That separation is what makes this work at all.
+  let wantClass = null;
+  cellMix = null;
+  classStats = null;
+  if (classOn && classCount > 1 && tileSize) {
+    // Sampled finer than one point per tile. Every map below is a
+    // derivative of the surface, and a derivative taken from one sample
+    // per cell only means anything when the landforms are several cells
+    // across. Squeeze the field into a few tiles and one sample per cell
+    // is at or past the Nyquist limit - what comes back is not the terrain
+    // but an alias of it, which is why the classes looked scattered rather
+    // than placed. Drainage suffers most: a channel narrower than a cell
+    // cannot be traced at all.
+    const z = sampleGrid(gridN, tileSize, height, gridAngle, 4);
+    // The erosion's own record of where material settled, sampled on the
+    // same grid as the height so the two line up cell for cell. Only
+    // generated terrain has one.
+    const sed = field && field.sediment
+      ? sampleGrid(gridN, tileSize, (x, y) => field.sampleSediment(x, y),
+                   gridAngle, 4)
+      : null;
+    const r = classify(z, gridN, classCount,
+                       { spacing: tileSize, sharpness: classSharp,
+                         coherence: classCoherence,
+                         altitude: classAltitude,
+                         sediment: sed,
+                         balance: classCount === 2 ? classBalance : null });
+    wantClass = r.cls;
+    // How strongly each cell chose. Near 1/classCount the rule is nearly
+    // undecided, which is exactly where a hard choice shows as a staircase
+    // and where drawing both classes is worth the second draw call.
+    cellMix = r.strength;
+    const counts = new Array(classCount).fill(0);
+    for (const k of wantClass) counts[k]++;
+    let sure = 0;
+    for (const v of r.strength) sure += v;
+    classStats = { counts, sure: sure / Math.max(r.strength.length, 1),
+                   source: r.source };
+  }
 
   for (let j = 0; j < gridN; j++) {
     for (let i = 0; i < gridN; i++) {
@@ -887,7 +1109,19 @@ function buildGrid() {
           if (south >= 0 && c[2] !== south) continue;
           fits.push(k);
         }
-        pick = fits.length ? fits[Math.floor(rand() * fits.length) % fits.length] : 0;
+        // Of the tiles that fit, prefer the ones in the class the terrain
+        // asked for. Falling back to the whole set when that class has
+        // none is a safety net that should never fire - every class
+        // carries every code - and firing silently would look like the
+        // rule not working, so it is counted.
+        let pool = fits;
+        if (wantClass && tileClass) {
+          const want = wantClass[j * gridN + i];
+          const ofClass = fits.filter(k => tileClass[k] === want);
+          if (ofClass.length) pool = ofClass;
+          else if (classStats) classStats.missed = (classStats.missed || 0) + 1;
+        }
+        pick = pool.length ? pool[Math.floor(rand() * pool.length) % pool.length] : 0;
       } else {
         pick = Math.floor(rand() * usedPatches) % usedPatches;
       }
@@ -896,10 +1130,11 @@ function buildGrid() {
       const a = gridAngle * Math.PI / 180;
       const x = Math.cos(a) * lx - Math.sin(a) * ly;
       const y = Math.sin(a) * lx + Math.cos(a) * ly;
-      cells.push({
-        i, j, x, y, z: height(x, y),
-        warp: tangentFrame(x, y), patch: pick
-      });
+      const cellIdx = j * gridN + i;
+      cells.push({ i, j, x, y, z: height(x, y),
+                   warp: tangentFrame(x, y), patch: pick,
+                   cls: wantClass ? wantClass[cellIdx] : 0,
+                   mix: cellMix ? cellMix[cellIdx] : 1 });
     }
   }
 }
@@ -935,8 +1170,8 @@ function buildOverlay() {
       for (const [lu, lv] of [[u0, v0], [u1, v1]]) {
         const u = ca * lu - sa * lv, v = sa * lu + ca * lv;
         pos.push(O[0] + W[0] * u + W[3] * v + W[6] * lift,
-          O[1] + W[1] * u + W[4] * v + W[7] * lift,
-          O[2] + W[2] * u + W[5] * v + W[8] * lift);
+                 O[1] + W[1] * u + W[4] * v + W[7] * lift,
+                 O[2] + W[2] * u + W[5] * v + W[8] * lift);
         rgb.push(c[0], c[1], c[2]);
       }
     };
@@ -976,9 +1211,9 @@ function placeSplat(cellX, cellY, local) {
   } else {
     const sub = tileSize / subdiv;
     const ix = Math.min(Math.max(Math.floor((local[0] + tileSize / 2) / sub), 0),
-      subdiv - 1);
+                        subdiv - 1);
     const iy = Math.min(Math.max(Math.floor((local[1] + tileSize / 2) / sub), 0),
-      subdiv - 1);
+                        subdiv - 1);
     ax = (ix + 0.5) * sub - tileSize / 2;
     ay = (iy + 0.5) * sub - tileSize / 2;
   }
@@ -986,8 +1221,8 @@ function placeSplat(cellX, cellY, local) {
   const W = tangentFrame(wx, wy);
   const d = [local[0] - ax, local[1] - ay, local[2]];
   return [wx + W[0] * d[0] + W[3] * d[1] + W[6] * d[2],
-  wy + W[1] * d[0] + W[4] * d[1] + W[7] * d[2],
-  height(wx, wy) + W[2] * d[0] + W[5] * d[1] + W[8] * d[2]];
+          wy + W[1] * d[0] + W[4] * d[1] + W[7] * d[2],
+          height(wx, wy) + W[2] * d[0] + W[5] * d[1] + W[8] * d[2]];
 }
 
 /** How far apart two neighbouring tiles put the same point on their shared
@@ -1010,9 +1245,9 @@ function measureSeams(samples = 9) {
       for (let i = 0; i < samples; i++) {
         const s = (i / (samples - 1) - 0.5) * 2 * h * 0.98;
         const a = dx ? placeSplat(c.x, c.y, [h, s, 0])
-          : placeSplat(c.x, c.y, [s, h, 0]);
+                     : placeSplat(c.x, c.y, [s, h, 0]);
         const b = dx ? placeSplat(nb.x, nb.y, [-h, s, 0])
-          : placeSplat(nb.x, nb.y, [s, -h, 0]);
+                     : placeSplat(nb.x, nb.y, [s, -h, 0]);
         const d = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
         worst = Math.max(worst, d);
         total += d; count++;
@@ -1041,19 +1276,19 @@ function measureSortError(cell, sample = 4000) {
   const W = cell.warp;
   const idx = sortMode === 'cached' && cacheReady
     ? (() => {
-      const f = b.forward;
-      const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
-      W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
-      W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
-      let best = 0, bd = -2;
-      for (let k = 0; k < cacheDirs.length; k++) {
-        const d = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
-          + cacheDirs[k][2] * local[2];
-        if (d > bd) { bd = d; best = k; }
-      }
-      return cacheBuf.subarray(best * cacheStride,
-        (best + 1) * cacheStride);
-    })()
+        const f = b.forward;
+        const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
+                       W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
+                       W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
+        let best = 0, bd = -2;
+        for (let k = 0; k < cacheDirs.length; k++) {
+          const d = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
+                  + cacheDirs[k][2] * local[2];
+          if (d > bd) { bd = d; best = k; }
+        }
+        return cacheBuf.subarray(best * cacheStride,
+                                 (best + 1) * cacheStride);
+      })()
     : lastOrder;
   if (!idx) return null;
 
@@ -1063,13 +1298,13 @@ function measureSortError(cell, sample = 4000) {
     const s = idx[i];
     // Where this splat actually ends up, and how deep that is.
     const x = positionsRef[3 * s], y = positionsRef[3 * s + 1],
-      z = positionsRef[3 * s + 2];
+          z = positionsRef[3 * s + 2];
     const wx = cell.x + W[0] * x + W[3] * y + W[6] * z;
     const wy = cell.y + W[1] * x + W[4] * y + W[7] * z;
     const wz = cell.z + W[2] * x + W[5] * y + W[8] * z;
     const d = (wx - b.eye[0]) * b.forward[0]
-      + (wy - b.eye[1]) * b.forward[1]
-      + (wz - b.eye[2]) * b.forward[2];
+            + (wy - b.eye[1]) * b.forward[1]
+            + (wz - b.eye[2]) * b.forward[2];
     if (prev !== null) {
       // The order runs far to near, so depth should fall as it is walked.
       // A pair where it rises is a splat drawn in front of something that
@@ -1118,11 +1353,15 @@ function load(buffer, manifest) {
     lodLevels = Math.max(1, manifest.lod || 1);
     tileSize = manifest.size || 0;
     wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
+    tileClass = manifest.tiles.map(t => t.class || 0);
+    classCount = Math.max(1, manifest.classes || 1);
   } else {
     patches = [{ start: 0, count: n, levels: [[0, n]] }];
     lodLevels = 1;
     tileSize = 0;
     wangCodes = null;
+    tileClass = null;
+    classCount = 1;
   }
   usedPatches = patches.length;
 
@@ -1165,7 +1404,7 @@ function load(buffer, manifest) {
     return a[Math.floor(p * (a.length - 1))];
   };
   cam.target = [(q(xs, .25) + q(xs, .75)) / 2, (q(ys, .25) + q(ys, .75)) / 2,
-  (q(zs, .25) + q(zs, .75)) / 2];
+                (q(zs, .25) + q(zs, .75)) / 2];
   cam.distance = Math.max(
     2.5 * Math.max(q(xs, .75) - q(xs, .25), q(ys, .75) - q(ys, .25)), 0.5);
   if (tileSize) { cam.target = [0, 0, cam.target[2]]; cam.elevation = 20; }
@@ -1179,7 +1418,7 @@ function load(buffer, manifest) {
     for (const [start, count] of p.levels) ranges.push({ start, count });
   }
   worker.postMessage({ type: 'init', positions: pos.buffer, patches: ranges },
-    [pos.buffer]);
+                     [pos.buffer]);
   cacheReady = false;
   worker.postMessage({ type: 'cache', views: cacheViews });
 
@@ -1197,7 +1436,7 @@ function load(buffer, manifest) {
   regenerate();
   overlay.classList.add('hidden');
   console.log(`loaded ${n} splats, ${patches.length} patches, ` +
-    `tile size ${tileSize}, wang ${!!wangCodes}`);
+              `tile size ${tileSize}, wang ${!!wangCodes}`);
 }
 
 // ================================================================= gizmo
@@ -1306,8 +1545,8 @@ function measurePop() {
   let sum = 0;
   for (let i = 0; i < popPixels.length; i += 4) {
     sum += Math.abs(popPixels[i] - popPrev[i])
-      + Math.abs(popPixels[i + 1] - popPrev[i + 1])
-      + Math.abs(popPixels[i + 2] - popPrev[i + 2]);
+         + Math.abs(popPixels[i + 1] - popPrev[i + 1])
+         + Math.abs(popPixels[i + 2] - popPrev[i + 2]);
   }
   const diff = sum / (POP_W * POP_H * 3 * 255);
 
@@ -1334,6 +1573,14 @@ function resize() {
 }
 
 function frame() {
+  // Frame-to-frame time, kept for the scaling sweep. performance.now rather
+  // than the rAF timestamp so it reads the same whether or not the browser
+  // is throttling the callback.
+  {
+    const t = performance.now();
+    if (benchPrev) benchDt = t - benchPrev;
+    benchPrev = t;
+  }
   resize();
   const b = cam.basis();
   const fy = (canvas.height / 2) / Math.tan(cam.fov * Math.PI / 360);
@@ -1372,6 +1619,20 @@ function frame() {
     gl.bindVertexArray(splatVAO);
     gl.uniform1i(splatU.data, 0);
     gl.uniform1i(splatU.colour, 1);
+    // The height field, so the geometry is displaced by the same surface
+    // the material rule read. Without this the shader falls back to the
+    // analytic sine waves, which is what it did for every field ever
+    // loaded until now.
+    gl.uniform1i(splatU.field, 3);
+    if (field && fieldTex) {
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, fieldTex);
+      gl.uniform2f(splatU.fieldSize, field.w, field.h);
+      gl.uniform1f(splatU.fieldExtent, field.extent);
+      gl.uniform1f(splatU.hasField, 1.0);
+    } else {
+      gl.uniform1f(splatU.hasField, 0.0);
+    }
     gl.uniformMatrix3fv(splatU.view, false, viewMat);
     gl.uniform3fv(splatU.eye, new Float32Array(b.eye));
     gl.uniform2f(splatU.focal, fy, fy);
@@ -1383,7 +1644,7 @@ function frame() {
     gl.uniform1i(splatU.subdiv, subdiv);
     gl.uniform1f(splatU.tileSize, tileSize);
     gl.uniform2f(splatU.gridRot, Math.cos(gridAngle * Math.PI / 180),
-      Math.sin(gridAngle * Math.PI / 180));
+                 Math.sin(gridAngle * Math.PI / 180));
     gl.uniform3fv(splatU.fogColour, new Float32Array(S.horizon));
     gl.uniform1f(splatU.fogDensity, S.fog * fogScale);
 
@@ -1433,7 +1694,7 @@ function frame() {
       // (Section 3.4). That is the fix; this is only a better ordering.
       let near = Infinity;
       for (const [ox, oy] of [[-half, -half], [half, -half],
-      [-half, half], [half, half]]) {
+                              [-half, half], [half, half]]) {
         const kx = dx + ox, ky = dy + oy;
         const kz = kx * b.forward[0] + ky * b.forward[1] + dz * b.forward[2];
         if (kz < near) near = kz;
@@ -1468,10 +1729,8 @@ function frame() {
     } else {
       const vc = visible.map((v) => v.c);
       const r = drawOrder(vc, b.eye, { key: visible.map((v) => v.near) });
-      orderStats = {
-        cycles: r.cycles, weak: r.weak.length,
-        constrained: r.constrained
-      };
+      orderStats = { cycles: r.cycles, weak: r.weak.length,
+                     constrained: r.constrained };
       const reordered = r.order.map((k) => visible[k]);
       visible.length = 0;
       for (const v of reordered) visible.push(v);
@@ -1518,15 +1777,15 @@ function frame() {
             // stored splat positions are tile-local and the layout may be
             // rotated. Everything world-space - where the cell sits, where
             // the eye is - goes into the per-cell shift instead.
-            forward: [ga.c * b.forward[0] + ga.s * b.forward[1],
-            -ga.s * b.forward[0] + ga.c * b.forward[1],
-            b.forward[2]],
+            forward: [ ga.c * b.forward[0] + ga.s * b.forward[1],
+                      -ga.s * b.forward[0] + ga.c * b.forward[1],
+                       b.forward[2] ],
             groups: groups.map((x) => x.map((k) => {
               const c = vc[k], pp = patches[c.patch];
               const [start, count] = pp.levels[0];
               const shift = (c.x - b.eye[0]) * b.forward[0]
-                + (c.y - b.eye[1]) * b.forward[1]
-                + (c.z - b.eye[2]) * b.forward[2];
+                          + (c.y - b.eye[1]) * b.forward[1]
+                          + (c.z - b.eye[2]) * b.forward[2];
               return { patch: c.patch, start, count, shift };
             })),
           });
@@ -1545,10 +1804,11 @@ function frame() {
       mergeStats.groups = 0; mergeStats.cells = 0;
     }
     const canMerge = groups && mergeHave && mergeHaveKey === mergeKey
-      && mergeHave.length === groups.length;
+                  && mergeHave.length === groups.length;
     const groupDrawn = canMerge ? new Uint8Array(groups.length) : null;
 
     lodCounts = new Array(lodLevels).fill(0);
+    blendedCells = 0;
     for (let vi = 0; vi < visible.length; vi++) {
       const { c, dist } = visible[vi];
       const p = patches[c.patch];
@@ -1570,6 +1830,7 @@ function frame() {
               cellXYArr[2 * slot + 1] = visible[k].c.y;
             });
             gl.uniform2fv(splatU.cellXY, cellXYArr);
+            gl.uniform1f(splatU.mix, -1.0);    // merged groups never blend
             gl.uniform1f(splatU.fade, 1.0);
             gl.uniform1f(splatU.edgeMark, 0.0);
             gl.uniform1f(splatU.tintAmount, 0.0);
@@ -1585,8 +1846,31 @@ function frame() {
         }
       }
 
+      // A cell whose class the terrain chose only weakly is drawn twice:
+      // once in its own class and once in the other, dissolved against
+      // each other per splat. That turns a staircase of whole tiles into a
+      // boundary that wanders at splat scale, which is what Hybrid GSWT's
+      // per-Gaussian priority achieves and a per-tile choice cannot.
+      //
+      // `blendWidth` is how undecided a cell has to be to be worth the
+      // second draw. Cells well inside one class cost nothing extra.
+      let mix = -1, other = -1;
+      if (classBlend && classCount > 1 && tileClass && c.mix != null) {
+        // c.mix is the margin the cell decided by, 0 for a coin toss and 1
+        // where the rule is as sure as it gets anywhere on this terrain.
+        // A cell below the width is close enough to the boundary to be
+        // worth drawing both ways.
+        if (c.mix < blendWidth) {
+          // Half and half at a dead tie, all of its own class at the edge
+          // of the band.
+          mix = 0.5 + 0.5 * (c.mix / Math.max(blendWidth, 1e-6));
+          other = alternateTile(c, p);
+        }
+      }
+
       cellXYArr[0] = c.x; cellXYArr[1] = c.y;
       gl.uniform2fv(splatU.cellXY, cellXYArr.subarray(0, 2));
+      gl.uniform1f(splatU.mix, mix);
       if (showIdentity) {
         const c2 = tileRGB(c.patch);
         gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
@@ -1617,12 +1901,12 @@ function frame() {
       if (sortMode === 'cached' && cacheReady) {
         const W = c.warp, f = b.forward;
         const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
-        W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
-        W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
+                       W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
+                       W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
         let best = 0, bestDot = -2;
         for (let k = 0; k < cacheDirs.length; k++) {
           const d2 = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
-            + cacheDirs[k][2] * local[2];
+                   + cacheDirs[k][2] * local[2];
           if (d2 > bestDot) { bestDot = d2; best = k; }
         }
         buf = cacheIndexBuf;
@@ -1643,9 +1927,27 @@ function frame() {
           gl.uniform1f(splatU.tintAmount, 0.6);
         }
         gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0,
-          (base + start) * 4);
+                                (base + start) * 4);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
         drawnSplats += count; drawCalls++;
+
+        // The other class, taking the splats this one dissolved away.
+        // Same code, same position, same level - only the material
+        // differs, and the two dissolves are complementary so the cell
+        // ends up with one splat everywhere rather than two or none.
+        if (other >= 0 && patches[other]
+            && li < patches[other].levels.length) {
+          const [os, oc] = patches[other].levels[li];
+          if (oc) {
+            gl.uniform1f(splatU.mix, 1.0 - mix);
+            gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0,
+                                    (base + os) * 4);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, oc);
+            drawnSplats += oc; drawCalls++;
+            blendedCells++;
+            gl.uniform1f(splatU.mix, mix);
+          }
+        }
       }
     }
   }
@@ -1683,25 +1985,54 @@ function frame() {
     if (ui.lodinfo) {
       ui.lodinfo.textContent = lodLevels < 2 ? 'not in this file'
         : (lodOn ? lodCounts.map((n, i) => `L${i}:${n}`).join('  ')
-          : 'off, all cells at level 0');
+                 : 'off, all cells at level 0');
     }
     // No DOM id for these, so they go to the console rather than the panel.
     // `window.bozkirOrderStats` holds the latest; a cycle is reported once
     // per run because it means the sort fell back to the depth key and the
     // guarantee above does not hold for those cells.
+    if (ui.classnote) {
+      if (classCount < 2) {
+        ui.classnote.textContent = 'one class in this tileset';
+      } else if (!classOn) {
+        ui.classnote.textContent = `${classCount} classes, placed at random`;
+      } else if (classStats) {
+        const total = classStats.counts.reduce((a, b) => a + b, 0) || 1;
+        const share = classStats.counts
+          .map((c, k) => `${k}: ${(100 * c / total).toFixed(0)}%`).join('  ');
+        // Aliasing is the one failure the rule cannot see for itself. If
+        // the height field is squeezed into a few tiles it repeats across
+        // the grid, and the landforms are then only a cell or two across -
+        // at which point no amount of sampling helps, because the decision
+        // is per cell and there is nothing left to resolve. It looks like
+        // the rule producing a chequerboard, so it is worth saying plainly
+        // rather than leaving it to be discovered.
+        const repeats = field && reliefScale > 0
+          ? Math.round(gridN / reliefScale) : 1;
+        // `sure` is the mean margin now, so it reads as how strongly the
+        // terrain is driving the choice rather than as a probability.
+        ui.classnote.textContent = share
+          + `   confidence ${(classStats.sure * 100).toFixed(0)}%`
+          + (classBlend ? `   ${blendedCells} blended` : '')
+          + (classStats.source === 'sediment' ? '   from sediment' : '')
+          + (repeats > 3 ? `\n${repeats} terrain repeats across the grid `
+                           + `- raise relief scale to ${gridN}` : '')
+          + (classStats.missed ? `   ${classStats.missed} unmatched` : '');
+      }
+    }
     window.bozkirOrderStats = orderStats;
     window.bozkirMergeStats = mergeStats;
     if (ui.mergestat) {
       ui.mergestat.textContent = !mergeOn ? 'off'
         : (mergeStats.groups
-          ? `${mergeStats.groups} group${mergeStats.groups > 1 ? 's' : ''}, `
-          + `${mergeStats.cells} cells, ${mergeStats.ms.toFixed(0)} ms`
-          : 'none here');
+            ? `${mergeStats.groups} group${mergeStats.groups > 1 ? 's' : ''}, `
+              + `${mergeStats.cells} cells, ${mergeStats.ms.toFixed(0)} ms`
+            : 'none here');
     }
     if (orderStats.cycles > 0 && !cycleWarned) {
       cycleWarned = true;
       console.warn(`tile order: ${orderStats.cycles} cycle(s) broken by depth `
-        + `key - relief has tilted boundary planes into disagreement`);
+                 + `key - relief has tilted boundary planes into disagreement`);
     }
     frames = 0; fpsTime = now;
   }
@@ -1720,6 +2051,7 @@ function frame() {
   // After the draw and inside the same animation frame: the context has
   // no preserveDrawingBuffer, so the colour buffer is only readable here.
   if (capture.active) capture.step();
+  if (bench.active) bench.step(benchDt);
 
   requestAnimationFrame(frame);
 }
@@ -1886,6 +2218,16 @@ on('sorting', 'change', (e) => {
 });
 on('grid', 'input', (e) => {
   gridN = +e.target.value;
+  // A field covering the grid should keep covering it as the grid changes,
+  // until somebody moves the scale slider themselves.
+  if (field && !reliefScaleTouched && ui.reliefscale) {
+    const want = Math.min(+ui.reliefscale.max, Math.max(4, gridN));
+    ui.reliefscale.value = String(want);
+    reliefScale = want;
+    ui.reliefscalen.textContent = String(want);
+    field.fitTo(reliefScale * (tileSize || 1));
+    paintSliders();
+  }
   ui.gridn.textContent = `${gridN} x ${gridN}`;
   regenerate();
 });
@@ -1909,12 +2251,12 @@ on('freefly', 'change', (e) => {
   cam.setFly(e.target.checked);
   ui.flynote.textContent = cam.fly
     ? 'drag looks around, WASD flies, Q/E down and up, shift is faster, '
-    + 'scroll changes speed'
+      + 'scroll changes speed'
     : 'drag orbits, WASD slides the centre, scroll zooms';
   if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
 });
 for (const [id, elev, dist] of [['viewGround', 3, 8], ['viewWalk', 12, 6],
-['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
+                                ['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
   on(id, 'click', () => {
     if (cam.fly) { cam.setFly(false); ui.freefly.checked = false; }
     cam.elevation = elev;
@@ -1975,7 +2317,9 @@ on('relief', 'input', (e) => {
 });
 on('reliefscale', 'input', (e) => {
   reliefScale = +e.target.value;
+  reliefScaleTouched = true;
   ui.reliefscalen.textContent = reliefScale.toFixed(0);
+  if (field) field.fitTo(reliefScale * (tileSize || 1));
   regenerate();
 });
 on('edges', 'change', (e) => {
@@ -1997,6 +2341,33 @@ on('reset', 'click', () => {
 // --- ordering controls ------------------------------------------------
 
 on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
+
+on('classrule', 'change', (e) => { classOn = e.target.checked; regenerate(); });
+on('classaltitude', 'input', (e) => {
+  classAltitude = +e.target.value;
+  ui.classaltituden.textContent = `${Math.round(classAltitude * 100)}%`;
+  regenerate();
+});
+on('classcoherence', 'input', (e) => {
+  classCoherence = +e.target.value;
+  ui.classcoherencen.textContent = String(classCoherence);
+  regenerate();
+});
+on('classbalance', 'input', (e) => {
+  classBalance = +e.target.value;
+  ui.classbalancen.textContent = `${Math.round(classBalance * 100)}%`;
+  regenerate();
+});
+on('classblend', 'change', (e) => { classBlend = e.target.checked; });
+on('blendwidth', 'input', (e) => {
+  blendWidth = +e.target.value;
+  ui.blendwidthn.textContent = blendWidth.toFixed(2);
+});
+on('classsharp', 'input', (e) => {
+  classSharp = +e.target.value;
+  ui.classsharpn.textContent = classSharp.toFixed(1);
+  regenerate();
+});
 on('merging', 'change', (e) => {
   mergeOn = e.target.checked;
   // A stale stream would otherwise be drawn the moment merging came back on.
@@ -2036,6 +2407,53 @@ Object.defineProperty(window, 'bozkirMerge', {
 // measure worker latency rather than the ordering being compared, and it
 // would do it to both runs, hiding the difference the capture exists to
 // find.
+// --- scaling sweep -----------------------------------------------------
+//
+// The grid slider's upper end was chosen by nobody. This measures where the
+// renderer actually stops keeping up, and which of the frame, the sort or
+// the draw calls gives out first - which are different problems with
+// different fixes.
+let benchDt = 16.7;
+let benchPrev = 0;
+
+const bench = new Benchmark({
+  sizes: [4, 8, 12, 16, 20, 24, 32, 40, 48],
+  apply: (g) => {
+    gridN = g;
+    if (ui.grid) ui.grid.value = String(Math.min(g, +ui.grid.max));
+    if (ui.gridn) ui.gridn.textContent = `${g} x ${g}`;
+    regenerate();
+  },
+  read: () => ({
+    cells: cells.length,
+    splats: drawnSplats,
+    calls: drawCalls,
+    sortMs,
+  }),
+  isBusy: () => sortPending || !sortedReady,
+  onRow: (r) => {
+    if (ui.bench) {
+      ui.bench.textContent = `sweeping ${r.grid} x ${r.grid}...`;
+    }
+    console.log(`  grid ${r.grid}: ${r.fps.toFixed(0)} fps, `
+      + `${r.splats.toLocaleString()} splats, ${r.sortMs.toFixed(1)} ms sort`);
+  },
+  onDone: (rows) => {
+    if (ui.bench) ui.bench.textContent = 'scaling sweep';
+    const text = report(rows);
+    console.log('\n' + text);
+    if (ui.benchout) ui.benchout.textContent = text;
+    window.bozkirBench = rows;
+  },
+});
+
+on('bench', 'click', () => {
+  if (bench.active) { bench.cancel(); ui.bench.textContent = 'scaling sweep'; return; }
+  if (!splatCount) { console.warn('nothing loaded to measure'); return; }
+  if (ui.benchout) ui.benchout.textContent = 'measuring...';
+  bench.start();
+});
+
 const capture = new Capture({
   gl, canvas, cam,
   isBusy: () => sortPending || !sortedReady
@@ -2139,7 +2557,60 @@ for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
   Promise.all([
     fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
     fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null)).catch(() => null),
-  ]).then(([b, m]) => { if (b && !splatCount) load(b, m); }).catch(() => { });
+  ]).then(([b, m]) => {
+    if (!b || splatCount) return;
+    load(b, m);
+    // The height field is optional and arrives after the splats, so the
+    // scene is up either way and gains its terrain a moment later rather
+    // than waiting on a file most tilesets do not have.
+    useHeightField(name);
+  }).catch(() => {});
+}
+
+/** Look for a height field beside a tileset and adopt it if there is one. */
+async function useHeightField(name) {
+  const f = await loadHeightField('./data', name);
+  if (!f) return;
+  field = f;
+
+  // Upload it. R32F with NEAREST because the shader does its own bilinear:
+  // a single-channel float texture is not filterable on every device, and
+  // relying on the hardware would also mean trusting it to interpolate the
+  // same way heightfield.js does.
+  if (!fieldTex) fieldTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, fieldTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, f.w, f.h, 0, gl.RED, gl.FLOAT,
+                f.z);
+  // Cover the whole grid by default rather than the six tiles the analytic
+  // surface wanted. A generated field is 512 across and holds a landscape;
+  // showing two tiles of it and mirroring that fourteen times across the
+  // grid is the repetition, not the tiling. The analytic surface has no
+  // scale of its own so it keeps its old default.
+  if (ui.reliefscale) {
+    const want = Math.min(+ui.reliefscale.max, Math.max(4, gridN));
+    ui.reliefscale.value = String(want);
+    reliefScale = want;
+    ui.reliefscalen.textContent = String(want);
+    paintSliders();
+  }
+  field.fitTo(reliefScale * (tileSize || 1));
+  if (ui.fieldnote) ui.fieldnote.textContent = f.describe();
+  if (ui.relief && +ui.relief.value <= 0) {
+    // A measured field with relief at zero shows nothing, and the person
+    // has no way to know a field arrived. Lift it enough to be visible and
+    // leave the control where they can see what happened.
+    ui.relief.value = Math.min(1.0, +ui.relief.max);
+    relief = +ui.relief.value;
+    ui.reliefn.textContent = relief.toFixed(2);
+    paintSliders();
+  }
+  console.log(`height field: ${f.describe()}`);
 }
 
 paintSliders();

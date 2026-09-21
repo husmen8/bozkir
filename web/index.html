@@ -28,100 +28,44 @@
             --panel-w: 232px;
         }
 
-        * {
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
-        html,
-        body {
-            margin: 0;
-            height: 100%;
-            overflow: hidden;
-            background: var(--bg);
-            color: var(--text);
+        html, body {
+            margin: 0; height: 100%; overflow: hidden;
+            background: var(--bg); color: var(--text);
             font: var(--fs)/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
             -webkit-font-smoothing: antialiased;
         }
 
-        #app {
-            display: flex;
-            height: 100%;
-        }
-
-        #stage {
-            position: relative;
-            flex: 1;
-            min-width: 0;
-        }
-
-        #gl {
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
+        #app { display: flex; height: 100%; }
+        #stage { position: relative; flex: 1; min-width: 0; }
+        #gl { display: block; width: 100%; height: 100%; }
 
         #gizmo {
-            position: absolute;
-            right: 12px;
-            top: 12px;
-            width: 92px;
-            height: 92px;
-            pointer-events: none;
-            opacity: .85;
+            position: absolute; right: 12px; top: 12px;
+            width: 92px; height: 92px; pointer-events: none; opacity: .85;
         }
 
         #overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(11, 13, 14, .82);
-            z-index: 20;
+            position: absolute; inset: 0; display: flex;
+            align-items: center; justify-content: center;
+            background: rgba(11, 13, 14, .82); z-index: 20;
         }
-
-        #overlay.hidden {
-            display: none;
-        }
-
-        .msg {
-            text-align: center;
-            color: var(--dim);
-            line-height: 1.7;
-        }
-
-        .msg b {
-            display: block;
-            color: var(--text);
-            font-size: 15px;
-            letter-spacing: .12em;
-            margin-bottom: 6px;
-        }
-
-        #bar {
-            width: 180px;
-            height: 2px;
-            background: var(--line);
-            margin: 12px auto 0;
-        }
-
-        #bar i {
-            display: block;
-            height: 100%;
-            width: 0;
-            background: var(--accent);
-            transition: width .2s;
-        }
+        #overlay.hidden { display: none; }
+        .msg { text-align: center; color: var(--dim); line-height: 1.7; }
+        .msg b { display: block; color: var(--text); font-size: 15px;
+                 letter-spacing: .12em; margin-bottom: 6px; }
+        #bar { width: 180px; height: 2px; background: var(--line);
+               margin: 12px auto 0; }
+        #bar i { display: block; height: 100%; width: 0;
+                 background: var(--accent); transition: width .2s; }
 
         /* ---------------------------------------------------- the panel */
 
         #panel {
-            width: var(--panel-w);
-            flex: none;
-            background: var(--panel);
+            width: var(--panel-w); flex: none; background: var(--panel);
             border-left: 1px solid var(--line);
-            overflow-y: auto;
-            overscroll-behavior: contain;
+            overflow-y: auto; overscroll-behavior: contain;
             padding: 0 0 24px;
         }
 
@@ -129,92 +73,40 @@
            over the canvas rather than taking space in the layout, so dragging
            it does not shift the view by the width of the handle itself. */
         #grip {
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            width: 7px;
-            right: var(--panel-w);
-            z-index: 30;
-            cursor: ew-resize;
+            position: absolute; top: 0; bottom: 0; width: 7px;
+            right: var(--panel-w); z-index: 30; cursor: ew-resize;
         }
-
         #grip::after {
-            content: "";
-            position: absolute;
-            inset: 0 3px;
-            background: transparent;
-            transition: background .12s;
+            content: ""; position: absolute; inset: 0 3px;
+            background: transparent; transition: background .12s;
         }
-
-        #grip:hover::after,
-        body.sizing #grip::after {
+        #grip:hover::after, body.sizing #grip::after {
             background: var(--accent);
         }
-
-        body.sizing {
-            cursor: ew-resize;
-            user-select: none;
-        }
-
-        body.sizing #gl {
-            pointer-events: none;
-        }
-
-        #panel::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        #panel::-webkit-scrollbar-thumb {
-            background: #30373a;
-        }
+        body.sizing { cursor: ew-resize; user-select: none; }
+        body.sizing #gl { pointer-events: none; }
+        #panel::-webkit-scrollbar { width: 8px; }
+        #panel::-webkit-scrollbar-thumb { background: #30373a; }
 
         .head {
-            padding: 9px 9px 8px;
-            border-bottom: 1px solid var(--line);
-            display: flex;
-            align-items: baseline;
-            gap: 7px;
-            position: sticky;
-            top: 0;
-            background: var(--panel);
-            z-index: 5;
+            padding: 9px 9px 8px; border-bottom: 1px solid var(--line);
+            display: flex; align-items: baseline; gap: 7px;
+            position: sticky; top: 0; background: var(--panel); z-index: 5;
         }
-
         .head b {
-            font-size: 13px;
-            letter-spacing: .16em;
+            font-size: 13px; letter-spacing: .16em;
             /* Sunrise over flat ground, which is what the word means. */
             background: linear-gradient(100deg, #e0b552, #c96f6f 55%, #7fa8c4);
-            -webkit-background-clip: text;
-            background-clip: text;
+            -webkit-background-clip: text; background-clip: text;
             color: transparent;
         }
-
-        .head span {
-            color: var(--dim);
-            font-size: 9px;
-            letter-spacing: .08em;
-        }
-
-        .head .sz {
-            margin-left: auto;
-            display: flex;
-            gap: 2px;
-        }
-
+        .head span { color: var(--dim); font-size: 9px; letter-spacing: .08em; }
+        .head .sz { margin-left: auto; display: flex; gap: 2px; }
         .head .sz button {
-            width: 17px;
-            height: 15px;
-            padding: 0;
-            margin: 0;
-            font-size: 11px;
-            line-height: 1;
-            color: var(--dim);
+            width: 17px; height: 15px; padding: 0; margin: 0; font-size: 11px;
+            line-height: 1; color: var(--dim);
         }
-
-        .head .sz button:hover {
-            color: var(--text);
-        }
+        .head .sz button:hover { color: var(--text); }
 
         /* Each section carries its own colour in --c. It is not decoration
            alone: nine collapsed headers read as a list of identical grey
@@ -224,240 +116,109 @@
             border-bottom: 1px solid var(--line);
             --c: var(--dim);
         }
-
         summary {
-            height: 23px;
-            line-height: 23px;
-            padding: 0 9px;
-            color: var(--dim);
-            font-size: 10px;
-            letter-spacing: .1em;
-            text-transform: uppercase;
-            cursor: pointer;
-            list-style: none;
-            user-select: none;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            height: 23px; line-height: 23px; padding: 0 9px;
+            color: var(--dim); font-size: 10px; letter-spacing: .1em;
+            text-transform: uppercase; cursor: pointer;
+            list-style: none; user-select: none;
+            display: flex; align-items: center; gap: 6px;
             border-left: 2px solid transparent;
         }
-
-        summary::-webkit-details-marker {
-            display: none;
-        }
-
+        summary::-webkit-details-marker { display: none; }
         summary::before {
-            content: "\25B8";
-            font-size: 8px;
-            color: var(--c);
+            content: "\25B8"; font-size: 8px; color: var(--c);
             transition: transform .12s;
         }
-
-        details[open]>summary {
-            color: var(--text);
-            border-left-color: var(--c);
+        details[open] > summary {
+            color: var(--text); border-left-color: var(--c);
         }
-
-        details[open]>summary::before {
-            transform: rotate(90deg);
-        }
-
+        details[open] > summary::before { transform: rotate(90deg); }
         summary:hover {
             color: var(--text);
             background: linear-gradient(to right,
-                    color-mix(in srgb, var(--c) 14%, transparent), transparent 70%);
+                color-mix(in srgb, var(--c) 14%, transparent), transparent 70%);
         }
-
         .body {
             padding: 5px 9px 10px;
             border-left: 2px solid color-mix(in srgb, var(--c) 22%, transparent);
         }
-
-        .body>*+* {
-            margin-top: 3px;
-        }
-
-        .body>.r+.s,
-        .body>.s+.s {
-            margin-top: 2px;
-        }
+        .body > * + * { margin-top: 3px; }
+        .body > .r + .s, .body > .s + .s { margin-top: 2px; }
 
         /* A row is label left, value right, one line. Everything uses it,
            so the eye can scan a column of values instead of hunting. */
         .r {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            height: var(--row);
-            gap: 6px;
+            display: flex; align-items: center; justify-content: space-between;
+            height: var(--row); gap: 6px;
         }
-
-        .r>span:first-child {
-            color: var(--dim);
-            white-space: nowrap;
-        }
-
-        .r>.v {
-            color: var(--text);
-            text-align: right;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .r.wrap {
-            height: auto;
-            min-height: var(--row);
-        }
-
-        .r.wrap .v {
-            white-space: normal;
-            text-align: right;
-        }
+        .r > span:first-child { color: var(--dim); white-space: nowrap; }
+        .r > .v { color: var(--text); text-align: right;
+                  overflow: hidden; text-overflow: ellipsis; }
+        .r.wrap { height: auto; min-height: var(--row); }
+        .r.wrap .v { white-space: normal; text-align: right; }
 
         /* Slider with its label and value written on top, Blender style, so
            a control costs one row instead of two. The filled portion is set
            from JS into --f. */
-        .s {
-            position: relative;
-            height: var(--row);
-            margin: 1px 0;
-        }
-
+        .s { position: relative; height: var(--row); margin: 1px 0; }
         .s input[type=range] {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            margin: 0;
-            -webkit-appearance: none;
-            appearance: none;
+            position: absolute; inset: 0; width: 100%; height: 100%;
+            margin: 0; -webkit-appearance: none; appearance: none;
             background: linear-gradient(to right,
-                    color-mix(in srgb, var(--c) 34%, var(--sunken)) 0 calc(var(--f, 0) * 1%),
-                    var(--sunken) calc(var(--f, 0) * 1%) 100%);
-            border: 1px solid var(--line);
-            border-radius: 2px;
-            cursor: ew-resize;
+                color-mix(in srgb, var(--c) 34%, var(--sunken))
+                    0 calc(var(--f, 0) * 1%),
+                var(--sunken) calc(var(--f, 0) * 1%) 100%);
+            border: 1px solid var(--line); border-radius: 2px; cursor: ew-resize;
         }
-
-        .s input[type=range]:hover {
-            border-color: #48504f;
-        }
-
+        .s input[type=range]:hover { border-color: #48504f; }
         .s input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 2px;
-            height: 100%;
-            background: var(--c);
-            cursor: ew-resize;
+            -webkit-appearance: none; width: 2px; height: 100%;
+            background: var(--c); cursor: ew-resize;
         }
-
         .s input[type=range]::-moz-range-thumb {
-            width: 2px;
-            height: 100%;
-            border: 0;
-            border-radius: 0;
+            width: 2px; height: 100%; border: 0; border-radius: 0;
             background: var(--c);
         }
-
-        .s input[type=range]:disabled {
-            opacity: .4;
-            cursor: default;
-        }
-
+        .s input[type=range]:disabled { opacity: .4; cursor: default; }
         .s label {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 5px;
-            pointer-events: none;
-            font-size: 10px;
-            color: var(--dim);
+            position: absolute; inset: 0; display: flex; align-items: center;
+            justify-content: space-between; padding: 0 5px;
+            pointer-events: none; font-size: 10px; color: var(--dim);
         }
-
-        .s label b {
-            color: var(--text);
-            font-weight: 400;
-        }
+        .s label b { color: var(--text); font-weight: 400; }
 
         button {
-            height: var(--row);
-            width: 100%;
-            padding: 0 6px;
-            margin: 1px 0;
-            font: inherit;
-            font-size: 10px;
-            color: var(--text);
-            background: #2a2f31;
-            border: 1px solid var(--line);
-            border-radius: 2px;
-            cursor: pointer;
+            height: var(--row); width: 100%; padding: 0 6px; margin: 1px 0;
+            font: inherit; font-size: 10px; color: var(--text);
+            background: #2a2f31; border: 1px solid var(--line);
+            border-radius: 2px; cursor: pointer;
         }
-
         button:hover {
             background: color-mix(in srgb, var(--c) 16%, #2a2f31);
             border-color: color-mix(in srgb, var(--c) 45%, var(--line));
             color: #fff;
         }
-
-        button:active {
-            background: #23272a;
-        }
-
-        .cols {
-            display: flex;
-            gap: 2px;
-        }
+        button:active { background: #23272a; }
+        .cols { display: flex; gap: 2px; }
 
         label.c {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            height: var(--row);
-            color: var(--dim);
-            cursor: pointer;
+            display: flex; align-items: center; gap: 5px;
+            height: var(--row); color: var(--dim); cursor: pointer;
         }
-
-        label.c:hover {
-            color: var(--text);
-        }
-
-        label.c input {
-            accent-color: var(--c);
-            margin: 0;
-            width: 11px;
-            height: 11px;
-        }
+        label.c:hover { color: var(--text); }
+        label.c input { accent-color: var(--c); margin: 0; width: 11px;
+                        height: 11px; }
 
         select {
-            height: var(--row);
-            width: 100%;
-            padding: 0 4px;
-            font: inherit;
-            font-size: 10px;
-            color: var(--text);
-            background: var(--sunken);
-            border: 1px solid var(--line);
-            border-radius: 2px;
-            cursor: pointer;
+            height: var(--row); width: 100%; padding: 0 4px; font: inherit;
+            font-size: 10px; color: var(--text); background: var(--sunken);
+            border: 1px solid var(--line); border-radius: 2px; cursor: pointer;
         }
-
-        input[type=file] {
-            font-size: 9px;
-            width: 100%;
-            color: var(--dim);
-        }
-
+        input[type=file] { font-size: 9px; width: 100%; color: var(--dim); }
         input[type=file]::file-selector-button {
-            font: inherit;
-            font-size: 10px;
-            color: var(--text);
-            background: #2a2f31;
-            border: 1px solid var(--line);
-            border-radius: 2px;
-            padding: 1px 6px;
-            margin-right: 5px;
+            font: inherit; font-size: 10px; color: var(--text);
+            background: #2a2f31; border: 1px solid var(--line);
+            border-radius: 2px; padding: 1px 6px; margin-right: 5px;
             cursor: pointer;
         }
 
@@ -465,83 +226,40 @@
             background: var(--sunken);
             border: 1px solid var(--line);
             border-left: 2px solid color-mix(in srgb, var(--c) 55%, transparent);
-            border-radius: 2px;
-            padding: 4px 6px;
-            color: var(--dim);
-            font-size: 10px;
-            min-height: var(--row);
-            word-break: break-word;
-            line-height: 1.5;
+            border-radius: 2px; padding: 4px 6px;
+            color: var(--dim); font-size: 10px; min-height: var(--row);
+            word-break: break-word; line-height: 1.5;
         }
 
-        kbd {
-            color: var(--text);
-        }
-
-        code {
-            color: var(--accent);
-        }
+        kbd { color: var(--text); }
+        code { color: var(--accent); }
 
         /* Tooltips. Everything that needed a paragraph now carries one here,
            which keeps the explanation available without it occupying the
            panel permanently. Shown to the left, since the panel is already
            at the right edge. */
-        [data-tip] {
-            position: relative;
-        }
-
+        [data-tip] { position: relative; }
         [data-tip]::after {
             content: attr(data-tip);
-            position: absolute;
-            right: calc(100% + 10px);
-            top: -2px;
-            width: 240px;
-            padding: 7px 9px;
-            background: #0e1011;
-            color: var(--text);
+            position: absolute; right: calc(100% + 10px); top: -2px;
+            width: 240px; padding: 7px 9px;
+            background: #0e1011; color: var(--text);
             border: 1px solid var(--line);
-            border-left: 2px solid var(--c);
-            border-radius: 3px;
-            font-size: 10px;
-            line-height: 1.45;
-            text-transform: none;
-            letter-spacing: 0;
-            text-align: left;
-            white-space: pre-wrap;
-            opacity: 0;
-            visibility: hidden;
-            transition: opacity .1s .35s;
-            z-index: 40;
-            pointer-events: none;
+            border-left: 2px solid var(--c); border-radius: 3px;
+            font-size: 10px; line-height: 1.45; text-transform: none;
+            letter-spacing: 0; text-align: left; white-space: pre-wrap;
+            opacity: 0; visibility: hidden; transition: opacity .1s .35s;
+            z-index: 40; pointer-events: none;
             box-shadow: 0 4px 16px rgba(0, 0, 0, .6);
         }
+        [data-tip]:hover::after { opacity: 1; visibility: visible; }
 
-        [data-tip]:hover::after {
-            opacity: 1;
-            visibility: visible;
-        }
-
-        #drophint {
-            position: fixed;
-            inset: 0;
-            display: none;
-            z-index: 50;
-            align-items: center;
-            justify-content: center;
-            pointer-events: none;
-            background: rgba(10, 10, 12, .72);
-            text-align: center;
-        }
-
-        body.dropping #drophint {
-            display: flex;
-        }
-
-        #drophint span {
-            border: 1px dashed var(--accent);
-            border-radius: 10px;
-            padding: 28px 40px;
-        }
+        #drophint { position: fixed; inset: 0; display: none; z-index: 50;
+            align-items: center; justify-content: center; pointer-events: none;
+            background: rgba(10, 10, 12, .72); text-align: center; }
+        body.dropping #drophint { display: flex; }
+        #drophint span { border: 1px dashed var(--accent); border-radius: 10px;
+            padding: 28px 40px; }
     </style>
 </head>
 
@@ -574,9 +292,7 @@
             </div>
 
             <details open style="--c:#c9a227">
-                <summary
-                    data-tip="A tileset is a .splat of packed Gaussians plus a .json saying which splats belong to which tile, the tile size, the LOD ranges and the Wang edge codes. Without the .json the splats load as one scene rather than as tiles.">
-                    scene</summary>
+                <summary data-tip="A tileset is a .splat of packed Gaussians plus a .json saying which splats belong to which tile, the tile size, the LOD ranges and the Wang edge codes. Without the .json the splats load as one scene rather than as tiles.">scene</summary>
                 <div class="body">
                     <input type="file" id="file" accept=".splat,.json,.zip" multiple>
                     <div class="r"><span>splats</span><span class="v" id="n">—</span></div>
@@ -587,32 +303,23 @@
             </details>
 
             <details open style="--c:#7fa8c4">
-                <summary
-                    data-tip="GSWT section 3.4. Which tile is drawn in front of which, and what to do when neither answer is right.">
-                    ordering</summary>
+                <summary data-tip="GSWT section 3.4. Which tile is drawn in front of which, and what to do when neither answer is right.">ordering</summary>
                 <div class="body">
-                    <div class="r"
-                        data-tip="Topological: each adjacent pair is decided by which side of their shared boundary the camera is on, then the whole is topologically sorted.&#10;&#10;Depth key: cells ranked by nearest footprint depth. Ties across a whole row when the view lines up with a grid axis, and the row then reverses in one frame.">
-                        <span>tiles</span>
-                    </div>
+                    <div class="r" data-tip="Topological: each adjacent pair is decided by which side of their shared boundary the camera is on, then the whole is topologically sorted.&#10;&#10;Depth key: cells ranked by nearest footprint depth. Ties across a whole row when the view lines up with a grid axis, and the row then reverses in one frame.">
+                        <span>tiles</span></div>
                     <select id="tileorder">
                         <option value="topological" selected>topological (GSWT)</option>
                         <option value="depth">depth key only</option>
                     </select>
 
-                    <label class="c"
-                        data-tip="Where the camera lies in the plane of a shared boundary, neither tile is in front and no draw order is right. Those tiles are drawn as one interleaved stream instead.&#10;&#10;Costs a re-sort of every splat in the group, so it fires only near a boundary."><input
-                            type="checkbox" id="merging" checked> selective merging</label>
-                    <div class="s"
-                        data-tip="How close the camera must be to a boundary's plane before its two tiles are merged, in tile widths.&#10;&#10;Measured crossings sit at about 0.25. Higher merges more and costs more; watch the readout below.">
+                    <label class="c" data-tip="Where the camera lies in the plane of a shared boundary, neither tile is in front and no draw order is right. Those tiles are drawn as one interleaved stream instead.&#10;&#10;Costs a re-sort of every splat in the group, so it fires only near a boundary."><input type="checkbox" id="merging" checked> selective merging</label>
+                    <div class="s" data-tip="How close the camera must be to a boundary's plane before its two tiles are merged, in tile widths.&#10;&#10;Measured crossings sit at about 0.25. Higher merges more and costs more; watch the readout below.">
                         <input type="range" id="mergethr" min="0.05" max="1" step="0.05" value="0.5">
                         <label>merge within<b id="mergethrn">0.50</b></label>
                     </div>
                     <div class="r"><span>merged</span><span class="v" id="mergestat">—</span></div>
 
-                    <div class="r"
-                        data-tip="Live: one sort per frame along the true view direction. Exact while tiles are flat.&#10;&#10;Cached: an order kept per direction, as GSWT does with nine views. Cheaper, and wrong by the amount shown as order error.">
-                        <span>within a tile</span></div>
+                    <div class="r" data-tip="Live: one sort per frame along the true view direction. Exact while tiles are flat.&#10;&#10;Cached: an order kept per direction, as GSWT does with nine views. Cheaper, and wrong by the amount shown as order error."><span>within a tile</span></div>
                     <select id="sortmode">
                         <option value="live" selected>live, one per frame</option>
                         <option value="cached">cached, per direction</option>
@@ -624,28 +331,20 @@
                     <button id="recache">rebuild cache</button>
                     <div class="r"><span>order error</span></div>
                     <div class="out" id="sorterr">—</div>
-                    <label class="c"
-                        data-tip="Off draws splats in storage order. Everything blends wrongly; useful only to see what sorting is for."><input
-                            type="checkbox" id="sorting" checked> depth sorting</label>
+                    <label class="c" data-tip="Off draws splats in storage order. Everything blends wrongly; useful only to see what sorting is for."><input type="checkbox" id="sorting" checked> depth sorting</label>
                 </div>
             </details>
 
             <details open style="--c:#c17a54">
-                <summary
-                    data-tip="Numbers rather than impressions. The pop meter is immediate; the capture feeds scripts/pop_metric.py for a real comparison.">
-                    measure</summary>
+                <summary data-tip="Numbers rather than impressions. The pop meter is immediate; the capture feeds scripts/pop_metric.py for a real comparison.">measure</summary>
                 <div class="body">
-                    <label class="c"
-                        data-tip="Picture change per degree turned. A spike means something switched rather than moved."><input
-                            type="checkbox" id="popmeter"> pop meter</label>
+                    <label class="c" data-tip="Picture change per degree turned. A spike means something switched rather than moved."><input type="checkbox" id="popmeter"> pop meter</label>
                     <div class="out" id="pop">off</div>
                     <button id="popreset">reset peak</button>
                     <div class="r"><span>boundary gap</span></div>
                     <div class="out" id="seam">—</div>
 
-                    <div class="r"
-                        data-tip="Turns the camera through a fixed arc, saving every frame to a zip.&#10;&#10;Keep the step under about half a degree: the metric compares neighbouring frames, and a large turn moves near and far ground by different amounts, which no per-block translation can undo and which then reads as popping whatever the ordering.">
-                        <span>sweep</span><span class="v"><b id="capstepn">0.42</b>° / frame</span></div>
+                    <div class="r" data-tip="Turns the camera through a fixed arc, saving every frame to a zip.&#10;&#10;Keep the step under about half a degree: the metric compares neighbouring frames, and a large turn moves near and far ground by different amounts, which no per-block translation can undo and which then reads as popping whatever the ordering."><span>sweep</span><span class="v"><b id="capstepn">0.42</b>° / frame</span></div>
                     <div class="s">
                         <input type="range" id="caparc" min="4" max="360" step="4" value="20">
                         <label>arc<b id="caparcn">20</b>°</label>
@@ -654,13 +353,12 @@
                         <input type="range" id="capframes" min="12" max="180" step="12" value="48">
                         <label>frames<b id="capframesn">48</b></label>
                     </div>
-                    <label class="c"
-                        data-tip="Orbits the middle of the laid-out terrain rather than wherever the camera is pointed. WASD moves the camera's own target, and a target nudged off the terrain orbits a point in mid air.&#10;&#10;It is also the same place every session, which is what makes a capture repeatable."><input
-                            type="checkbox" id="capcentre" checked> orbit terrain centre</label>
+                    <label class="c" data-tip="Orbits the middle of the laid-out terrain rather than wherever the camera is pointed. WASD moves the camera's own target, and a target nudged off the terrain orbits a point in mid air.&#10;&#10;It is also the same place every session, which is what makes a capture repeatable."><input type="checkbox" id="capcentre" checked> orbit terrain centre</label>
                     <button id="capture" data-tip="One run, using the ordering selected above.">capture sweep</button>
-                    <button id="captureboth"
-                        data-tip="Runs both orderings back to back from this same camera, then restores the setting. Both travel the identical path, which is what makes them comparable.&#10;&#10;Then: python scripts/pop_metric.py frames/topological --against frames/depth">capture
-                        both orderings</button>
+                    <button id="captureboth" data-tip="Runs both orderings back to back from this same camera, then restores the setting. Both travel the identical path, which is what makes them comparable.&#10;&#10;Then: python scripts/pop_metric.py frames/topological --against frames/depth">capture both orderings</button>
+
+                    <button id="bench" data-tip="Steps the grid from 4x4 to 48x48, holding the camera still and waiting for each sort to settle, and reports frame rate, splats drawn, draw calls and sort time at each size.&#10;&#10;Reading down the table shows which one turns over first, which is what says where the limit actually is.">scaling sweep</button>
+                    <div class="out" id="benchout" style="white-space:pre; overflow-x:auto">—</div>
                 </div>
             </details>
 
@@ -684,8 +382,7 @@
                     </div>
                     <button id="reset">reset view</button>
                     <label class="c"><input type="checkbox" id="orbit"> slow orbit</label>
-                    <label class="c" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input
-                            type="checkbox" id="freefly"> free fly</label>
+                    <label class="c" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
                     <div class="r"><span>speed</span><span class="v" id="speedn">1.00</span></div>
                     <div class="out" id="flynote">drag orbits · WASD moves · scroll zooms</div>
                 </div>
@@ -695,31 +392,53 @@
                 <summary>terrain</summary>
                 <div class="body">
                     <div class="s">
-                        <input type="range" id="grid" min="1" max="24" step="1" value="1" disabled>
+                        <input type="range" id="grid" min="1" max="64" step="1" value="1" disabled>
                         <label>grid<b id="gridn">1 x 1</b></label>
                     </div>
-                    <div class="s"
-                        data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
+                    <div class="s" data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
                         <input type="range" id="used" min="1" max="16" step="1" value="16" disabled>
                         <label>tiles used<b id="usedn">—</b></label>
                     </div>
                     <button id="reseed">shuffle tiles</button>
-                    <div class="s"
-                        data-tip="Turns the layout off the world axes. Moves where the grid lines up with the screen rather than removing it.">
+                    <div class="s" data-tip="Turns the layout off the world axes. Moves where the grid lines up with the screen rather than removing it.">
                         <input type="range" id="gridangle" min="0" max="45" step="1" value="0">
                         <label>grid angle<b id="gridanglen">0°</b></label>
                     </div>
                     <div class="out" id="wangnote">—</div>
+                    <label class="c" data-tip="Choose each tile's material from the shape of the ground under it, rather than at random.&#10;&#10;Loose material collects where water would run and where the ground is concave; bare ground shows where it is steep and convex. The same rule every terrain shader uses, with captured Gaussians instead of textures.&#10;&#10;Needs a tileset built with --classes 2."><input type="checkbox" id="classrule" checked> material follows terrain</label>
+                    <div class="s" data-tip="How decisively the rule picks. Low blends the two materials across a wide band; high makes a hard boundary where the terrain crosses the threshold.">
+                        <input type="range" id="classsharp" min="0.5" max="6" step="0.5" value="2">
+                        <label>decisiveness<b id="classsharpn">2.0</b></label>
+                    </div>
+                    <div class="s" data-tip="How much altitude counts against the shape of the ground.&#10;&#10;At 0 the rule is purely about slope, position and drainage, so a hollow at the top of a mountain reads the same as one at the bottom. At 1 it is almost purely elevation — the crudest terrain shader there is, and still recognisable. The interesting settings are in between.">
+                        <input type="range" id="classaltitude" min="0" max="1" step="0.05" value="0.4">
+                        <label>follows height<b id="classaltituden">40%</b></label>
+                    </div>
+                    <div class="s" data-tip="How large a patch of one material should be, in tiles.&#10;&#10;At zero, neighbouring tiles either side of the threshold make opposite choices over a difference too small to mean anything, and the result is a scatter of single tiles rather than regions. Material in a landscape is contiguous; the terrain maps alone do not say so.">
+                        <input type="range" id="classcoherence" min="0" max="6" step="1" value="2">
+                        <label>patch size<b id="classcoherencen">2</b></label>
+                    </div>
+                    <div class="s" data-tip="How much of the grid the first material takes. The rule still decides where the boundary falls; this decides how much land is either side of it.&#10;&#10;Without it the split is whatever the rule's arithmetic happens to give, which was 27% on every scene tried whatever the terrain - no use to somebody who wants a third of their ground to be scrub.">
+                        <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
+                        <label>first material<b id="classbalancen">50%</b></label>
+                    </div>
+                    <label class="c" data-tip="Where the rule is nearly undecided, draw both materials and dissolve between them splat by splat instead of choosing one for the whole tile.&#10;&#10;A tile boundary is a straight line, so a class boundary made of tile choices is a staircase however good the rule is. Hybrid GSWT avoids that with a priority that varies per Gaussian; this is the same idea.&#10;&#10;Costs a second draw call for the cells near a boundary. Off by default."><input type="checkbox" id="classblend"> blend at boundaries</label>
+                    <div class="s" data-tip="How undecided a cell must be before both materials are drawn. Wider blends over more ground and costs more draw calls.">
+                        <input type="range" id="blendwidth" min="0.05" max="1" step="0.05" value="0.35">
+                        <label>blend width<b id="blendwidthn">0.35</b></label>
+                    </div>
+                    <div class="out" id="classnote">—</div>
+                    <div class="r" data-tip="A measured height field loaded beside the tileset, written by scripts/heightmap.py from a drone survey's DSM or any other height raster.&#10;&#10;Without one the surface is two sine waves: smooth, periodic, and with no channels or ridges for a material rule to read."><span>height field</span></div>
+                    <div class="out" id="fieldnote">none — analytic surface</div>
                     <div class="s">
                         <input type="range" id="relief" min="0" max="2" step="0.02" value="0">
                         <label>relief<b id="reliefn">0.00</b></label>
                     </div>
-                    <div class="s">
+                    <div class="s" data-tip="How many tiles a landform spans. With a measured height field this is how much ground the field covers, so a small survey can be read at any size; beyond its edge the field mirrors, so it repeats without a seam.&#10;&#10;Without a field it is the wavelength of the analytic surface.">
                         <input type="range" id="reliefscale" min="2" max="40" step="1" value="6">
-                        <label>relief scale<b id="reliefscalen">6</b></label>
+                        <label>relief scale<b id="reliefscalen">6</b> tiles</label>
                     </div>
-                    <div class="s"
-                        data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
+                    <div class="s" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
                         <input type="range" id="subdiv" min="1" max="17" step="1" value="1">
                         <label>frames / tile<b id="subdivn">1</b></label>
                     </div>
@@ -739,25 +458,17 @@
             </details>
 
             <details style="--c:#c96f6f">
-                <summary
-                    data-tip="Each of these paints something the renderer normally hides, so a claim about tiling can be checked by eye.">
-                    debug views</summary>
+                <summary data-tip="Each of these paints something the renderer normally hides, so a claim about tiling can be checked by eye.">debug views</summary>
                 <div class="body">
-                    <label class="c"
-                        data-tip="One fixed colour per tile. If a cell changes colour as you turn, cells are swapping tiles."><input
-                            type="checkbox" id="identity"> tile identity</label>
-                    <label class="c"
-                        data-tip="The Wang matching constraint. Two tiles meet correctly when their shared boundary reads as one colour, not two."><input
-                            type="checkbox" id="tints"> edge colours</label>
+                    <label class="c" data-tip="One fixed colour per tile. If a cell changes colour as you turn, cells are swapping tiles."><input type="checkbox" id="identity"> tile identity</label>
+                    <label class="c" data-tip="The Wang matching constraint. Two tiles meet correctly when their shared boundary reads as one colour, not two."><input type="checkbox" id="tints"> edge colours</label>
                     <div class="s">
                         <input type="range" id="band" min="0.02" max="0.4" step="0.01" value="0.12">
                         <label>edge band<b id="bandn">0.12</b></label>
                     </div>
                     <label class="c"><input type="checkbox" id="edges"> tile edges</label>
-                    <label class="c" data-tip="Where the graph cut placed each seam between two patches."><input
-                            type="checkbox" id="diagonals"> patch diagonals</label>
-                    <label class="c" data-tip="Green, yellow, orange, red as detail drops."><input type="checkbox"
-                            id="lodcolours"> colour by level</label>
+                    <label class="c" data-tip="Where the graph cut placed each seam between two patches."><input type="checkbox" id="diagonals"> patch diagonals</label>
+                    <label class="c" data-tip="Green, yellow, orange, red as detail drops."><input type="checkbox" id="lodcolours"> colour by level</label>
                 </div>
             </details>
 
@@ -783,11 +494,8 @@
             </details>
 
             <details style="--c:#7c8489">
-                <summary data-tip="The command that would rebuild this scene from the capture with the settings above.">
-                    match in python</summary>
-                <div class="body">
-                    <div class="out" id="cmd">—</div>
-                </div>
+                <summary data-tip="The command that would rebuild this scene from the capture with the settings above.">match in python</summary>
+                <div class="body"><div class="out" id="cmd">—</div></div>
             </details>
         </div>
     </div>

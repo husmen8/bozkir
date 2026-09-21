@@ -21,17 +21,63 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
-                            balanced_split, describe_trail, level_patch,
-                            part_ink, pick_patches, search_kwargs,
-                            select_similar, stratified_keep,
-                            cached_search, choose, rendered_coverage)
+                            balanced_split, cached_search, choose,
+                            class_separation, describe_trail, level_patch,
+                            part_ink, rendered_coverage, search_kwargs,
+                            select_similar, split_classes, stratified_keep)
 from bozkir import presets as presets_mod  # noqa: E402
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.wang import (build_tile_set, layout, check_layout,  # noqa: E402
                          edge_gaussians)
 from bozkir.pack import pack, STRIDE  # noqa: E402
-from bozkir.tile import extract_patch  # noqa: E402
+
+
+def prepare_patches(chosen, need, args, up):
+    """Cut, level and centre chosen candidates into tile-ready patches.
+
+    Lifted out of main so it can run once per class. Nothing in it is
+    class-aware - it is the same work every set of four needs, and
+    calling it twice is what makes two tile sets from one capture.
+    """
+    patches = []
+    print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "
+          f"{'tilt':>7} {'rim':>6} {'mid':>6} {'mean rgb':>18}")
+    for i, (sc, (x, y), p, info) in enumerate(chosen[:need]):
+        # Level the wider cut so rotation has material to draw in from,
+        # then take the tile-sized middle of the result.
+        p, tilt = level_patch(info.get("wide", p), up)
+        # Centre on the origin so every tile is assembled in the same frame.
+        plane = [j for j in range(3) if j != up]
+        off = np.zeros(3, dtype=np.float32)
+        off[plane] = p.xyz[:, plane].mean(axis=0)
+        q = p.subset(np.arange(len(p)))
+        q.xyz = (q.xyz - off).astype(np.float32)
+
+        # The cap goes here, not before levelling: levelling reads the wide
+        # cut, so anything trimmed off the narrow one is simply picked up
+        # again and the cap does nothing. Spread the survivors rather than
+        # taking the brightest, or the tile ends up dense in one corner.
+        if args.max_per_tile and len(q) > args.max_per_tile:
+            q = q.subset(stratified_keep(q, args.max_per_tile,
+                                         args.size * (1.0 + args.extract_margin),
+                                         up))
+        # The overhang left by levelling is kept: a Gaussian just outside
+        # the square still covers ground just inside, and trimming it opens
+        # a gap along every edge. label_at gives those a well defined
+        # region without needing the pixel grid.
+        plane2 = [j for j in range(3) if j != up]
+        over = float((np.abs(q.xyz[:, plane2]).max(axis=1)
+                      > args.size / 2).mean())
+        patches.append(q)
+        rgb = q.base_rgb.mean(axis=0)
+        print(f"  {i:>2} ({x:6.2f},{y:6.2f}) {len(q):>9,} "
+              f"{info['relief']:>7.2f} {tilt:>6.1f}\u00b0 "
+              f"{info.get('edge_relief', 0):>6.2f} "
+              f"{info.get('interior_relief', 0):>6.2f}  "
+              f"{rgb[0]:.2f} {rgb[1]:.2f} {rgb[2]:.2f}"
+              f"  overhang {over:>4.0%}")
+    return patches
 
 
 def main():
@@ -98,6 +144,22 @@ def main():
     ap.add_argument("--extract-margin", type=float, default=0.35,
                     help="cut candidates this much larger than the tile, so "
                          "levelling has material to rotate in from")
+    ap.add_argument("--count", type=int, default=0,
+                    help="how many candidates to search for before "
+                         "choosing. Defaults to four per tile per class. "
+                         "The same flag preview_patches takes, so a preset "
+                         "saved there carries over")
+    ap.add_argument("--exclude", default="",
+                    help="candidate indices to drop before choosing, as "
+                         "0,3,7. For the ones a score cannot see: a survey "
+                         "marker, a bright stone, anything the eye locks "
+                         "onto. A landmark inside a tile appears at the "
+                         "same spot in every copy of that tile, everywhere")
+    ap.add_argument("--classes", type=int, default=1,
+                    help="build this many tile sets, one per material found "
+                         "in the capture, all sharing the same edge codes so "
+                         "any cell can take any class without breaking the "
+                         "matching. 1 is the single-material behaviour")
     ap.add_argument("--auto", dest="auto", action="store_true", default=True,
                     help="when the settings given find too few patches, "
                          "loosen whichever filter is doing the rejecting "
@@ -142,7 +204,17 @@ def main():
     print(f"  need {need} patches for {args.colours} colours per axis")
     # Search widely, then narrow on appearance: a patch that scores well but
     # looks nothing like the others produces a tile with a visible X in it.
-    want = max(need * 4, 12)
+    # Four times what is needed, so appearance has something to choose
+    # among - and that much again per class, because a class can only be
+    # found if its material is in the pool. Searching for sixteen on a
+    # capture whose second material is a tenth of the ground finds sixteen
+    # of the first material and splits it into two halves of itself.
+    # Four times what is needed, so appearance has something to choose
+    # among - and that much again per class, because a class can only be
+    # found if its material is in the pool. Searching for sixteen on a
+    # capture whose second material is a tenth of the ground finds sixteen
+    # of the first material and splits it into two halves of itself.
+    want = args.count or max(need * 4 * max(args.classes, 1), 12)
     common = search_kwargs(args, thickness)
     if args.auto and not args.patches:
         # Loosen only when choosing for ourselves. With --patches the
@@ -174,6 +246,17 @@ def main():
                "settings, or a preset, to both." if args.patches else
                "\n  This capture does not yield a tile set at any setting "
                "tried. preview_patches.py shows what is rejecting."))
+    # Dropped by hand, before anything narrows the list. Scoring sees flat,
+    # dense and uniform; it has no term for "contains one bright thing", and
+    # a survey marker is flat, dense and uniform. Doing this after selection
+    # would be excluding from four, which is not a choice.
+    if args.exclude.strip():
+        drop = {int(x) for x in args.exclude.replace(",", " ").split()}
+        before = len(chosen)
+        chosen = [c for i, c in enumerate(chosen) if i not in drop]
+        print(f"  excluded {sorted(drop)}: "
+              f"{before} candidates -> {len(chosen)}")
+
     if args.patches:
         want = [int(v) for v in args.patches.replace(" ", "").split(",") if v]
         if len(want) != need:
@@ -184,79 +267,96 @@ def main():
                              f"candidates found; lower --stride to find more")
         chosen = [chosen[i] for i in want]
         print(f"  using candidates {want} as given")
-    else:
+    elif args.classes <= 1:
+        # Narrowing to the four that look most alike is the right move for
+        # one tile set and exactly wrong for several: it would hand the
+        # split four patches already chosen for being indistinguishable.
+        # With classes, split_classes does the same narrowing inside each
+        # group instead.
         chosen = select_similar(chosen, need, args.similarity)
 
-    feats = np.array([appearance(c[2]) for c in chosen])
-    spread = float(np.linalg.norm(feats - feats.mean(axis=0), axis=1).mean())
-    print(f"  appearance spread across the {need} chosen: {spread:.3f} "
-          f"({'similar' if spread < 0.08 else 'diagonals will show'})")
+    if args.classes <= 1:
+        feats = np.array([appearance(c[2]) for c in chosen])
+        spread = float(np.linalg.norm(feats - feats.mean(axis=0), axis=1).mean())
+        print(f"  appearance spread across the {need} chosen: {spread:.3f} "
+              f"({'similar' if spread < 0.08 else 'diagonals will show'})")
 
-    patches = []
-    print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "
-          f"{'tilt':>7} {'rim':>6} {'mid':>6} {'mean rgb':>18}")
-    for i, (sc, (x, y), p, info) in enumerate(chosen[:need]):
-        # Level the wider cut so rotation has material to draw in from,
-        # then take the tile-sized middle of the result.
-        p, tilt = level_patch(info.get("wide", p), up)
-        # Centre on the origin so every tile is assembled in the same frame.
-        plane = [j for j in range(3) if j != up]
-        off = np.zeros(3, dtype=np.float32)
-        off[plane] = p.xyz[:, plane].mean(axis=0)
-        q = p.subset(np.arange(len(p)))
-        q.xyz = (q.xyz - off).astype(np.float32)
-
-        # The cap goes here, not before levelling: levelling reads the wide
-        # cut, so anything trimmed off the narrow one is simply picked up
-        # again and the cap does nothing. Spread the survivors rather than
-        # taking the brightest, or the tile ends up dense in one corner.
-        if args.max_per_tile and len(q) > args.max_per_tile:
-            q = q.subset(stratified_keep(q, args.max_per_tile,
-                                         args.size * (1.0 + args.extract_margin),
-                                         up))
-        # The overhang left by levelling is kept: a Gaussian just outside
-        # the square still covers ground just inside, and trimming it opens
-        # a gap along every edge. label_at gives those a well defined
-        # region without needing the pixel grid.
-        plane2 = [j for j in range(3) if j != up]
-        over = float((np.abs(q.xyz[:, plane2]).max(axis=1)
-                      > args.size / 2).mean())
-        patches.append(q)
-        rgb = q.base_rgb.mean(axis=0)
-        print(f"  {i:>2} ({x:6.2f},{y:6.2f}) {len(q):>9,} "
-              f"{info['relief']:>7.2f} {tilt:>6.1f}\u00b0 "
-              f"{info.get('edge_relief', 0):>6.2f} "
-              f"{info.get('interior_relief', 0):>6.2f}  "
-              f"{rgb[0]:.2f} {rgb[1]:.2f} {rgb[2]:.2f}"
-              f"  overhang {over:>4.0%}")
-
-    # Which patches supply which axis is not arbitrary: put the odd one out
-    # on one axis and every boundary running that way is made of different
-    # material from the ones running across it.
-    (h_patches, v_patches), axis_gap = balanced_split(patches, args.colours)
-    naive = float(np.linalg.norm(
-        np.mean([appearance(p) for p in patches[:args.colours]], axis=0)
-        - np.mean([appearance(p) for p in patches[args.colours:need]], axis=0)))
-    print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
-          f"({naive:.3f} if split by score)"
-          + ("  <- the grid would have a grain" if naive > 0.05 else ""))
-
-    if args.cut:
-        print(f"\n  assembling tiles (graph cut, {args.cut_res}px, "
-              f"band {args.cut_band})")
+    # One set of four patches per class. With a single class this is the
+    # chosen four and nothing changes; with more, the candidates are split
+    # into groups that look unlike each other and each group becomes its own
+    # tile set.
+    if args.classes > 1:
+        groups = split_classes(chosen, classes=args.classes, per_class=need)
+        sep = class_separation(groups)
+        print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
+        if sep < 1.0:
+            raise SystemExit(
+                "  the classes are no further apart than they are varied: "
+                "this capture holds one material.\n"
+                "  Building tile sets from it would give two that differ by "
+                "nothing, and a terrain rule with nothing to choose between.")
+        short = [i for i, g in enumerate(groups) if len(g) < need]
+        if short:
+            raise SystemExit(
+                f"  class {short} has fewer than {need} patches. Raise "
+                f"--count so each class has more to choose from, or drop "
+                f"--classes.")
+        class_sets = [g[:need] for g in groups]
     else:
-        print(f"\n  assembling tiles (feathered, blend {args.blend})")
-    tiles, codes = build_tile_set(h_patches, v_patches, args.size,
-                                  blend=args.blend, up_axis=up,
-                                  cut=args.cut, resolution=args.cut_res,
-                                  band=args.cut_band)
+        class_sets = [chosen[:need]]
+
+    all_tiles, all_codes, all_class = [], [], []
+    for ci, picked in enumerate(class_sets):
+        if len(class_sets) > 1:
+            f = np.array([appearance(c[2]) for c in picked])
+            print(f"\n  class {ci}: rgb {f[:, 0].mean():.2f} "
+                  f"{f[:, 1].mean():.2f} {f[:, 2].mean():.2f}")
+        patches = prepare_patches(picked, need, args, up)
+
+        # Which patches supply which axis is not arbitrary: put the odd one
+        # out on one axis and every boundary running that way is made of
+        # different material from the ones running across it.
+        (h_patches, v_patches), axis_gap = balanced_split(patches, args.colours)
+        naive = float(np.linalg.norm(
+            np.mean([appearance(p) for p in patches[:args.colours]], axis=0)
+            - np.mean([appearance(p) for p in patches[args.colours:need]],
+                      axis=0)))
+        print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
+              f"({naive:.3f} if split by score)"
+              + ("  <- the grid would have a grain" if naive > 0.05 else ""))
+
+        if args.cut:
+            print(f"\n  assembling tiles (graph cut, {args.cut_res}px, "
+                  f"band {args.cut_band})")
+        else:
+            print(f"\n  assembling tiles (feathered, blend {args.blend})")
+        t, c = build_tile_set(h_patches, v_patches, args.size,
+                              blend=args.blend, up_axis=up,
+                              cut=args.cut, resolution=args.cut_res,
+                              band=args.cut_band)
+        all_tiles += t
+        all_codes += c
+        all_class += [ci] * len(t)
+
+    # Every class is built over the same edge colours, so each code tuple
+    # exists once per class. That is what lets a cell take any class without
+    # consulting its neighbours: the matching constraint is satisfied by the
+    # code, and the class rides along independently. A class boundary is
+    # then a visible change of material with no geometric seam, which is
+    # what it should be.
+    tiles, codes, tile_class = all_tiles, all_codes, all_class
 
     # The construction is only worth anything if edges really do match.
+    # Grouped by class as well as by colour. Two classes are different
+    # material by construction, so their edges are not meant to be
+    # identical - only tiles of the same class and colour have to match,
+    # and comparing across classes would report a failure that is the
+    # whole point of having classes.
     ok = True
     for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
         groups = {}
-        for t, c in zip(tiles, codes):
-            groups.setdefault(c[col], []).append(
+        for t, c, k in zip(tiles, codes, tile_class):
+            groups.setdefault((k, c[col]), []).append(
                 edge_gaussians(t, args.size, up, edge,
                                margin=max(0.03, 0.0 if args.cut
                                           else args.blend / args.size * 1.5)))
@@ -266,8 +366,13 @@ def main():
     print(f"  edge check: "
           f"{'matching colours share an identical edge' if ok else 'FAILED'}")
 
-    grid = layout(codes, 16, 16, seed=0)
-    print(f"  layout check: {check_layout(codes, grid)} mismatched edges in 16x16")
+    # Layout is checked on one class's codes: every class carries the same
+    # set, so a layout valid for one is valid for any, and that is exactly
+    # the property that lets the class be chosen per cell afterwards.
+    first = [c for c, k in zip(codes, tile_class) if k == 0]
+    grid = layout(first, 16, 16, seed=0)
+    print(f"  layout check: {check_layout(first, grid)} mismatched edges "
+          f"in 16x16")
 
     # Levels of detail. GSWT retrains each level from downsampled images and
     # caps the count at N0 / 4^i; retraining is not available here, so each
@@ -325,7 +430,7 @@ def main():
 
     parts, meta, cursor = [], [], 0
     total_levels = 0
-    for t, c in zip(tiles, codes):
+    for t, c, k in zip(tiles, codes, tile_class):
         levels = []
         for lvl in range(max(args.lod, 1)):
             budget = max(len(t) // (4 ** lvl), 64)
@@ -352,7 +457,8 @@ def main():
         meta.append({"start": levels[0][0], "count": levels[0][1],
                      "levels": levels,
                      "n": int(c[0]), "e": int(c[1]),
-                     "s": int(c[2]), "w": int(c[3])})
+                     "s": int(c[2]), "w": int(c[3]),
+                     "class": int(k)})
 
     buf = np.concatenate(parts)
     stem = args.out.stem if args.out else args.path.stem
@@ -363,6 +469,7 @@ def main():
         "size": args.size, "up_axis": up, "stride": STRIDE,
         "thickness": thickness, "blend": args.blend,
         "colours": args.colours, "wang": True, "lod": max(args.lod, 1),
+        "classes": len(class_sets),
         "cut": bool(args.cut),
         # What produced this file, so a scene can be traced back to the
         # settings that made it without keeping a shell history.

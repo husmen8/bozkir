@@ -36,7 +36,7 @@ export const INDEX_BITS = 32 - SLOT_BITS;
 export const INDEX_MASK = (1 << INDEX_BITS) - 1;
 
 export function packIndex(slot, index) {
-    return ((slot << INDEX_BITS) | (index & INDEX_MASK)) >>> 0;
+  return ((slot << INDEX_BITS) | (index & INDEX_MASK)) >>> 0;
 }
 export function unpackSlot(v) { return v >>> INDEX_BITS; }
 export function unpackIndex(v) { return v & INDEX_MASK; }
@@ -47,7 +47,7 @@ export function unpackIndex(v) { return v & INDEX_MASK; }
  *  camera is near that plane, which is when the two cells' splats genuinely
  *  interpenetrate on screen. */
 export function mergeScore(a, b, eye) {
-    return Math.abs(boundarySign(a, b, eye));
+  return Math.abs(boundarySign(a, b, eye));
 }
 
 /** Which cells to merge with which, for one camera position.
@@ -62,41 +62,41 @@ export function mergeScore(a, b, eye) {
  *  to set it, since it is the tile that decides how far a splat reaches past
  *  its own boundary. */
 export function mergeGroups(cells, eye, { threshold = 1.0, cap = MAX_GROUP } = {}) {
-    const parent = new Int32Array(cells.length);
-    const size = new Int32Array(cells.length).fill(1);
-    for (let k = 0; k < cells.length; k++) parent[k] = k;
+  const parent = new Int32Array(cells.length);
+  const size = new Int32Array(cells.length).fill(1);
+  for (let k = 0; k < cells.length; k++) parent[k] = k;
 
-    const find = (k) => {
-        while (parent[k] !== k) { parent[k] = parent[parent[k]]; k = parent[k]; }
-        return k;
-    };
+  const find = (k) => {
+    while (parent[k] !== k) { parent[k] = parent[parent[k]]; k = parent[k]; }
+    return k;
+  };
 
-    const scored = [];
-    for (const [a, b] of neighbourPairs(cells)) {
-        const s = mergeScore(cells[a], cells[b], eye);
-        if (s < threshold) scored.push([s, a, b]);
-    }
-    scored.sort((p, q) => p[0] - q[0]);
+  const scored = [];
+  for (const [a, b] of neighbourPairs(cells)) {
+    const s = mergeScore(cells[a], cells[b], eye);
+    if (s < threshold) scored.push([s, a, b]);
+  }
+  scored.sort((p, q) => p[0] - q[0]);
 
-    let merged = 0;
-    for (const [, a, b] of scored) {
-        const ra = find(a), rb = find(b);
-        if (ra === rb) continue;
-        if (size[ra] + size[rb] > cap) continue;
-        parent[ra] = rb;
-        size[rb] += size[ra];
-        merged++;
-    }
+  let merged = 0;
+  for (const [, a, b] of scored) {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) continue;
+    if (size[ra] + size[rb] > cap) continue;
+    parent[ra] = rb;
+    size[rb] += size[ra];
+    merged++;
+  }
 
-    const groupOf = new Int32Array(cells.length).fill(-1);
-    const groups = [];
-    for (let k = 0; k < cells.length; k++) {
-        const r = find(k);
-        if (groupOf[r] < 0) { groupOf[r] = groups.length; groups.push([]); }
-        groupOf[k] = groupOf[r];
-        groups[groupOf[r]].push(k);
-    }
-    return { groupOf, groups, pairsMerged: merged, pairsConsidered: scored.length };
+  const groupOf = new Int32Array(cells.length).fill(-1);
+  const groups = [];
+  for (let k = 0; k < cells.length; k++) {
+    const r = find(k);
+    if (groupOf[r] < 0) { groupOf[r] = groups.length; groups.push([]); }
+    groupOf[k] = groupOf[r];
+    groups[groupOf[r]].push(k);
+  }
+  return { groupOf, groups, pairsMerged: merged, pairsConsidered: scored.length };
 }
 
 /** Interleave several already-sorted streams into one.
@@ -109,23 +109,23 @@ export function mergeGroups(cells, eye, { threshold = 1.0, cap = MAX_GROUP } = {
  *  A linear scan over the heads beats a heap here: `cap` is eight, and eight
  *  comparisons with no pointer chasing is faster than maintaining the heap. */
 export function kwayMerge(streams) {
-    let total = 0;
-    for (const s of streams) total += s.order.length;
-    const out = new Uint32Array(total);
-    const head = new Int32Array(streams.length);
-    let w = 0;
+  let total = 0;
+  for (const s of streams) total += s.order.length;
+  const out = new Uint32Array(total);
+  const head = new Int32Array(streams.length);
+  let w = 0;
 
-    while (w < total) {
-        let best = -1, bestDepth = -Infinity;
-        for (let k = 0; k < streams.length; k++) {
-            const h = head[k];
-            if (h >= streams[k].order.length) continue;
-            const d = streams[k].depth[h];
-            if (d > bestDepth) { bestDepth = d; best = k; }
-        }
-        if (best < 0) break;
-        out[w++] = packIndex(streams[best].slot, streams[best].order[head[best]]);
-        head[best]++;
+  while (w < total) {
+    let best = -1, bestDepth = -Infinity;
+    for (let k = 0; k < streams.length; k++) {
+      const h = head[k];
+      if (h >= streams[k].order.length) continue;
+      const d = streams[k].depth[h];
+      if (d > bestDepth) { bestDepth = d; best = k; }
     }
-    return out;
+    if (best < 0) break;
+    out[w++] = packIndex(streams[best].slot, streams[best].order[head[best]]);
+    head[best]++;
+  }
+  return out;
 }

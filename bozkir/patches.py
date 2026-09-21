@@ -941,6 +941,112 @@ def appearance(p):
     rgb = p.base_rgb
     return np.concatenate([rgb.mean(axis=0), rgb.std(axis=0)])
 
+def split_classes(cands, classes=2, per_class=4, weight=1.0, seed=0):
+    """Split candidates into groups that look unlike each other.
+
+    The opposite of what `select_similar` does, and for the opposite reason.
+    A tile set needs four patches that look alike, because anything else
+    tiles into patchwork. A *class-aware* tile set needs several such sets
+    that look unlike each other, because that difference is the whole point
+    - sand against scrub, cobble against moss - and the material rule then
+    decides where each belongs.
+
+    The capture usually already contains them. The desert survey's own
+    preview reported an appearance spread of 0.129 across its candidates
+    and 0.043 across the four finally chosen: the pale sand and the dark
+    scrub were both found, and then the similarity filter deliberately
+    discarded one of them. This recovers what that threw away.
+
+    k-means on the colour signature, seeded by the two candidates furthest
+    apart rather than at random. With two classes that is the whole
+    algorithm and it is deterministic, which matters because the tile set
+    has to come out the same on every run for `--patches` indices to mean
+    anything.
+
+    Returns a list of `classes` lists of candidates, largest group first,
+    each already narrowed to the `per_class` members that look most alike.
+    A group too small to fill a tile set is returned anyway and reported,
+    because a capture with only one material should say so rather than
+    invent a second from noise.
+    """
+    if classes < 2 or len(cands) < classes:
+        return [cands[:per_class]]
+
+    feats = np.array([appearance(c[2]) for c in cands], dtype=np.float64)
+    # Standardised per dimension, because the signature is three colour
+    # means and three colour spreads and the means would otherwise dominate
+    # simply by being larger numbers.
+    #
+    # Floored, though, and that matters more than it looks. The spread
+    # components barely vary between patches of the same scene, so dividing
+    # by their own tiny deviation multiplies what is left - which is noise -
+    # up to the same size as the real colour difference. In a scene of ten
+    # pale patches and two dark ones that was enough to put one of the dark
+    # ones in with the pale: the signal said "obviously different" and the
+    # amplified noise outvoted it. A floor at a tenth of the largest
+    # deviation keeps every dimension comparable without letting a constant
+    # one shout.
+    sd = feats.std(axis=0)
+    sd = np.maximum(sd, 0.1 * max(sd.max(), 1e-9))
+    z = (feats - feats.mean(axis=0)) / sd
+
+    # Seed on the pair furthest apart, then on whatever is furthest from
+    # everything already seeded. Deterministic, and it starts from the
+    # genuine extremes rather than from wherever a random draw landed.
+    d2 = ((z[:, None, :] - z[None, :, :]) ** 2).sum(-1)
+    a, b = np.unravel_index(int(np.argmax(d2)), d2.shape)
+    centres = [z[a], z[b]]
+    while len(centres) < classes:
+        # Furthest from everything seeded so far.
+        dist = np.min([np.linalg.norm(z - c, axis=1) for c in centres], axis=0)
+        centres.append(z[int(np.argmax(dist))])
+
+    labels = np.zeros(len(cands), dtype=np.int64)
+    for _ in range(50):
+        dist = np.stack([np.linalg.norm(z - c, axis=1) for c in centres])
+        new = dist.argmin(axis=0)
+        if (new == labels).all() and _ > 0:
+            break
+        labels = new
+        for ci in range(len(centres)):
+            members = z[labels == ci]
+            if len(members):
+                centres[ci] = members.mean(axis=0)
+
+    groups = []
+    for ci in range(len(centres)):
+        members = [cands[i] for i in range(len(cands)) if labels[i] == ci]
+        groups.append(members)
+    groups.sort(key=len, reverse=True)
+
+    return [select_similar(g, per_class, weight) if len(g) > per_class
+            else g for g in groups]
+
+
+def class_separation(groups):
+    """How far apart two groups look, against how varied each one is.
+
+    A ratio, not a distance: two classes are only worth having if the gap
+    between them is larger than the spread inside them, and that comparison
+    is what says whether a capture really holds two materials or one
+    material and some noise. Below about 1 the split is not meaningful.
+    """
+    means = []
+    spreads = []
+    for g in groups:
+        if not g:
+            continue
+        f = np.array([appearance(c[2]) for c in g], dtype=np.float64)
+        means.append(f.mean(axis=0))
+        spreads.append(float(np.linalg.norm(f - f.mean(axis=0), axis=1).mean())
+                       if len(f) > 1 else 0.0)
+    if len(means) < 2:
+        return 0.0
+    gap = float(np.linalg.norm(means[0] - means[1]))
+    within = max(float(np.mean(spreads)), 1e-9)
+    return gap / within
+
+
 def select_similar(cands, k, weight=1.0):
     """Choose k patches that score well and look like each other.
 

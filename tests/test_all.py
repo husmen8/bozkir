@@ -30,7 +30,7 @@ from bozkir.scene import SceneConfig, config_from_args           # noqa: E402
 from bozkir.pack import pack, STRIDE                             # noqa: E402
 from bozkir.patches import (band_stats, clip_slab, coverage,     # noqa: E402
                             pick_patches, score_patch)
-from bozkir.wang import (region_weights, build_tile,             # noqa: E402
+from bozkir.wang import (region_weights,             # noqa: E402
                          build_tile_set, layout, check_layout,
                          edge_gaussians)
 

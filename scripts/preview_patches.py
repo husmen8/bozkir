@@ -27,8 +27,9 @@ from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.graphcut import render_patch  # noqa: E402
 from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
-                            cached_search, choose, describe_trail,
-                            level_patch, rendered_coverage, search_kwargs)
+                            cached_search, choose, class_separation,
+                            describe_trail, level_patch, rendered_coverage,
+                            search_kwargs, split_classes)
 from bozkir import presets as presets_mod  # noqa: E402
 
 
@@ -67,6 +68,17 @@ def main():
     ap.add_argument("--no-auto", dest="auto", action="store_false",
                     help="use the settings exactly as given, and report what "
                          "they found even if it is nothing")
+    ap.add_argument("--exclude", default="",
+                    help="candidate indices to drop, as 0,3,7. The same "
+                         "flag export_wang takes, so a marker spotted in "
+                         "these thumbnails can be excluded there")
+    ap.add_argument("--classes", type=int, default=1,
+                    help="split the candidates into this many groups that "
+                         "look unlike each other, each internally alike. "
+                         "Two materials in one capture - sand and scrub, "
+                         "cobble and moss - become two tile sets, which is "
+                         "what a terrain rule chooses between. 1 is the "
+                         "single-material behaviour")
     ap.add_argument("--want", type=int, default=4,
                     help="how many patches are actually needed; --auto stops "
                          "loosening once it has this many. Four is a Wang "
@@ -186,6 +198,43 @@ def main():
           f"{np.linalg.norm(feats - feats.mean(0), axis=1).mean():.3f}")
     print("  four patches that look alike tile into ground; four that do "
           "not tile into patchwork.")
+
+    if args.exclude.strip():
+        drop = {int(x) for x in args.exclude.replace(",", " ").split()}
+        cands = [c for i, c in enumerate(cands) if i not in drop]
+        print(f"\n  excluded {sorted(drop)}, {len(cands)} candidates left")
+
+    if args.classes > 1:
+        groups = split_classes(cands, classes=args.classes,
+                               per_class=args.want)
+        sep = class_separation(groups)
+        print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
+        for gi, grp in enumerate(groups):
+            if not grp:
+                continue
+            f = np.array([appearance(c[2]) for c in grp])
+            inside = float(np.linalg.norm(f - f.mean(0), axis=1).mean())
+            where = ", ".join(f"({c[1][0]:.1f},{c[1][1]:.1f})" for c in grp[:6])
+            print(f"    class {gi}: {len(grp):>3} patches  "
+                  f"rgb {f[:, :3].mean(0)[0]:.2f} {f[:, :3].mean(0)[1]:.2f} "
+                  f"{f[:, :3].mean(0)[2]:.2f}  spread {inside:.3f}")
+            print(f"             at {where}")
+        # A ratio of the gap between classes to the spread inside them.
+        # Below about 1 the capture holds one material and the split is
+        # dividing noise, which would produce two tile sets that differ by
+        # nothing and a terrain rule with nothing to choose between.
+        if sep < 1.0:
+            print("    the classes are no further apart than they are "
+                  "varied: this capture holds one material")
+        elif sep < 3.0:
+            print("    a weak split - worth looking at the thumbnails "
+                  "before building tile sets from it")
+        else:
+            print("    a real split: these are different materials")
+        short = [gi for gi, g in enumerate(groups) if len(g) < args.want]
+        if short:
+            print(f"    class {short} has too few patches for a tile set "
+                  f"({args.want} needed)")
 
     cols = min(6, max(1, len(thumbs)))
     rws = int(np.ceil(len(thumbs) / cols))

@@ -20,12 +20,12 @@
  *  when relief lifts the two cells unequally.
  */
 export function boundary(a, b) {
-    const dx = b.x - a.x, dy = b.y - a.y, dz = (b.z || 0) - (a.z || 0);
-    const len = Math.hypot(dx, dy, dz) || 1;
-    return {
-        mid: [(a.x + b.x) / 2, (a.y + b.y) / 2, ((a.z || 0) + (b.z || 0)) / 2],
-        normal: [dx / len, dy / len, dz / len],
-    };
+  const dx = b.x - a.x, dy = b.y - a.y, dz = (b.z || 0) - (a.z || 0);
+  const len = Math.hypot(dx, dy, dz) || 1;
+  return {
+    mid: [(a.x + b.x) / 2, (a.y + b.y) / 2, ((a.z || 0) + (b.z || 0)) / 2],
+    normal: [dx / len, dy / len, dz / len],
+  };
 }
 
 /** Signed distance from the eye to the plane of the boundary between a and b.
@@ -42,10 +42,10 @@ export function boundary(a, b) {
  *  condition being detected, not being near the edge.
  */
 export function boundarySign(a, b, eye) {
-    const { mid, normal } = boundary(a, b);
-    return normal[0] * (eye[0] - mid[0])
-        + normal[1] * (eye[1] - mid[1])
-        + normal[2] * (eye[2] - mid[2]);
+  const { mid, normal } = boundary(a, b);
+  return normal[0] * (eye[0] - mid[0])
+       + normal[1] * (eye[1] - mid[1])
+       + normal[2] * (eye[2] - mid[2]);
 }
 
 /** Adjacent pairs of a grid of cells, each cell carrying integer `i`, `j`.
@@ -57,17 +57,17 @@ export function boundarySign(a, b, eye) {
  *  ordered against nor merged with anything.
  */
 export function neighbourPairs(cells) {
-    const byIJ = new Map();
-    for (let k = 0; k < cells.length; k++) {
-        byIJ.set(`${cells[k].i},${cells[k].j}`, k);
+  const byIJ = new Map();
+  for (let k = 0; k < cells.length; k++) {
+    byIJ.set(`${cells[k].i},${cells[k].j}`, k);
+  }
+  const pairs = [];
+  for (let k = 0; k < cells.length; k++) {
+    const c = cells[k];
+    for (const [di, dj] of [[1, 0], [0, 1]]) {
+      const n = byIJ.get(`${c.i + di},${c.j + dj}`);
+      if (n !== undefined) pairs.push([k, n]);
     }
-    const pairs = [];
-    for (let k = 0; k < cells.length; k++) {
-        const c = cells[k];
-        for (const [di, dj] of [[1, 0], [0, 1]]) {
-            const n = byIJ.get(`${c.i + di},${c.j + dj}`);
-            if (n !== undefined) pairs.push([k, n]);
-        }
-    }
-    return pairs;
+  }
+  return pairs;
 }

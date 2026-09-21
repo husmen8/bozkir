@@ -41,14 +41,14 @@ export { boundary, boundarySign, neighbourPairs } from './grid.js';
  *  the flip rather than remove it. `weak` returns them so a caller can hand
  *  them to merging. */
 export function constraints(cells, eye, { epsilon = 0 } = {}) {
-    const edges = [];
-    const weak = [];
-    for (const [a, b] of neighbourPairs(cells)) {
-        const s = boundarySign(cells[a], cells[b], eye);
-        if (Math.abs(s) <= epsilon) { weak.push([a, b, s]); continue; }
-        edges.push(s > 0 ? [a, b] : [b, a]);
-    }
-    return { edges, weak };
+  const edges = [];
+  const weak = [];
+  for (const [a, b] of neighbourPairs(cells)) {
+    const s = boundarySign(cells[a], cells[b], eye);
+    if (Math.abs(s) <= epsilon) { weak.push([a, b, s]); continue; }
+    edges.push(s > 0 ? [a, b] : [b, a]);
+  }
+  return { edges, weak };
 }
 
 /** Draw order for a set of cells, far to near.
@@ -71,57 +71,57 @@ export function constraints(cells, eye, { epsilon = 0 } = {}) {
  *  did for all of them until now, so a cycle is no worse than the status quo
  *  and is reported in `cycles` so it can be measured rather than guessed at. */
 export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
-    const n = cells.length;
-    const { edges, weak } = constraints(cells, eye, { epsilon });
+  const n = cells.length;
+  const { edges, weak } = constraints(cells, eye, { epsilon });
 
-    const depth = key || cells.map((c) => Math.hypot(
-        c.x - eye[0], c.y - eye[1], (c.z || 0) - eye[2]));
+  const depth = key || cells.map((c) => Math.hypot(
+    c.x - eye[0], c.y - eye[1], (c.z || 0) - eye[2]));
 
-    const after = Array.from({ length: n }, () => []);
-    const indeg = new Int32Array(n);
-    for (const [u, v] of edges) { after[u].push(v); indeg[v]++; }
+  const after = Array.from({ length: n }, () => []);
+  const indeg = new Int32Array(n);
+  for (const [u, v] of edges) { after[u].push(v); indeg[v]++; }
 
-    const done = new Uint8Array(n);
-    const out = [];
-    let cycles = 0;
+  const done = new Uint8Array(n);
+  const out = [];
+  let cycles = 0;
 
-    while (out.length < n) {
-        // Furthest cell with nothing left waiting on it. Linear scan: a heap
-        // would need reordering on every decrement, and the grid is a few
-        // hundred cells at most.
-        let best = -1;
-        for (let k = 0; k < n; k++) {
-            if (done[k] || indeg[k] > 0) continue;
-            if (best < 0 || depth[k] > depth[best]) best = k;
-        }
-
-        if (best < 0) {
-            // Everything left is inside a cycle. Release the furthest of them and
-            // drop its incoming constraints so the sort can continue.
-            cycles++;
-            for (let k = 0; k < n; k++) {
-                if (done[k]) continue;
-                if (best < 0 || depth[k] > depth[best]) best = k;
-            }
-            indeg[best] = 0;
-        }
-
-        done[best] = 1;
-        out.push(best);
-        // Clamped, because breaking a cycle zeroes an in-degree while edges
-        // into that cell are still outstanding.
-        for (const v of after[best]) if (--indeg[v] < 0) indeg[v] = 0;
+  while (out.length < n) {
+    // Furthest cell with nothing left waiting on it. Linear scan: a heap
+    // would need reordering on every decrement, and the grid is a few
+    // hundred cells at most.
+    let best = -1;
+    for (let k = 0; k < n; k++) {
+      if (done[k] || indeg[k] > 0) continue;
+      if (best < 0 || depth[k] > depth[best]) best = k;
     }
 
-    return { order: out, weak, cycles, constrained: edges.length };
+    if (best < 0) {
+      // Everything left is inside a cycle. Release the furthest of them and
+      // drop its incoming constraints so the sort can continue.
+      cycles++;
+      for (let k = 0; k < n; k++) {
+        if (done[k]) continue;
+        if (best < 0 || depth[k] > depth[best]) best = k;
+      }
+      indeg[best] = 0;
+    }
+
+    done[best] = 1;
+    out.push(best);
+    // Clamped, because breaking a cycle zeroes an in-degree while edges
+    // into that cell are still outstanding.
+    for (const v of after[best]) if (--indeg[v] < 0) indeg[v] = 0;
+  }
+
+  return { order: out, weak, cycles, constrained: edges.length };
 }
 
 /** True if `order` satisfies every constraint. For tests and for the panel. */
 export function violations(cells, eye, order, { epsilon = 0 } = {}) {
-    const rank = new Int32Array(cells.length);
-    for (let k = 0; k < order.length; k++) rank[order[k]] = k;
-    const { edges } = constraints(cells, eye, { epsilon });
-    let bad = 0;
-    for (const [u, v] of edges) if (rank[u] > rank[v]) bad++;
-    return bad;
+  const rank = new Int32Array(cells.length);
+  for (let k = 0; k < order.length; k++) rank[order[k]] = k;
+  const { edges } = constraints(cells, eye, { epsilon });
+  let bad = 0;
+  for (const [u, v] of edges) if (rank[u] > rank[v]) bad++;
+  return bad;
 }

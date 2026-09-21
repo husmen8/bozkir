@@ -26,10 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SUITES = [
     ('python package', [sys.executable, 'tests/test_all.py'],
      'numpy and plyfile'),
-    ('popping metric', [sys.executable, 'tests/test_popping.py'],
-     'numpy'),
-    ('patch search', [sys.executable, 'tests/test_autopick.py'],
-     'numpy and plyfile'),
+    ('pipeline', [sys.executable, 'tests/test_pipeline.py'],
+     'numpy, Pillow and plyfile'),
     ('browser modules', ['node', 'tests/test_web.mjs'],
      'node'),
 ]
