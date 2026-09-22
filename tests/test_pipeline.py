@@ -1531,6 +1531,161 @@ def _():
 
 
 
+# ======================================================================
+# the rule, Python against the viewer
+# ======================================================================
+
+SECTION = 'rule parity'
+
+from bozkir import landform as rule                               # noqa: E402
+
+
+def _rule_cases():
+    from bozkir.erosion import fbm
+    rng = np.random.default_rng(0)
+    cases = []
+
+    def add(z, n, opts, classes=2):
+        cases.append({'z': np.asarray(z, float).ravel().tolist(), 'n': n,
+                      'classes': classes, 'opts': opts})
+
+    for seed in range(3):
+        z = fbm((64, 64), seed=seed)
+        add(z, 16, {})
+        add(z, 16, {'spacing': 2.5, 'balance': 0.3, 'coherence': 2,
+                    'altitude': 0.4, 'sharpness': 3})
+        add(z, 16, {'balance': 0.5, 'coherence': 1, 'altitude': 0.0})
+        add(z, 16, {'balance': 0.3,
+                    'sediment': rng.random(64 * 64).tolist()})
+    add(np.zeros((32, 32)), 8, {'balance': 0.3})    # every cell ties
+    add(np.zeros((32, 32)), 8, {})
+    add(fbm((24, 24), seed=9), 24, {'balance': 0.7})  # no oversampling
+    add(fbm((60, 60), seed=4), 20, {}, classes=3)
+    return cases
+
+
+def _run_js(cases):
+    import json
+    import shutil
+    import subprocess
+    if not shutil.which('node'):
+        return None
+    here = Path(__file__).resolve().parent
+    out = subprocess.run(['node', str(here / 'landform_oracle.mjs')],
+                         input=json.dumps({'cases': cases}),
+                         capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+@test('the Python rule picks the same class as the viewer in every cell')
+def _():
+    # The validation script and the figures measure bozkir/landform.py. If
+    # it drifted from web/landform.js they would be measuring a rule nobody
+    # sees. Skips, rather than fails, on a machine without Node.
+    cases = _rule_cases()
+    js = _run_js(cases)
+    if js is None:
+        print('      (skipped: node not found)')
+        return
+    for k, (c, j) in enumerate(zip(cases, js)):
+        o = dict(c['opts'])
+        if 'sediment' in o:
+            o['sediment'] = np.array(o['sediment'])
+        p = rule.classify(np.array(c['z']), c['n'], c['classes'], **o)
+        diff = int((p['cls'] != np.array(j['cls'])).sum())
+        assert diff == 0, f'case {k}: {diff} cells differ from the viewer'
+        err = float(np.abs(p['strength'] - np.array(j['strength'])).max())
+        assert err < 1e-9, f'case {k}: strength differs by {err:.2e}'
+        assert p['source'] == j['source'], f'case {k}: source differs'
+
+
+@test('balance gives exactly the share asked for')
+def _():
+    from bozkir.erosion import fbm
+    z = fbm((96, 96), seed=3).ravel()
+    for share in (0.2, 0.5, 0.8):
+        cls = rule.classify(z, 24, 2, balance=share)['cls']
+        got = float((cls == 0).mean())
+        assert abs(got - share) < 1.5 / cls.size, \
+            f'asked for {share:.0%}, got {got:.1%}'
+
+
+@test('the Python map functions match their definitions on known surfaces')
+def _():
+    n = 16
+    j, i = np.mgrid[0:n, 0:n].astype(float)
+    plane = (0.5 * i).ravel()
+    s = rule.slope(plane, n)
+    assert np.allclose(s.reshape(n, n)[:, 1:-1], 0.5), 'slope of a plane'
+    assert np.allclose(rule.tpi(plane, n, 2).reshape(n, n)[3:-3, 3:-3], 0), \
+        'TPI of a plane is not zero in the interior'
+    v = np.abs(i - n // 2).ravel()           # V-shaped valley along a column
+    acc = rule.flow(v, n).reshape(n, n)
+    assert acc[:, n // 2].max() == acc.max(), 'flow did not collect in the valley'
+
+
+# ======================================================================
+# validating the rule against a survey
+# ======================================================================
+
+SECTION = 'rule validation'
+
+from bozkir import validate as val                                # noqa: E402
+
+
+def _geotiff(path, a, dx, x0=500000.0, y0=4000000.0):
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+    ifd = ImageFileDirectory_v2()
+    ifd[33550] = (dx, dx, 0.0)
+    ifd.tagtype[33550] = 12
+    ifd[33922] = (0.0, 0.0, 0.0, x0, y0, 0.0)
+    ifd.tagtype[33922] = 12
+    Image.fromarray(a).save(path, tiffinfo=ifd)
+
+
+@test('a GeoTIFF is placed where its tags say')
+def _():
+    import tempfile
+    a = np.arange(12, dtype=np.float32).reshape(3, 4)
+    a[0, 0] = -9999
+    with tempfile.TemporaryDirectory() as d:
+        _geotiff(Path(d) / 'a.tif', a, 0.5, x0=10.0, y0=20.0)
+        r = val.read_geotiff(Path(d) / 'a.tif')
+    assert not r.valid[0, 0] and r.valid[1:].all(), 'nodata not masked'
+    close(r.dx, 0.5)
+    row, col = r.world_to_pixel(10.25 + 0.5 * 2, 20.0 - 0.25)
+    close(float(row), 0.0, msg='row')
+    close(float(col), 2.0, msg='col')
+    close(float(val.sample_bilinear(r, 11.25, 19.75)), 2.0, msg='sample')
+
+
+@test('the validation finds a planted relationship and not an absent one')
+def _():
+    from bozkir.erosion import fbm
+    n = 16
+    z = fbm((64, 64), seed=5)
+    low = z.reshape(-1) < np.quantile(z, 0.3)
+    frac = low.reshape(64, 64).reshape(n, 4, n, 4).mean(axis=(1, 3)).ravel()
+    planted = val.evaluate(z.ravel(), frac, n, 1.0, altitude=0.8)
+    assert planted['rule']['p'] < 0.05, \
+        f"missed scrub planted on low ground: p {planted['rule']['p']:.3f}"
+    assert planted['rule']['kappa'] > planted['rule, flipped']['kappa']
+
+    unrelated = fbm((n, n), seed=77).ravel()
+    frac = (unrelated > np.quantile(unrelated, 0.7)).astype(float)
+    none = val.evaluate(z.ravel(), frac, n, 1.0)
+    assert none['rule']['p'] > 0.01, \
+        f"found a relationship that is not there: p {none['rule']['p']:.3f}"
+
+
+@test('kappa is 1 for agreement, near 0 for chance, -ish for opposition')
+def _():
+    a = np.array([1, 1, 0, 0, 1, 0, 1, 0], bool)
+    close(val.kappa(a, a), 1.0)
+    assert val.kappa(a, ~a) < 0
+    close(val.spearman([1, 2, 3, 4], [10, 20, 30, 40]), 1.0)
+
+
 # ====================================================================== run
 
 if __name__ == '__main__':

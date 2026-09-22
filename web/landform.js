@@ -189,19 +189,6 @@ function unit(a) {
   return out;
 }
 
-/** The threshold that gives a class the share of the grid asked for.
- *
- *  Scale-free thresholds decide *where* the boundary falls but not how
- *  much land ends up either side - that comes out of the rule's arithmetic
- *  and was 27% in every scene tried, whatever the terrain. An artist wants
- *  the opposite: to say "a third of this should be scrub" and have the
- *  boundary land wherever the terrain says it should for that amount.
- *
- *  So the weights are compared against a quantile of themselves rather
- *  than against each other. Asking for 30% puts the threshold at the 70th
- *  percentile of the difference, which is by construction the value that
- *  gives 30% - on any terrain, at any relief.
- */
 /** Median filter: remove specks without moving edges.
  *
  *  The third attempt at making regions contiguous, and the reasons the
@@ -297,6 +284,19 @@ function smooth(a, n, radius) {
 }
 
 
+/** The threshold that gives a class the share of the grid asked for.
+ *
+ *  Scale-free thresholds decide *where* the boundary falls but not how
+ *  much land ends up either side - that comes out of the rule's arithmetic
+ *  and was 27% in every scene tried, whatever the terrain. An artist wants
+ *  the opposite: to say "a third of this should be scrub" and have the
+ *  boundary land wherever the terrain says it should for that amount.
+ *
+ *  So the weights are compared against a quantile of themselves rather
+ *  than against each other. Asking for 30% puts the threshold at the 70th
+ *  percentile of the difference, which is by construction the value that
+ *  gives 30% - on any terrain, at any relief.
+ */
 function quantile(values, q) {
   const sorted = Float64Array.from(values).sort();
   if (!sorted.length) return 0;
@@ -383,8 +383,9 @@ export function classify(z, n, classes, opts = {}) {
   // the distribution rather than against the other classes pointwise.
   // One light blur of the weights, to stop two neighbours disagreeing over
   // a difference in the fourth decimal. Fixed and small: the work of
-  // making regions contiguous is done afterwards by the majority filter,
-  // which does it without moving the boundary.
+  // making regions contiguous is done by the median filter on the lead
+  // field below, before the threshold, which does it without moving the
+  // boundary or the share.
   const w = [];
   for (let k = 0; k < classes; k++) {
     const fn = rules[k % rules.length];

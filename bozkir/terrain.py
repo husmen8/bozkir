@@ -226,6 +226,12 @@ def landform(z, spacing=1.0, small=4, large=16, flat_slope=0.08,
 def coverage(z, spacing=1.0, rules=None, sharpness=2.0, **kw):
     """Target coverage per class, the alpha_c(x) of Hybrid GSWT Eq. 1.
 
+    The soft, per-class form, for analysis. The decision the viewer
+    actually draws - with altitude, sediment, the median filter and the
+    quantile threshold - is `bozkir.landform.classify`, a port of
+    web/landform.js held to it by the tests. Use that one to measure the
+    rule.
+
     `rules` maps a class name to a function of the terrain maps, returning
     an unnormalised weight per cell. The default is deliberately the
     simplest thing that is defensible rather than a tuned one: material
