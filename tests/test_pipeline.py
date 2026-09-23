@@ -1537,6 +1537,17 @@ def _():
 
 SECTION = 'rule parity'
 
+
+def _bridge(fn, cases):
+    """Run a shared JavaScript function on `cases` via tests/bridge.mjs."""
+    import json
+    import subprocess
+    here = Path(__file__).resolve().parent
+    out = subprocess.run(['node', str(here / 'bridge.mjs')],
+                         input=json.dumps({'fn': fn, 'cases': cases}),
+                         capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
 from bozkir import landform as rule                               # noqa: E402
 
 
@@ -1561,6 +1572,8 @@ def _rule_cases():
     add(np.zeros((32, 32)), 8, {})
     add(fbm((24, 24), seed=9), 24, {'balance': 0.7})  # no oversampling
     add(fbm((60, 60), seed=4), 20, {}, classes=3)
+    for k, shares in ((3, [0.2, 0.5, 0.3]), (4, [0.25] * 4)):
+        add(fbm((64, 64), seed=11), 16, {'balance': shares}, classes=k)
     return cases
 
 
@@ -1571,10 +1584,7 @@ def _run_js(cases):
     if not shutil.which('node'):
         return None
     here = Path(__file__).resolve().parent
-    out = subprocess.run(['node', str(here / 'landform_oracle.mjs')],
-                         input=json.dumps({'cases': cases}),
-                         capture_output=True, text=True, check=True)
-    return json.loads(out.stdout)
+    return _bridge('classify', cases)
 
 
 @test('the Python rule picks the same class as the viewer in every cell')
@@ -1596,6 +1606,8 @@ def _():
         assert diff == 0, f'case {k}: {diff} cells differ from the viewer'
         err = float(np.abs(p['strength'] - np.array(j['strength'])).max())
         assert err < 1e-9, f'case {k}: strength differs by {err:.2e}'
+        bad = int((p['runner_up'] != np.array(j['runnerUp'])).sum())
+        assert bad == 0, f'case {k}: {bad} cells name a different runner-up'
         assert p['source'] == j['source'], f'case {k}: source differs'
 
 
@@ -1608,6 +1620,32 @@ def _():
         got = float((cls == 0).mean())
         assert abs(got - share) < 1.5 / cls.size, \
             f'asked for {share:.0%}, got {got:.1%}'
+
+
+@test('several classes each get the share of the grid they were given')
+def _():
+    from bozkir.erosion import fbm
+    z = fbm((96, 96), seed=8).ravel()
+    for shares in ([0.2, 0.5, 0.3], [0.25] * 4, [0.1, 0.1, 0.4, 0.4]):
+        r = rule.classify(z, 24, len(shares), balance=shares)
+        got = [float((r['cls'] == k).mean()) for k in range(len(shares))]
+        for want, have in zip(shares, got):
+            assert abs(want - have) < 2.0 / r['cls'].size, \
+                f'asked {shares}, got {[round(g, 3) for g in got]}'
+        assert (r['cls'] >= 0).all(), 'a cell was left without a class'
+
+
+@test('a cell placed against its preference reads as undecided')
+def _():
+    from bozkir.erosion import fbm
+    z = fbm((96, 96), seed=2).ravel()
+    # One class squeezed to a tenth of the grid must push cells elsewhere.
+    r = rule.classify(z, 24, 3, balance=[0.1, 0.1, 0.8])
+    moved = r['strength'] == 0
+    assert moved.any(), 'no cell was displaced by the quotas'
+    for i in np.flatnonzero(moved)[:20]:
+        assert r['runner_up'][i] != r['cls'][i], \
+            'a displaced cell points at the class it already has'
 
 
 @test('the Python map functions match their definitions on known surfaces')
@@ -1684,6 +1722,427 @@ def _():
     close(val.kappa(a, a), 1.0)
     assert val.kappa(a, ~a) < 0
     close(val.spearman([1, 2, 3, 4], [10, 20, 30, 40]), 1.0)
+
+
+# ======================================================================
+# named terrains
+# ======================================================================
+
+SECTION = 'terrain profiles'
+
+from bozkir.erosion import PROFILES, generate, terrace            # noqa: E402
+
+
+@test('every named profile generates a terrain of its own character')
+def _():
+    out = {}
+    for name in PROFILES:
+        z, sed = generate(size=96, seed=0, profile=name)
+        assert z.shape == (96, 96) and sed.shape == (96, 96)
+        assert np.isfinite(z).all(), f'{name} produced non-finite heights'
+        close(float(z.min()), 0.0, 1e-9, f'{name} low')
+        close(float(z.max()), 1.0, 1e-9, f'{name} high')
+        gy, gx = np.gradient(z)
+        out[name] = float(np.hypot(gx, gy).mean())
+    assert out['rolling'] < out['desert'], \
+        f"rolling is not gentler than desert: {out}"
+    # Two profiles that came out identical would be a menu of one terrain.
+    a = generate(size=96, seed=0, profile='canyon')[0]
+    b = generate(size=96, seed=0, profile='rolling')[0]
+    assert np.abs(a - b).mean() > 0.05, 'two profiles produced the same ground'
+
+
+@test('terracing makes flats with steps between them')
+def _():
+    ramp = np.linspace(0, 1, 200)[None, :].repeat(8, 0)
+    t = terrace(ramp, 5)
+    assert t.min() >= 0 and t.max() <= 1, 'terracing left 0..1'
+    # A ramp has one slope everywhere; a terraced ramp has flats and risers,
+    # so the spread of its slopes has to be wider.
+    assert np.diff(t, axis=1).std() > np.diff(ramp, axis=1).std() * 5, \
+        'terracing did not flatten anything'
+    close(float(terrace(ramp, 1, sharpness=0).mean()),
+          float(ramp.mean()), 0.06, msg='one step should barely change a ramp')
+
+
+@test('an unknown profile says so instead of silently generating something')
+def _():
+    try:
+        generate(size=32, profile='alps')
+    except ValueError as e:
+        assert 'alps' in str(e) and 'canyon' in str(e), \
+            'the error should name what was asked for and what exists'
+    else:
+        assert False, 'an unknown profile was accepted'
+
+
+# ======================================================================
+# what the viewer can load
+# ======================================================================
+
+SECTION = 'catalogue'
+
+from bozkir.catalogue import rebuild, scan                        # noqa: E402
+
+
+@test('the catalogue lists tilesets and terrains separately')
+def _():
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d)
+        (f / 'desert.splat').write_bytes(b'x' * 2_000_000)
+        (f / 'desert.json').write_text(json.dumps(
+            {'classes': 2, 'tile_size': 1.5, 'tiles': [{}, {}, {}]}))
+        (f / 'mesa.height.json').write_text(json.dumps(
+            {'width': 512, 'height': 512, 'source': 'generated mesa seed 3',
+             'sediment': 'mesa.sediment.png',
+             'settings': {'profile': 'mesa', 'seed': 3}}))
+        index = rebuild(f, quiet=True)
+
+        assert [s['name'] for s in index['scenes']] == ['desert']
+        assert index['scenes'][0]['classes'] == 2
+        assert index['scenes'][0]['tiles'] == 3
+        close(index['scenes'][0]['megabytes'], 2.0, 0.01, msg='size')
+
+        assert [t['name'] for t in index['terrains']] == ['mesa']
+        assert index['terrains'][0]['profile'] == 'mesa'
+        assert index['terrains'][0]['sediment'] is True
+
+        # And it is on disk where the viewer looks for it.
+        again = json.loads((f / 'index.json').read_text())
+        assert again == index, 'the file does not match what was returned'
+
+
+@test('a data folder with nothing in it, or broken files, still indexes')
+def _():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d)
+        assert scan(f) == {'scenes': [], 'terrains': []}
+        # A manifest that is not valid JSON must not stop the rest.
+        (f / 'broken.splat').write_bytes(b'x')
+        (f / 'broken.json').write_text('{ not json')
+        index = scan(f)
+        assert index['scenes'][0]['name'] == 'broken'
+        assert index['scenes'][0]['has_manifest'] is False
+    assert rebuild(Path(d) / 'gone', quiet=True) is None
+
+
+# ======================================================================
+# the browser's terrain generator against this one
+# ======================================================================
+
+SECTION = 'terrain parity'
+
+
+@test('the browser generates the same terrain as Python, bit for bit')
+def _():
+    # A profile and a seed have to name one piece of ground, whichever
+    # language made it: the URL a figure came from regenerates it in the
+    # viewer, and terrain_gen.py writes the file the validation reads. Both
+    # sides do their arithmetic in the same order for exactly this.
+    import json
+    import shutil
+    import subprocess
+    if not shutil.which('node'):
+        print('      (skipped: node not found)')
+        return
+    cases = [{'size': 40, 'seed': s, 'profile': p}
+             for p in PROFILES for s in (0, 3)]
+    for c, j in zip(cases, _bridge('generate', cases)):
+        z, sed = generate(**c)
+        dz = float(np.abs(z.ravel() - np.array(j['z'])).max())
+        ds = float(np.abs(sed.ravel() - np.array(j['sediment'])).max())
+        assert dz < 1e-12 and ds < 1e-12, \
+            f"{c['profile']} seed {c['seed']}: height differs by {dz:.1e}, " \
+            f"sediment by {ds:.1e}"
+
+
+@test('after erosion every cell drains off the map')
+def _():
+    # Filled at the start and the end, so the drainage the material rule
+    # reads is one network, not puddles.
+    from bozkir.erosion import fill_depressions
+    z, _ = generate(size=64, seed=4, profile='hills')
+    refilled = fill_depressions(z)
+    lifted = float((refilled - z).max())
+    rng = float(z.max() - z.min())
+    assert lifted < 1e-3 * rng, f'pits remain: filling lifted {lifted:.2e}'
+
+
+# ======================================================================
+# fighting repetition
+# ======================================================================
+
+SECTION = 'repetition'
+
+from bozkir.wang import minimal_codes, layout as wang_layout      # noqa: E402
+from bozkir.patches import salience                              # noqa: E402
+
+
+@test('the minimal set has two tiles for every pair the layout fixes')
+def _():
+    # Cohen et al. 2003: two choices at every step is enough to never
+    # repeat. The layout here and in the viewer fixes west and south.
+    from collections import Counter
+    for k in (2, 3, 4):
+        codes = minimal_codes(k, k)
+        assert len(codes) == 2 * k * k, f'{k} colours: {len(codes)} tiles'
+        assert len(set(codes)) == len(codes), f'{k} colours: duplicate tiles'
+        per_pair = Counter((c[3], c[2]) for c in codes)
+        assert set(per_pair.values()) == {2} and len(per_pair) == k * k, \
+            f'{k} colours: some (west, south) pair has {per_pair}'
+        # Every colour equally often on the free sides, or the tiling leans.
+        for side in (0, 1):
+            use = Counter(c[side] for c in codes)
+            assert len(set(use.values())) == 1, \
+                f'{k} colours: side {side} is unbalanced {dict(use)}'
+
+
+@test('a layout over the minimal set always matches and never repeats a row')
+def _():
+    codes = minimal_codes(3, 3)
+    g = wang_layout(codes, 40, 40, seed=7)
+    c = np.asarray(codes)
+    assert (c[g[:, 1:], 3] == c[g[:, :-1], 1]).all(), 'west/east mismatch'
+    assert (c[g[1:, :], 2] == c[g[:-1, :], 0]).all(), 'south/north mismatch'
+    rows = {tuple(r) for r in g}
+    assert len(rows) == len(g), 'two rows came out identical'
+
+
+def _flat_patch(spot, seed=0, n=20000):
+    from bozkir.ply import Splats, SH_C0
+    r = np.random.default_rng(seed)
+    xy = r.random((n, 2))
+    rgb = np.clip(0.30 + r.normal(0, 0.06, (n, 3)), 0, 1)
+    if spot:
+        rgb[np.hypot(xy[:, 0] - 0.3, xy[:, 1] - 0.7) < 0.08] = 0.75
+    return Splats(xyz=np.c_[xy, r.normal(0, 0.005, n)],
+                  opacity=np.full(n, 0.9), scale=np.full((n, 3), -5.0),
+                  rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+                  sh_dc=(rgb - 0.5) / SH_C0, sh_rest=np.zeros((n, 0, 3)),
+                  sh_degree=0)
+
+
+@test('salience tells a landmark from texture')
+def _():
+    plain = [salience(_flat_patch(False, s), 1.0) for s in range(3)]
+    spot = [salience(_flat_patch(True, s), 1.0) for s in range(3)]
+    assert max(plain) < 4, f'plain texture read as a landmark: {plain}'
+    assert min(spot) > 20, f'a bright spot went unnoticed: {spot}'
+
+
+@test('scrub and mixed ground are texture, not landmarks')
+def _():
+    # The first version of salience flagged every patch of the rarer
+    # material: bushes on sand put a third of the cells far from the
+    # median. That starved the scrub class of a two-material export.
+    from bozkir.ply import Splats, SH_C0
+    r = np.random.default_rng(3)
+    n = 20000
+    xy = r.random((n, 2))
+    rgb = np.clip(0.52 + r.normal(0, 0.05, (n, 3)), 0, 1)
+    bush = np.zeros(n, bool)
+    for c in r.random((40, 2)):                  # many small dark bushes
+        bush |= np.hypot(xy[:, 0] - c[0], xy[:, 1] - c[1]) < 0.06
+    rgb[bush] = 0.18
+    half = rgb.copy()
+    half[xy[:, 0] < 0.5] = 0.2                   # two materials meeting
+
+    def patch(col):
+        return Splats(xyz=np.c_[xy, np.zeros(n)], opacity=np.full(n, 0.9),
+                      scale=np.full((n, 3), 0.01),
+                      rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+                      sh_dc=(col - 0.5) / SH_C0, sh_rest=np.zeros((n, 0, 3)),
+                      sh_degree=0)
+    assert bush.mean() > 0.2
+    s_scrub = salience(patch(rgb), 1.0)
+    s_half = salience(patch(half), 1.0)
+    assert s_scrub < 4, f'scrub texture read as a landmark: {s_scrub:.1f}'
+    assert s_half < 4, f'a material boundary read as a landmark: {s_half:.1f}'
+
+
+@test('a landmark costs a patch its place in the ranking')
+def _():
+    from bozkir.patches import score_patch
+    a, ia = score_patch(_flat_patch(False, 1), 2, 1.0)
+    b, ib = score_patch(_flat_patch(True, 1), 2, 1.0)
+    assert 'salience' in ia and 'salience' in ib
+    assert b < a / 3, f'landmark patch scored {b:.3g} against {a:.3g}'
+
+
+# ======================================================================
+# honest defaults: what every new capture runs into
+# ======================================================================
+
+SECTION = 'capture checks'
+
+
+@test('a capture with material standing on it reads the right way up')
+def _():
+    from bozkir.scene import upness, UPSIDE_DOWN_BELOW
+
+    class S:
+        pass
+    r = np.random.default_rng(0)
+    n = 40000
+    ground = r.normal(0, 0.01, n)
+    bush = r.random(n) < 0.25
+    ground[bush] += r.random(bush.sum()) * 0.4       # things standing up
+    s = S()
+    s.xyz = np.c_[r.random((n, 2)), ground]
+    up = upness(s, 2)
+    s.xyz = s.xyz * np.array([1, 1, -1])
+    down = upness(s, 2)
+    assert up > 1.5, f'right way up read {up:.2f}'
+    assert down < UPSIDE_DOWN_BELOW, f'upside down read {down:.2f}'
+
+
+def _script(name):
+    import importlib.util
+    here = Path(__file__).resolve().parents[1] / 'scripts' / f'{name}.py'
+    spec = importlib.util.spec_from_file_location(f'_s_{name}', here)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@test('overlapping patches in a class are reported, separate ones are not')
+def _():
+    import contextlib
+    import io
+    ew = _script('export_wang')
+
+    def said(chosen):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ew.overlap_report(chosen, 1.5)
+        return buf.getvalue()
+    apart = [(1, (x, y), None, {}) for x in (0, 2, 4) for y in (0, 2)]
+    crowded = [(1, (x, y), None, {}) for x in (0, 1.2, 2.4) for y in (0, 1.2)]
+    assert said(apart) == '', 'separate patches were reported as overlapping'
+    out = said(crowded)
+    assert 'share ground' in out and 'area' in out, out
+
+
+@test('a tile size far from the capture\'s scale is reported')
+def _():
+    import contextlib
+    import io
+    ew = _script('export_wang')
+
+    class S:
+        pass
+
+    def said(splat, size):
+        s = S()
+        s.scale = np.full((100, 3), splat)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ew.scale_report(s, size)
+        return buf.getvalue()
+    assert said(0.027, 1.5) == '', 'a metric capture was flagged'
+    assert '--size' in said(0.0003, 1.5), 'a centimetre-scale capture passed'
+    assert '--size' in said(0.5, 1.5), 'a kilometre-scale capture passed'
+
+
+@test('graph-cut seams are the default, and can be turned off')
+def _():
+    # Straight diagonals slice any distinctive feature into the same
+    # triangle in every tile; desert and bigsur both needed --cut to lose
+    # that. So it is on unless asked otherwise.
+    src = (Path(__file__).resolve().parents[1] / 'scripts' /
+           'export_wang.py').read_text()
+    assert 'BooleanOptionalAction, default=True' in src, \
+        'graph cut is not on by default'
+
+
+@test('the plane index cuts exactly the same patches, faster')
+def _():
+    from bozkir.ply import Splats
+    from bozkir.tile import PlaneIndex, extract_patch
+    r = np.random.default_rng(4)
+    n = 50000
+    s = Splats(xyz=np.c_[r.random((n, 2)) * 10 - 5, r.normal(0, 0.01, n)],
+               opacity=np.full(n, 0.9), scale=np.full((n, 3), 0.02),
+               rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+               sh_dc=np.zeros((n, 3)), sh_rest=np.zeros((n, 0, 3)),
+               sh_degree=0)
+    idx = PlaneIndex(s, 2, 0.6)
+    for _ in range(60):
+        c = r.random(2) * 12 - 6                    # some reach off the edge
+        size = float(r.choice([0.4, 1.5, 3.0]))
+        a = extract_patch(s, c, size, index=idx)
+        b = extract_patch(s, c, size)
+        assert len(a) == len(b) and np.array_equal(a.xyz, b.xyz), \
+            f'cut at {c} size {size} differs with the index'
+
+
+@test('make_tileset reads the exporter the way a person would')
+def _():
+    mt = _script('make_tileset')
+    assert mt.verdict(0, 'wrote web/data/x.splat\n')[0] == 'good'
+    word, why = mt.verdict(0, '  ! 6 patches from a 4 x 5 area; 8 pair(s) '
+                              'share ground\nwrote x\n')
+    assert word == 'marginal' and 'share ground' in why[0]
+    word, why = mt.verdict(1, 'searching\n  only 0 patches passed, need 4.\n')
+    assert word == 'no' and any('only 0 patches' in w for w in why)
+
+
+# ======================================================================
+# the scripts, end to end
+# ======================================================================
+
+SECTION = 'script smoke'
+
+
+@test('preview_patches and export_wang run end to end on a small capture')
+def _():
+    # The unit tests cover the pieces; this covers the wiring between
+    # them, which is where a changed row or a renamed argument breaks a
+    # script without any single function being wrong. Small and flat so it
+    # takes seconds; no graph cut, no caches, everything in a temp folder.
+    import json
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    from bozkir.ply import Splats, SH_C0, save_ply
+    root = Path(__file__).resolve().parents[1]
+    r = np.random.default_rng(0)
+    n = 70000
+    xy = r.random((n, 2)) * 5.4 - 2.7
+    rgb = np.clip(0.5 + r.normal(0, 0.06, (n, 3)), 0, 1)
+    scene = Splats(xyz=np.c_[xy, r.normal(0, 0.008, n)],
+                   opacity=np.full(n, 0.95),
+                   scale=np.c_[np.full((n, 2), 0.05), np.full(n, 0.008)],
+                   rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+                   sh_dc=(rgb - 0.5) / SH_C0, sh_rest=np.zeros((n, 0, 3)),
+                   sh_degree=0)
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        save_ply(scene, d / 'flat.ply')
+        env = dict(os.environ)
+        runs = [
+            ['scripts/preview_patches.py', str(d / 'flat.ply'), '--no-cache',
+             '--no-search-cache', '--out', str(d / 'sheet.png')],
+            ['scripts/export_wang.py', str(d / 'flat.ply'), '--no-cut',
+             '--no-cache', '-o', str(d / 'flat.splat')],
+        ]
+        outs = []
+        for cmd in runs:
+            p = subprocess.run([sys.executable] + cmd, cwd=root, env=env,
+                               capture_output=True, text=True)
+            assert p.returncode == 0, \
+                f'{cmd[0]} failed:\n{p.stdout[-600:]}\n{p.stderr[-600:]}'
+            outs.append(p.stdout)
+        assert ' sal ' in outs[0], 'the preview table lost its salience column'
+        assert (d / 'sheet.png').exists(), 'no preview sheet written'
+        m = json.loads((d / 'flat.json').read_text())
+        assert m['wang'] and len(m['tiles']) == 16, \
+            f"expected 16 Wang tiles, got {len(m['tiles'])}"
+        assert (d / 'flat.splat').stat().st_size == 32 * m['total']
 
 
 # ====================================================================== run

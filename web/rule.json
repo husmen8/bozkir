@@ -1,0 +1,14 @@
+{
+  "_about": "The material rule's weights: the one place they are written. web/landform.js imports this file and bozkir/landform.py reads it, so the viewer, the figures and the validation all use the same numbers. Each class is a position on a hillside. Its score is (1 - altitude) x (the weighted terms below) + altitude x (its height term), where altitude is the viewer's 'follows height'. Terms: drive = drainage (or the erosion's sediment record where there is one), hollow = 1 - topographic position, ridge = topographic position, slope, flat = 1 - slope, midpos = how near the middle of the topographic range. Height: low = 1 - elevation, high = elevation, middle = nearness to mid elevation. Change a number here and both languages follow; tests/test_pipeline.py checks they still agree cell for cell.",
+  "positions": {
+    "collected": { "terms": { "drive": 0.6, "hollow": 0.4 }, "height": "low" },
+    "exposed":   { "terms": { "slope": 0.5, "ridge": 0.5 },  "height": "high" },
+    "bench":     { "terms": { "flat": 0.6, "midpos": 0.4 },  "height": "middle" },
+    "face":      { "terms": { "slope": 0.75, "midpos": 0.25 }, "height": "middle" }
+  },
+  "classes": {
+    "2": ["collected", "exposed"],
+    "3": ["collected", "bench", "exposed"],
+    "4": ["collected", "bench", "face", "exposed"]
+  }
+}

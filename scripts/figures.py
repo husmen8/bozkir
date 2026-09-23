@@ -69,11 +69,11 @@ def hillshade(z, az=315, alt=40):
 def terrain(seed):
     """The desert scene's terrain for seed 0 (read from web/data if it is
     there), otherwise generated with the same settings."""
-    h = ROOT / "web" / "data" / "desert.height.png"
-    s = ROOT / "web" / "data" / "desert.sediment.png"
-    if seed == 0 and h.exists() and s.exists():
-        return read_height_png(h), read_height_png(s)
-    z, sed = generate(size=512, seed=seed, ridge=0.6)
+    # Generated rather than read from web/data: the generator is
+    # deterministic and bit-identical to the viewer's, so this is the same
+    # ground `terrain_gen.py --profile desert` writes, and a figure cannot
+    # silently depend on whichever height file happens to be on disk.
+    z, sed = generate(size=512, seed=seed, profile="desert")
     return z, sed
 
 
@@ -104,7 +104,7 @@ def overlay(ax, z, cls, title):
     ax.imshow(hillshade(z), cmap="gray", extent=(0, N, N, 0))
     ax.imshow(img, cmap=cmap, vmin=0, vmax=1, alpha=0.62,
               extent=(0, N, N, 0), interpolation="nearest")
-    # Contours so the reader can see scrub sitting in the low ground
+    # Contours so the reader can see the first material in the low ground
     # without a second panel.
     h, w = z.shape
     ax.contour(np.linspace(0, N, w), np.linspace(0, N, h), z, levels=8,
@@ -136,7 +136,7 @@ def fig_rule(out):
                     vmax=1)
     ax[1, 1].set_title("confidence (decision margin)")
     overlay(ax[1, 2], z, off, "rule off: class per cell at random")
-    overlay(ax[1, 3], z, r["cls"], f"rule on: {SHARE:.0%} scrub, placed by terrain")
+    overlay(ax[1, 3], z, r["cls"], f"rule on: {SHARE:.0%} collected, placed by terrain")
     for a in ax.ravel():
         a.set_xticks([])
         a.set_yticks([])
@@ -171,11 +171,11 @@ def fig_balance(out):
                            gridspec_kw={"width_ratios": [1.2, 1, 1, 1]})
     ax[0].plot(asks * 100, np.array(got) * 100, "o-", ms=4)
     ax[0].plot([0, 100], [0, 100], "k:", lw=0.8)
-    ax[0].set_xlabel("scrub asked for (%)")
-    ax[0].set_ylabel("scrub placed (%)")
+    ax[0].set_xlabel("first material asked for (%)")
+    ax[0].set_ylabel("first material placed (%)")
     ax[0].set_title("share control is exact")
     for a, s in zip(ax[1:], (0.2, 0.5, 0.8)):
-        overlay(a, z, run_rule(z, sed, share=s)["cls"], f"{s:.0%} scrub")
+        overlay(a, z, run_rule(z, sed, share=s)["cls"], f"{s:.0%} first material")
     fig.savefig(out / "fig_balance.png")
     plt.close(fig)
 
@@ -209,8 +209,108 @@ def fig_ordering(out):
     plt.close(fig)
 
 
+def _tile_images(res=48):
+    """Every tile of the desert tileset rendered straight down, north up."""
+    import json
+    from bozkir.graphcut import render_patch
+    from bozkir.ply import Splats, SH_C0
+    m = json.loads((ROOT / "web" / "data" / "desert.json").read_text())
+    raw = np.fromfile(ROOT / "web" / "data" / "desert.splat", dtype=np.uint8)
+    n = len(raw) // 32
+    rec = raw[:n * 32].reshape(n, 32)
+    f = rec[:, :24].copy().view(np.float32).reshape(n, 6)
+    rgba = rec[:, 24:28].astype(np.float64) / 255
+    q = (rec[:, 28:32].astype(np.float64) - 128) / 128
+    q /= np.linalg.norm(q, axis=1, keepdims=True) + 1e-9
+    imgs = []
+    for t in m["tiles"]:
+        a, c = t["levels"][0]
+        sp = Splats(xyz=f[a:a + c, :3].astype(np.float64),
+                    opacity=rgba[a:a + c, 3], scale=f[a:a + c, 3:6].astype(np.float64),
+                    rot=q[a:a + c], sh_dc=(rgba[a:a + c, :3] - 0.5) / SH_C0,
+                    sh_rest=np.zeros((c, 0, 3)), sh_degree=0)
+        rgb, _ = render_patch(sp, m["size"], res, m.get("up_axis", 2))
+        imgs.append(np.clip(rgb, 0, 1))
+    return m["tiles"], imgs
+
+
+def _wang_layout(tiles, want, seed=0):
+    """Cells filled south to north, west to east, as the viewer does: each
+    takes a tile whose west edge matches its neighbour's east and whose
+    south edge matches the north of the cell below, from the class asked
+    for. Every edge pair exists in every class, so the choice never fails."""
+    rng = np.random.default_rng(seed)
+    grid = np.zeros((N, N), int)
+    for j in range(N):
+        for i in range(N):
+            ok = [k for k, t in enumerate(tiles)
+                  if t["class"] == want[j * N + i]
+                  and (i == 0 or t["w"] == tiles[grid[j, i - 1]]["e"])
+                  and (j == 0 or t["s"] == tiles[grid[j - 1, i]]["n"])]
+            grid[j, i] = ok[int(rng.integers(len(ok)))]
+    return grid
+
+
+def fig_map(out):
+    """The rule off and on, rendered from the tiles themselves.
+
+    Not a screenshot: every cell is the real tile the viewer's layout would
+    put there, rendered straight down, with the terrain as shading. The
+    only difference between the panels is where each class goes.
+    """
+    plt = _plt()
+    tiles, imgs = _tile_images()
+    res = imgs[0].shape[0]
+    z, sed = terrain(0)
+    rule = run_rule(z, sed)["cls"]
+    off = random_classes(SHARE)
+    shade = hillshade(resample(z, N * res))
+    shade = 0.62 + 0.38 * shade
+    panels = []
+    for want in (off, rule):
+        g = _wang_layout(tiles, want)
+        mos = np.zeros((N * res, N * res, 3))
+        for j in range(N):
+            for i in range(N):
+                r0 = (N - 1 - j) * res                  # north at the top
+                mos[r0:r0 + res, i * res:(i + 1) * res] = imgs[g[j, i]]
+        # The terrain grid has row 0 in the north too (image order).
+        panels.append(np.clip(mos * shade[..., None] * 1.15, 0, 1))
+    fig, ax = plt.subplots(1, 2, figsize=(14, 7.3))
+    for a, img, title in zip(ax, panels,
+                             ("rule off: each cell's material at random",
+                              f"rule on: {SHARE:.0%} class 0 (collected ground) by terrain")):
+        a.imshow(img)
+        a.set_title(title)
+        a.set_xticks([])
+        a.set_yticks([])
+    fig.suptitle(f"The desert tileset on generated desert terrain, {N}x{N} "
+                 "tiles, top-down - same tiles, same share, same layout rules")
+    fig.savefig(out / "fig_map.png")
+    plt.close(fig)
+
+
+def fig_profiles(out):
+    """The twelve named terrains at one seed: what the generator can make."""
+    from bozkir.erosion import PROFILES
+    plt = _plt()
+    names = list(PROFILES)
+    fig, ax = plt.subplots(3, 4, figsize=(13, 10))
+    for a, name in zip(ax.ravel(), names):
+        z, _ = generate(size=256, seed=0, profile=name)
+        a.imshow(hillshade(z), cmap="gray")
+        a.contour(z, levels=8, colors="k", linewidths=0.3, alpha=0.5)
+        a.set_title(name)
+        a.set_xticks([])
+        a.set_yticks([])
+    fig.suptitle("Named terrains, seed 0: noise, then stream power erosion "
+                 "(FastScape scheme)")
+    fig.savefig(out / "fig_profiles.png")
+    plt.close(fig)
+
+
 FIGURES = {"rule": fig_rule, "seeds": fig_seeds, "balance": fig_balance,
-           "ordering": fig_ordering}
+           "ordering": fig_ordering, "profiles": fig_profiles, "map": fig_map}
 
 
 def main(argv=None):

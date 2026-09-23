@@ -25,7 +25,51 @@ from .render import rasterize_rgba, over, flatten
 from .camera import Camera, project_perspective
 
 
-def extract_patch(s, centre, size, up_axis=2, recentre=True):
+class PlaneIndex:
+    """Splats bucketed by ground-plane cell, built once per scene.
+
+    A patch search cuts a square at every candidate position - a thousand
+    of them on a large capture - and cutting by testing every splat made
+    each one a pass over the whole scene: on bigsur's ten million splats,
+    ten billion comparisons before anything was scored. Sorting the splats
+    into cells once means each cut only looks at the few cells its square
+    touches, and the result is the same splats in the same order.
+    """
+
+    def __init__(self, s, up_axis=2, cell=0.5):
+        self.plane = [i for i in range(3) if i != up_axis]
+        xy = np.asarray(s.xyz[:, self.plane], dtype=np.float64)
+        self.cell = float(cell)
+        self.lo = xy.min(axis=0) if len(xy) else np.zeros(2)
+        ij = np.floor((xy - self.lo) / self.cell).astype(np.int64)
+        self.shape = (ij.max(axis=0) + 1) if len(xy) else np.array([1, 1])
+        key = ij[:, 0] * self.shape[1] + ij[:, 1]
+        self.order = np.argsort(key, kind="stable")
+        sorted_key = key[self.order]
+        n_cells = int(self.shape[0] * self.shape[1])
+        self.start = np.searchsorted(sorted_key, np.arange(n_cells + 1))
+        self.n = len(xy)
+
+    def candidates(self, centre, size):
+        """Indices of every splat in the cells a square touches, ascending."""
+        half = size / 2.0
+        c = np.asarray(centre, dtype=np.float64)
+        a = np.floor((c - half - self.lo) / self.cell).astype(np.int64)
+        b = np.floor((c + half - self.lo) / self.cell).astype(np.int64)
+        a = np.maximum(a, 0)
+        b = np.minimum(b, self.shape - 1)
+        if (b < a).any():
+            return np.zeros(0, dtype=np.int64)
+        parts = []
+        for i in range(int(a[0]), int(b[0]) + 1):
+            row = i * self.shape[1]
+            parts.append(self.order[self.start[row + a[1]]:
+                                    self.start[row + b[1] + 1]])
+        idx = np.concatenate(parts) if parts else np.zeros(0, np.int64)
+        return np.sort(idx)
+
+
+def extract_patch(s, centre, size, up_axis=2, recentre=True, index=None):
     """Cut a square patch out of the ground plane.
 
     Membership is decided from the ground-plane position only; height is
@@ -35,15 +79,22 @@ def extract_patch(s, centre, size, up_axis=2, recentre=True):
 
     `centre` is a 2-vector in the ground plane. With `recentre`, the patch
     comes back centred on the origin horizontally, which makes copies easy
-    to place.
+    to place. `index`, a PlaneIndex over `s`, makes the cut look only at
+    nearby splats; the result is identical.
     """
     plane = [i for i in range(3) if i != up_axis]
     centre = np.asarray(centre, dtype=np.float32).reshape(2)
     half = size / 2.0
 
-    d = s.xyz[:, plane] - centre
-    keep = np.all((d >= -half) & (d <= half), axis=1)
-    out = s.subset(keep)
+    if index is not None and index.n == len(s):
+        # Only the splats in nearby cells, then the exact test on those.
+        cand = index.candidates(centre, size)
+        d = s.xyz[cand][:, plane] - centre
+        out = s.subset(cand[np.all((d >= -half) & (d <= half), axis=1)])
+    else:
+        d = s.xyz[:, plane] - centre
+        keep = np.all((d >= -half) & (d <= half), axis=1)
+        out = s.subset(keep)
 
     if recentre and len(out):
         offset = np.zeros(3, dtype=np.float32)

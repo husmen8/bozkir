@@ -12,12 +12,16 @@ SIGGRAPH Asia 2025). **What is new is where each material goes.**
 |---|---|
 | ![bigsur](docs/hero.jpg) | ![desert](docs/hero-2.jpg) |
 
-| rule off | rule on |
-|---|---|
-| ![rule off](docs/rule-off.jpg) | ![rule on](docs/rule-on.jpg) |
+**What it is for.** Ground under a fixed light: game levels with a set time
+of day, architectural visualisation, previs, and training or simulation
+grounds that need real surfaces over large procedural terrain. Capture a
+few square metres of real ground; get kilometres of it laid over terrain,
+with materials placed where the land says they go.
 
-Same tiles, same terrain, same 30% share. The only difference is whether
-each cell's material is chosen at random or from the shape of the ground.
+**What it is not for.** Anything that must be relit or have a day cycle
+(lighting is baked into a capture), cliffs and walls, trees and tall
+objects as tiles, water, and captures with too little clean flat ground -
+roughly four tile-sized areas of each material.
 
 ---
 
@@ -40,7 +44,15 @@ erosion's own sediment record. Their equation takes it unchanged.
 
 ![the rule](docs/fig_rule.png)
 
-The rule reads four maps sampled at 4× the tile grid (one sample per tile
+The same decision rendered from the real tiles - every cell the tile the
+viewer's layout would put there, seen from above, the terrain as shading -
+with only the placement of each class differing between the panels:
+
+![rule off and on, rendered from the tiles](docs/fig_map.png)
+
+The rule's weights live in one file, `web/rule.json`, which the viewer
+imports and `bozkir/landform.py` reads - one source, held identical cell
+for cell by the tests. The rule reads four maps sampled at 4× the tile grid (one sample per tile
 aliases), max-pools drainage so a channel narrower than a tile survives,
 passes the class-lead field through a **median filter** (edge-preserving,
 so regions become contiguous without the boundary moving) and thresholds it
@@ -100,6 +112,19 @@ cd web && python -m http.server 8000
 Then `http://localhost:8000/?scene=desert`. Drop a tileset zip on the page
 to view another.
 
+From a capture of your own ground to a tileset, in one command:
+
+```bash
+pip install numpy plyfile pillow matplotlib
+python scripts/make_tileset.py my_ground.ply
+```
+
+It decides whether the capture holds one material or two, uses the
+defaults meant for an untuned capture, prints everything the exporter
+says, and ends with a verdict - *good*, *marginal* (and why), or *no* (and
+why) - and the address to open. The steps below are the same tools with
+every control exposed.
+
 The constructor needs `numpy`, `plyfile` and `Pillow`:
 
 ```bash
@@ -107,7 +132,63 @@ python scripts/preview_patches.py data/raw/scene.ply --save-preset scene
 python scripts/export_wang.py data/raw/scene.ply --preset scene --patches 0,2,4,5
 python scripts/export_wang.py data/raw/desert.ply --preset desert2 --classes 2 --exclude 5,10,12,33,44
 python scripts/terrain_gen.py --name desert --size 512 --ridge 0.6
+python scripts/terrain_gen.py --name canyon --profile canyon --size 512
 ```
+
+**Terrain is generated in the browser too.** Twelve profiles - plains,
+rolling, hills, desert, badlands, canyon, mesa, plateau, foothills, ridges,
+alpine, piedmont - and any seed. **terrain…** in the scene section opens a
+window with a preview of every profile at the current seed; step the seed
+and the previews follow, double-click one to make it. Or from the URL:
+`?scene=desert&gen=canyon&seed=3&size=256`. The generator is
+stream power erosion solved the FastScape way (Braun and Willett 2013), and
+the Python and JavaScript versions are held to the same output bit for bit,
+so a profile and a seed name the same ground everywhere. Generated terrains
+are kept in the browser's storage; nothing touches the server.
+[docs/terrain.md](docs/terrain.md) maps each step to its source and says
+where it is simpler than the literature.
+
+![named terrains](docs/fig_profiles.png)
+
+The same profiles from Python: `--profile canyon --seed 3`; anything passed
+explicitly still wins.
+
+**Tileset and terrain are separate choices.** `?scene=desert&height=mesa`
+puts the desert tiles on mesa ground, and the panel's two menus do the same
+without editing the URL. They read `web/data/index.json`, which lists what
+the folder holds - a static server cannot be asked, so the folder says.
+The tools that write there rebuild it; `python scripts/index_data.py` does
+it by hand after moving files around.
+
+**class decision** paints each cell with the class the rule chose, washed
+towards grey where it was nearly undecided. That is the decision itself
+rather than the material drawn, and the two can differ: tiles are sorted
+into classes by average appearance, so one can hold material from the
+other, and cells in the blend band draw some of their runner-up. Without
+the overlay a green-looking summit is unexplainable; with it, either the
+rule called it collected or it did not.
+
+**View presets.** `web/views.json` holds named viewer settings - the README's own,
+the matched pair for the rule on/off figure, a low vista, height alone.
+The preset menu sets each control exactly as a hand on the slider would,
+so a preset can only do what the panel can, and `?preset=proof-on` in the
+URL makes a figure reproducible from its name. Add your own; a test checks
+every preset names real controls with values in range.
+
+Relief scale follows the grid until you move it, flags itself when it is
+below the grid (the height field then repeats), and follows again once
+dragged back to the grid size.
+
+The panel opens with the controls for using the viewer. **show everything**
+adds the ones for measuring it: ordering, measurement, level of detail, the
+debug views and the finer terrain controls.
+
+The exporter's defaults are set for a capture nobody has tuned: seams by
+graph cut (`--no-cut` for speed), at most 60,000 splats per patch
+(`--max-per-tile 0` keeps all), and three warnings that name their fix - a
+capture that looks upside down (`--flip`), a `--size` far from the
+capture's own scale (with a suggested size), and patches of one material
+that overlap, which means that material will repeat.
 
 `preview_patches` searches for candidate tiles and writes a sheet of
 thumbnails; pick four and pass them to `export_wang`. `--classes 2` splits
@@ -121,6 +202,13 @@ Figures and tests:
 python scripts/figures.py
 python tests/run_all.py
 ```
+
+**Look and figures.** Ground shading darkens what the terrain itself would
+darken - a hollow sees less sky than open ground - and never adds light,
+since the capture cannot be relit. Exposure and saturation compensate for
+`.splat` keeping only the constant colour term. Figure mode (F) hides the
+panel, and **save PNG** (P) writes the canvas at full resolution, named
+after the scene, grid, rule and camera, so a figure can be retaken exactly.
 
 Viewer settings that look right: relief scale = grid size (the one that
 matters), grid 24, relief 1.2, follows height 40%, patch size 3, first
@@ -223,9 +311,20 @@ previs, simulation, games with a set time of day.
 Tiles are surfaces with no underside. Shadows in the capture become part of
 the repeating pattern; overcast captures tile better than sunny ones.
 
-Four patches per class still repeat visibly, and rotation cannot help — it
-permutes the Wang edge codes. Corner tiles (Lagae & Dutré 2006) are the
-known fix.
+**Repetition, and what is done about it.** Each tile is four triangles, one
+per edge, and each triangle is always the same part of the patch assigned
+to that edge's colour - the construction of Cohen et al. (SIGGRAPH 2003).
+With two colours, half the grid shows the same south triangle in the same
+place, and anything distinctive in it becomes a lattice. Two things fight
+that. `export_wang.py --colours 3` gives each triangle three possible
+patches instead of two, and builds Cohen et al.'s minimal set - two tiles
+per (west, south) pair, 18 per class rather than the 81 of every
+combination - since two choices at each step is already enough never to
+repeat. And the patch search now scores down *landmarks*: a pale spot in
+scrub, a stone, a survey marker. Texture is not noticed repeating; a
+landmark is, so a patch carrying one ranks far lower, and
+`preview_patches.py` labels it in red. Corner tiles (Lagae and Dutré 2006;
+also Cohen et al. §3.4) remain the fix for features crossing a corner.
 
 Class choice is per cell, so without blending the boundary reads as
 rectangles; Hybrid GSWT's per-Gaussian priority is why theirs look organic.
@@ -239,15 +338,19 @@ export (mean error 14 on 0–255).
 
 ```
 bozkir/    ply, transform, select, patches, graphcut, tile, wang, pack,
-           scene, presets, camera, render, popping,
+           scene, presets, camera, render, popping, catalogue,
            terrain, erosion      height fields, landform maps, generation
-           landform              the viewer's rule, ported and held to it
+           landform              the viewer's rule, read from web/rule.json
+           catalogue             what web/data holds, for the viewer's menus
            validate              scoring the rule against a survey
 scripts/   thin CLI wrappers; none imports another
 web/       viewer, sort-worker, grid, order, merge, tileset, capture,
-           heightfield, landform, benchmark
+           heightfield (+ openness, generated-terrain cache), landform,
+           terrain + terrain-worker (the generator), benchmark
 tests/     run_all.py runs the three suites: test_all.py (package),
-           test_pipeline.py (pipeline), test_web.mjs (browser modules)
+           test_pipeline.py (pipeline, including both scripts end to end),
+           test_web.mjs (browser modules); bridge.mjs runs the shared
+           JavaScript for the Python-side parity tests
 ```
 
 ---
@@ -267,6 +370,20 @@ Radiance Field Rendering.* SIGGRAPH 2023.
 
 Weiss. *Topographic Position and Landforms Analysis.* ESRI User Conference,
 2001.
+
+Braun, Willett. *A very efficient O(n), implicit and parallel method to
+solve the stream power equation governing fluvial incision and landscape
+evolution.* Geomorphology 2013.
+
+Cordonnier et al. *Large Scale Terrain Generation from Tectonic Uplift and
+Fluvial Erosion.* Computer Graphics Forum (Eurographics) 2016.
+
+Schott, Paris, Fournier, Guérin, Galin. *Large-scale Terrain Authoring
+through Interactive Erosion Simulation.* ACM TOG 2023.
+
+Barnes, Lehman, Mulla. *Priority-Flood: An optimal depression-filling and
+watershed-labeling algorithm for digital elevation models.* Computers &
+Geosciences 2014.
 
 Lagae, Dutré. *An Alternative for Wang Tiles: Colored Edges versus Colored
 Corners.* ACM TOG 2006.

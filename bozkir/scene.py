@@ -75,6 +75,35 @@ class SceneConfig:
         return " + ".join(bits) if bits else "raw"
 
 
+# How much longer the upper tail of heights must be than the lower one before
+# a scene counts as the right way up. Real ground carries material above it
+# - grass, stones, bushes - and nothing below except noise, so the heights
+# above the median reach further than those below. A ground plane whose
+# normal was detected with the wrong sign turns that around: bigsur came out
+# of alignment upside down and needed --flip found by hand.
+UPSIDE_DOWN_BELOW = 0.7
+
+
+def upness(s, up_axis):
+    """Upper tail of heights over lower tail, around the median.
+
+    Above 1 when material stands on the ground, below 1 when it hangs
+    under it. Percentiles rather than skewness, so a few floaters cannot
+    decide it.
+
+    A one-way check. Ground with bushes, stones or grass on it reads well
+    above 1 and flipped well below; bare flat sand reads near 1 either way
+    (the desert's tiles: 0.95, and 1.06 upside down). So a warning means
+    something, and silence proves nothing - the threshold is set where flat
+    ground cannot trip it.
+    """
+    z = np.asarray(s.xyz[:, up_axis], dtype=np.float64)
+    if len(z) > 400_000:
+        z = z[:: len(z) // 400_000 + 1]
+    lo, mid, hi = np.percentile(z, [3, 50, 97])
+    return float((hi - mid) / max(mid - lo, 1e-9))
+
+
 def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
     """Load a PLY and apply the configured preparation.
 
@@ -108,6 +137,11 @@ def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
         if verbose:
             print(f"  tilt {info['tilt_before_deg']:.2f} -> "
                   f"{info['tilt_after_deg']:.2f} deg")
+            ratio = upness(s, cfg.up_axis)
+            if ratio < UPSIDE_DOWN_BELOW:
+                print(f"  ! this looks upside down: material hangs below the "
+                      f"ground rather than standing on it (tails {ratio:.2f}). "
+                      + ("Drop --flip." if cfg.flip else "Pass --flip."))
 
     if cfg.recentre:
         s, _ = recentre(s, "ground" if cfg.up_axis == 2 else "median")

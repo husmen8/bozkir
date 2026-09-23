@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .tile import extract_patch
+from .tile import PlaneIndex, extract_patch
 from .transform import rotate, quat_between
 
 
@@ -46,71 +46,6 @@ def mass_below(p, up_axis, g, thickness, below=0.25):
     """
     h = p.xyz[:, up_axis]
     return float((h < g - thickness * below).mean())
-
-def ground_field(p, size, up_axis=2, grid=12, low_pct=20.0):
-    """A coarse height map of the ground across a patch.
-
-    clip_slab uses one level for the whole patch, which is fine on a flat
-    square and wrong on anything that undulates: a flat band cuts into the
-    high ground and takes air over the low ground. Estimating a height per
-    bin instead lets the band follow the surface.
-
-    Bins take a low percentile rather than a minimum, since reconstructions
-    leave junk underneath, and the result is median-filtered because a bin
-    holding only a few splats is not to be trusted. Empty bins are filled
-    from the patch as a whole.
-
-    Returns a (grid, grid) array of heights.
-    """
-    plane = [i for i in range(3) if i != up_axis]
-    half = size / 2.0
-    xy = p.xyz[:, plane]
-    h = p.xyz[:, up_axis]
-
-    ij = np.clip(((xy + half) / max(size, 1e-9) * grid).astype(int), 0, grid - 1)
-    key = ij[:, 0] * grid + ij[:, 1]
-
-    field = np.full(grid * grid, np.nan)
-    order = np.lexsort((h, key))
-    ks, starts = np.unique(key[order], return_index=True)
-    ends = np.append(starts[1:], len(order))
-    for k, a, b in zip(ks, starts, ends):
-        if b - a >= 8:
-            field[k] = np.percentile(h[order[a:b]], low_pct)
-
-    field = field.reshape(grid, grid)
-    fallback = float(np.nanmedian(field)) if np.isfinite(field).any() \
-        else float(np.percentile(h, low_pct))
-    field = np.where(np.isfinite(field), field, fallback)
-
-    # 3x3 median, so one odd bin cannot pull the surface with it.
-    padded = np.pad(field, 1, mode="edge")
-    stack = np.stack([padded[i:i + grid, j:j + grid]
-                      for i in range(3) for j in range(3)])
-    return np.median(stack, axis=0)
-
-
-def height_above_ground(p, field, size, up_axis=2):
-    """Each Gaussian's height above the local ground, by bilinear lookup."""
-    plane = [i for i in range(3) if i != up_axis]
-    grid = field.shape[0]
-    half = size / 2.0
-    u = np.clip((p.xyz[:, plane[0]] + half) / max(size, 1e-9) * grid - 0.5,
-                0, grid - 1)
-    v = np.clip((p.xyz[:, plane[1]] + half) / max(size, 1e-9) * grid - 0.5,
-                0, grid - 1)
-    i0, j0 = u.astype(int), v.astype(int)
-    i1 = np.minimum(i0 + 1, grid - 1)
-    j1 = np.minimum(j0 + 1, grid - 1)
-    fu, fv = u - i0, v - j0
-    g = (field[i0, j0] * (1 - fu) * (1 - fv) + field[i1, j0] * fu * (1 - fv)
-         + field[i0, j1] * (1 - fu) * fv + field[i1, j1] * fu * fv)
-    return p.xyz[:, up_axis] - g
-
-
-
-
-
 
 def clip_slab(p, up_axis, thickness, below=0.25):
     """Keep a slab around the ground, discarding whatever stands on it.
@@ -318,7 +253,8 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
         # the score, and a bare dict turns a sparse patch into a crash.
         return -1.0, {"splats": len(p), "relief": 0.0, "filled": 0.0,
                       "planarity": 1.0, "edge_relief": 0.0,
-                      "edge_tilt": 90.0, "interior_relief": 0.0, "cover": 0.0}
+                      "edge_tilt": 90.0, "interior_relief": 0.0, "cover": 0.0,
+                      "salience": 0.0}
 
     plane = [i for i in range(3) if i != up_axis]
     h = p.xyz[:, up_axis]
@@ -343,10 +279,11 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
 
     edge_rel, edge_tilt, mid_rel = band_stats(p, up_axis, size, edge_margin)
     cover = coverage(p, size, up_axis)
+    sal = salience(p, size, up_axis)
     info = {"splats": len(p), "relief": relief, "filled": filled,
             "planarity": planarity, "edge_relief": edge_rel,
             "edge_tilt": edge_tilt, "interior_relief": mid_rel,
-            "cover": cover}
+            "cover": cover, "salience": sal}
 
     if features:
         # Reward what stands in the middle, punish anything at the rim.
@@ -356,8 +293,13 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
         rim = 1.0 + 12.0 * edge_rel / max(size, 1e-9)
         return float(cover * filled * np.log1p(density) * interest / rim), info
 
+    # Landmarks repeat recognisably; texture does not. Plain texture reads
+    # 2-3 on salience and is untouched here; a patch with one isolated spot
+    # reads tens and is pushed well down the ranking, so the automatic
+    # pick stops choosing the patches that were being excluded by hand.
+    landmark = 1.0 + max(0.0, sal - 4.0) / 4.0
     return float(cover * filled * flatness * np.log1p(density)
-                 / (1.0 + 20.0 * planarity)), info
+                 / (1.0 + 20.0 * planarity) / landmark), info
 
 def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                  max_tilt=12.0, max_below=0.5, features=False,
@@ -415,6 +357,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                 "holes": 0, "score": 0}
     total = len(xs) * len(ys)
     done = 0
+    index = PlaneIndex(s, up_axis, cell=size / 2.0)
     for x in xs:
         for y in ys:
             done += 1
@@ -422,7 +365,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                 progress(done, total, len(cands))
             # Cut wide, judge narrow.
             wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
-                                 up_axis=up_axis)
+                                 up_axis=up_axis, index=index)
             p = extract_patch(wide, [0.0, 0.0], size, up_axis=up_axis,
                               recentre=False)
             if len(p) < 2000:
@@ -586,7 +529,12 @@ SETTING_NOTE = {
 # hand back patches from another scene, and `--patches 2` would quietly mean
 # something else. Hence the fingerprint below rather than a filename.
 
-SEARCH_CACHE_VERSION = 1
+# 2: scores divide by a landmark penalty (salience), so every cached score
+# from version 1 ranks patches differently from a fresh search.
+# 3: salience stops counting texture and material mixes as landmarks. The
+# version 2 scores pushed every scrub patch down; recalling them would bring
+# back the starved class the change was made to fix.
+SEARCH_CACHE_VERSION = 3
 
 
 def scene_fingerprint(s, sample=4096):
@@ -691,10 +639,11 @@ def rebuild_candidates(s, records, size, up_axis, thickness,
     over the splat array and nothing more.
     """
     out = []
+    index = PlaneIndex(s, up_axis, cell=size / 2.0) if len(records) > 4 else None
     for rec in records:
         x, y = rec["x"], rec["y"]
         wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
-                             up_axis=up_axis)
+                             up_axis=up_axis, index=index)
         p = extract_patch(wide, [0.0, 0.0], size, up_axis=up_axis,
                           recentre=False)
         g_level = ground_level(p.xyz[:, up_axis], thickness)
@@ -928,6 +877,58 @@ def balanced_split(patches, colours):
 
     combo, rest = best
     return ([patches[i] for i in combo], [patches[i] for i in rest]), best_gap
+
+
+def salience(p, size, up_axis=2, grid=16, min_count=6):
+    """How much a patch contains something the eye will find again.
+
+    Repetition in a tiling is not noticed through texture - grains of sand
+    or blades of grass are interchangeable, and the eye does not track
+    them. It is noticed through landmarks: a pale bare patch in scrub, a
+    dark stone, a survey marker. A landmark in a patch appears in every
+    tile that uses that patch, at the same place in the tile, so across a
+    grid it becomes a lattice (see wang.minimal_codes for why the place is
+    always the same).
+
+    Measured as how far the brightest or darkest few cells of a coarse
+    top-down grid stand from the patch's typical cell, in units of how much
+    cells normally vary - and only while those cells are few. Uniform
+    texture scores near 1-3; one isolated spot scores tens; a patch where
+    many cells stand out (scrub, or two materials meeting) is texture or a
+    mixture and scores low again. Robust statistics
+    (median and MAD) so the landmark cannot hide itself by inflating the
+    spread it is measured against.
+    """
+    plane = [i for i in range(3) if i != up_axis]
+    xy = p.xyz[:, plane]
+    if len(xy) < 50:
+        return 0.0
+    lo = xy.min(axis=0)
+    ij = np.clip(((xy - lo) / max(size, 1e-6) * grid).astype(int), 0, grid - 1)
+    cell = ij[:, 0] * grid + ij[:, 1]
+    rgb = p.base_rgb
+    lum = rgb @ np.array([0.299, 0.587, 0.114])
+    count = np.bincount(cell, minlength=grid * grid)
+    total = np.bincount(cell, weights=lum, minlength=grid * grid)
+    ok = count >= min_count
+    if ok.sum() < grid:
+        return 0.0
+    mean = total[ok] / count[ok]
+    med = float(np.median(mean))
+    mad = float(np.median(np.abs(mean - med))) * 1.4826
+    z = np.abs(mean - med) / max(mad, 1e-4)
+    # The worst 3% of cells: one small spot, not a single noisy cell.
+    k = max(2, int(round(0.03 * len(z))))
+    top = float(np.sort(z)[-k:].mean())
+    # A landmark is rare as well as different. Scrub is dark bushes on pale
+    # sand; a third of its cells sit far from the median, and so does half
+    # of any patch that straddles two materials. That is texture, or a
+    # mixture - not a spot the eye will find again - and measuring only how
+    # far the outliers stand would flag every patch of the rarer material
+    # and starve its class. So the score fades out as the share of
+    # outlying cells grows past what one compact spot can occupy.
+    share = float((z > 4.0).mean())
+    return top * min(1.0, max(0.0, (0.12 - share) / 0.08))
 
 
 def appearance(p):

@@ -116,6 +116,96 @@
             border-bottom: 1px solid var(--line);
             --c: var(--dim);
         }
+        /* Most of this panel is for measuring the renderer, not for using
+           it. Hidden until asked for, so what is left is the scene, the
+           terrain, the rule and the look - the controls somebody opening
+           this for the first time is looking for. */
+        /* The terrain window. Its own space, because a profile is chosen by
+           looking at it, and twelve choices with a seed and a size do not fit
+           on one line of a panel that is also a slider rack. */
+        /* The scene section as three steps, in the order a first-time
+           visitor needs them: what the tiles are, what they lie on, how to
+           look at it. Everything else in the panel is adjustment. */
+        .step { display: flex; align-items: baseline; gap: 6px; margin: 9px 0 3px; }
+        .step:first-child { margin-top: 2px; }
+        .step-n { width: 15px; height: 15px; line-height: 15px; text-align: center;
+                  border-radius: 50%; background: #c9a227; color: #17191a;
+                  font-size: 9px; font-weight: bold; flex: none; }
+        .step-t { color: var(--text); letter-spacing: .06em; }
+        .step-h { color: var(--dim); font-size: 9px; }
+        button.big { height: calc(var(--row) + 6px); font-size: 11px;
+                     border-color: #6b5a2a; }
+        .chips { display: flex; flex-wrap: wrap; gap: 3px; margin: 2px 0 6px; }
+        .chips button { width: auto; flex: 1 1 auto; padding: 0 7px; }
+        .chips button.on { border-color: #c9a227; color: #fff; }
+        .tw-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+        .tw-group-head { color: var(--dim); font-size: 10px; letter-spacing: .12em;
+                         text-transform: uppercase; margin: 0 0 5px 2px; }
+        .tw-group-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        #terrainwin {
+            width: min(720px, 92vw); padding: 0; border: 1px solid var(--line);
+            border-radius: 4px; background: var(--panel); color: var(--text);
+            font-size: 11px;
+        }
+        #terrainwin::backdrop { background: rgba(8, 10, 11, .55); }
+        .tw-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 12px; border-bottom: 1px solid var(--line);
+            letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+        }
+        .tw-head button { width: auto; padding: 0 8px; }
+        .tw-cards { padding: 12px; }
+        .tw-card {
+            display: flex; flex-direction: column; align-items: center; gap: 4px;
+            padding: 5px; border: 1px solid var(--line); border-radius: 3px;
+            background: var(--sunken); cursor: pointer; color: var(--dim);
+        }
+        .tw-card:hover { border-color: #6b6150; color: var(--text); }
+        .tw-card.on { border-color: #c9a227; color: #fff; }
+        .tw-card canvas { width: 100%; aspect-ratio: 1; image-rendering: auto;
+                          border-radius: 2px; background: #1b1e1f; }
+        .tw-row {
+            display: flex; align-items: center; gap: 5px; padding: 0 12px 8px;
+        }
+        .tw-row > * { width: auto; margin: 0; }
+        .tw-row label { color: var(--dim); }
+        .tw-row #genseed {
+            width: 6em; height: var(--row); padding: 0 5px; font: inherit;
+            font-size: 11px; color: var(--text); background: var(--sunken);
+            border: 1px solid var(--line); border-radius: 2px;
+        }
+        .tw-row #gensize { width: 5em; }
+        .tw-row .go { margin-left: auto; padding: 0 16px; }
+        .tw-note { padding: 0 12px 8px; color: var(--dim); font-size: 10px; }
+        .tw-recent-head { padding: 6px 12px 4px; color: var(--dim);
+                          border-top: 1px solid var(--line); font-size: 10px;
+                          letter-spacing: .1em; text-transform: uppercase; }
+        .tw-recent { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 12px; }
+        .tw-recent button { width: auto; padding: 0 8px; }
+        .adv { display: none; }
+        /* The way out of figure mode. An HTML element over the canvas, not
+           part of it, so a saved PNG never contains it. Fades once it has
+           been seen, and comes back under the pointer. */
+        #figexit {
+            position: absolute; top: 12px; right: 12px; z-index: 40;
+            display: none; padding: 6px 10px; border-radius: 3px;
+            background: rgba(11, 13, 14, .72); color: #e8e2d4;
+            border: 1px solid rgba(255, 255, 255, .15);
+            font-family: inherit; font-size: 11px; line-height: 1.3;
+            letter-spacing: .04em; cursor: pointer;
+            transition: opacity .6s;
+        }
+        body.figure #figexit { display: block; }
+        body.figure #figexit.faded { opacity: .18; }
+        body.figure #figexit:hover { opacity: 1; }
+        body.figure #panel, body.figure #grip, body.figure #gizmo { display: none; }
+        body.expert .adv { display: block; }
+        #expertrow {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 9px; border-bottom: 1px solid var(--line);
+            color: var(--dim); font-size: 10px; letter-spacing: .08em;
+        }
+        #expertrow input { margin: 0; }
         summary {
             height: 23px; line-height: 23px; padding: 0 9px;
             color: var(--dim); font-size: 10px; letter-spacing: .1em;
@@ -267,6 +357,27 @@
     <div id="app">
         <div id="stage">
             <canvas id="gl"></canvas>
+            <dialog id="terrainwin">
+                <div class="tw-head">
+                    <span>terrain</span>
+                    <button type="button" id="terrainclose" title="close (Esc)">×</button>
+                </div>
+                <div id="gencards" class="tw-cards"></div>
+                <div class="tw-row">
+                    <label>seed</label>
+                    <button type="button" id="seeddown" title="previous seed">−</button>
+                    <input type="number" id="genseed" min="0" step="1" value="0">
+                    <button type="button" id="seedup" title="next seed">+</button>
+                    <button type="button" id="seedrand" title="a random seed">random</button>
+                    <label>size</label>
+                    <select id="gensize"><option value="128">128</option><option value="256" selected>256</option><option value="512">512</option></select>
+                    <button type="button" id="genbtn" class="go">generate</button>
+                </div>
+                <div class="tw-note" id="twnote">Previews are 64 cells across; the terrain itself is made at the size chosen. Each is made once, then kept in this browser.</div>
+                <div class="tw-recent-head">made before</div>
+                <div id="genrecent" class="tw-recent"></div>
+            </dialog>
+            <button id="figexit" type="button">exit figure mode · F or Esc · P saves</button>
             <svg id="gizmo" viewBox="0 0 92 92">
                 <g id="gz"></g>
             </svg>
@@ -291,10 +402,28 @@
                 </span>
             </div>
 
+            <label id="expertrow" data-tip="Shows the sections used to measure the renderer: ordering, measurement, level of detail and the debug views, plus the finer controls inside the sections already open.">
+                <input type="checkbox" id="expert"> show everything
+            </label>
+
             <details open style="--c:#c9a227">
                 <summary data-tip="A tileset is a .splat of packed Gaussians plus a .json saying which splats belong to which tile, the tile size, the LOD ranges and the Wang edge codes. Without the .json the splats load as one scene rather than as tiles.">scene</summary>
                 <div class="body">
+                    <div class="step"><span class="step-n">1</span><span class="step-t">tiles</span>
+                        <span class="step-h">what the ground is made of</span></div>
+                    <select id="scenepick" data-tip="Tilesets this server has, read from data/index.json. Rebuilt by the tools that write there, or by python scripts/index_data.py."><option value="">tileset…</option></select>
                     <input type="file" id="file" accept=".splat,.json,.zip" multiple>
+
+                    <div class="step"><span class="step-n">2</span><span class="step-t">ground</span>
+                        <span class="step-h">the shape they lie on</span></div>
+                    <button type="button" id="terrainopen" class="big" data-tip="Make terrain here in the browser: twelve kinds of ground in four groups, any seed, each previewed in this tileset's own materials before you commit. Stream power erosion solved the FastScape way; the same generator as scripts/terrain_gen.py, bit for bit.">make terrain…</button>
+                    <select id="heightpick" data-tip="The terrain the tiles lie on, chosen separately from the tileset. Any height field with any tileset: the two used to have to share a name, which meant copying a whole .splat to put the same tiles on different ground."><option value="">or a terrain file…</option></select>
+                    <div class="out" id="genstatus">—</div>
+
+                    <div class="step"><span class="step-n">3</span><span class="step-t">start from</span>
+                        <span class="step-h">a set of settings, then adjust</span></div>
+                    <div id="presetchips" class="chips" data-tip="Named viewer settings from views.json. Each sets the panel's controls exactly as a hand on the sliders would, so nothing is hidden and everything can be adjusted afterwards."></div>
+
                     <div class="r"><span>splats</span><span class="v" id="n">—</span></div>
                     <div class="r"><span>drawn</span><span class="v" id="drawn">—</span></div>
                     <div class="r"><span>fps</span><span class="v" id="fps">—</span></div>
@@ -302,7 +431,7 @@
                 </div>
             </details>
 
-            <details open style="--c:#7fa8c4">
+            <details class="adv" style="--c:#7fa8c4">
                 <summary data-tip="GSWT section 3.4. Which tile is drawn in front of which, and what to do when neither answer is right.">ordering</summary>
                 <div class="body">
                     <div class="r" data-tip="Topological: each adjacent pair is decided by which side of their shared boundary the camera is on, then the whole is topologically sorted.&#10;&#10;Depth key: cells ranked by nearest footprint depth. Ties across a whole row when the view lines up with a grid axis, and the row then reverses in one frame.">
@@ -335,7 +464,7 @@
                 </div>
             </details>
 
-            <details open style="--c:#c17a54">
+            <details class="adv" style="--c:#c17a54">
                 <summary data-tip="Numbers rather than impressions. The pop meter is immediate; the capture feeds scripts/pop_metric.py for a real comparison.">measure</summary>
                 <div class="body">
                     <label class="c" data-tip="Picture change per degree turned. A spike means something switched rather than moved."><input type="checkbox" id="popmeter"> pop meter</label>
@@ -368,7 +497,7 @@
                     <div class="r"><span>azimuth</span><span class="v" id="azim">—</span></div>
                     <div class="r"><span>elevation</span><span class="v" id="elev">—</span></div>
                     <div class="r"><span>distance</span><span class="v" id="dist">—</span></div>
-                    <div class="s">
+                    <div class="s adv">
                         <input type="range" id="fov" min="20" max="100" value="60">
                         <label>field of view</label>
                     </div>
@@ -382,7 +511,7 @@
                     </div>
                     <button id="reset">reset view</button>
                     <label class="c"><input type="checkbox" id="orbit"> slow orbit</label>
-                    <label class="c" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
+                    <label class="c adv" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
                     <div class="r"><span>speed</span><span class="v" id="speedn">1.00</span></div>
                     <div class="out" id="flynote">drag orbits · WASD moves · scroll zooms</div>
                 </div>
@@ -395,30 +524,30 @@
                         <input type="range" id="grid" min="1" max="64" step="1" value="1" disabled>
                         <label>grid<b id="gridn">1 x 1</b></label>
                     </div>
-                    <div class="s" data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
+                    <div class="s adv" data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
                         <input type="range" id="used" min="1" max="16" step="1" value="16" disabled>
                         <label>tiles used<b id="usedn">—</b></label>
                     </div>
                     <button id="reseed">shuffle tiles</button>
-                    <div class="s" data-tip="Turns the layout off the world axes. Moves where the grid lines up with the screen rather than removing it.">
+                    <div class="s adv" data-tip="Turns the layout off the world axes. Moves where the grid lines up with the screen rather than removing it.">
                         <input type="range" id="gridangle" min="0" max="45" step="1" value="0">
                         <label>grid angle<b id="gridanglen">0°</b></label>
                     </div>
                     <div class="out" id="wangnote">—</div>
                     <label class="c" data-tip="Choose each tile's material from the shape of the ground under it, rather than at random.&#10;&#10;Loose material collects where water would run and where the ground is concave; bare ground shows where it is steep and convex. The same rule every terrain shader uses, with captured Gaussians instead of textures.&#10;&#10;Needs a tileset built with --classes 2."><input type="checkbox" id="classrule" checked> material follows terrain</label>
-                    <div class="s" data-tip="How decisively the rule picks. Low blends the two materials across a wide band; high makes a hard boundary where the terrain crosses the threshold.">
+                    <div class="s adv" data-tip="How wide the undecided band is. Low leaves many cells near a tie, which blending dissolves across a wide band; high narrows it to the cells that really are a tie, for a crisp boundary.&#10;&#10;It cannot move the boundary itself: the share is set by a quantile, and a quantile is a rank. Visible only with blending on.">
                         <input type="range" id="classsharp" min="0.5" max="6" step="0.5" value="2">
                         <label>decisiveness<b id="classsharpn">2.0</b></label>
                     </div>
-                    <div class="s" data-tip="How much altitude counts against the shape of the ground.&#10;&#10;At 0 the rule is purely about slope, position and drainage, so a hollow at the top of a mountain reads the same as one at the bottom. At 1 it is almost purely elevation — the crudest terrain shader there is, and still recognisable. The interesting settings are in between.">
+                    <div class="s" data-tip="How much altitude counts against the shape of the ground.&#10;&#10;At 0 the rule is purely about slope, position and drainage, so a hollow at the top of a mountain reads the same as one at the bottom. At 1 it is purely elevation, but smoothed elevation, not a contour line: each cell is compared with its neighbourhood (a one-cell blur, then the patch-size median), so a low cell ringed by high ground can still lose. Patch size 0 comes closest to a plain height cut. The readout below shows what each cue is worth; the interesting settings are in between.">
                         <input type="range" id="classaltitude" min="0" max="1" step="0.05" value="0.4">
                         <label>follows height<b id="classaltituden">40%</b></label>
                     </div>
-                    <div class="s" data-tip="How large a patch of one material should be, in tiles.&#10;&#10;At zero, neighbouring tiles either side of the threshold make opposite choices over a difference too small to mean anything, and the result is a scatter of single tiles rather than regions. Material in a landscape is contiguous; the terrain maps alone do not say so.">
+                    <div class="s adv" data-tip="How large a patch of one material should be, in tiles.&#10;&#10;At zero, neighbouring tiles either side of the threshold make opposite choices over a difference too small to mean anything, and the result is a scatter of single tiles rather than regions. Material in a landscape is contiguous; the terrain maps alone do not say so.">
                         <input type="range" id="classcoherence" min="0" max="6" step="1" value="2">
                         <label>patch size<b id="classcoherencen">2</b></label>
                     </div>
-                    <div class="s" data-tip="How much of the grid the first material takes. The rule still decides where the boundary falls; this decides how much land is either side of it.&#10;&#10;Without it the split is whatever the rule's arithmetic happens to give, which was 27% on every scene tried whatever the terrain - no use to somebody who wants a third of their ground to be scrub.">
+                    <div class="s" data-tip="How much of the grid the first material takes. The rule still decides where the boundary falls; this decides how much land is either side of it.&#10;&#10;With more than two classes it is still the first material's share, and the others divide what is left evenly.&#10;&#10;Without it the split is whatever the rule's arithmetic happens to give, which was 27% on every scene tried whatever the terrain - no use to somebody who wants a third of their ground to be scrub.">
                         <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
                         <label>first material<b id="classbalancen">50%</b></label>
                     </div>
@@ -428,6 +557,9 @@
                         <label>blend width<b id="blendwidthn">0.35</b></label>
                     </div>
                     <div class="out" id="classnote">—</div>
+                    <label class="c" data-tip="Paints each cell with the class the rule chose - green for the class that collects material, yellow for exposed - washed towards grey where it was nearly undecided.&#10;&#10;This is the decision itself, not the material drawn. If a green-looking summit paints yellow here, the rule called it exposed and what you are seeing is an impure tile or the blend band, not a rule that disagrees with the terrain.">
+                        <input type="checkbox" id="classview"> class decision
+                    </label>
                     <div class="r" data-tip="A measured height field loaded beside the tileset, written by scripts/heightmap.py from a drone survey's DSM or any other height raster.&#10;&#10;Without one the surface is two sine waves: smooth, periodic, and with no channels or ridges for a material rule to read."><span>height field</span></div>
                     <div class="out" id="fieldnote">none — analytic surface</div>
                     <div class="s">
@@ -435,17 +567,17 @@
                         <label>relief<b id="reliefn">0.00</b></label>
                     </div>
                     <div class="s" data-tip="How many tiles a landform spans. With a measured height field this is how much ground the field covers, so a small survey can be read at any size; beyond its edge the field mirrors, so it repeats without a seam.&#10;&#10;Without a field it is the wavelength of the analytic surface.">
-                        <input type="range" id="reliefscale" min="2" max="40" step="1" value="6">
+                        <input type="range" id="reliefscale" min="2" max="64" step="1" value="6">
                         <label>relief scale<b id="reliefscalen">6</b> tiles</label>
                     </div>
-                    <div class="s" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
+                    <div class="s adv" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
                         <input type="range" id="subdiv" min="1" max="17" step="1" value="1">
                         <label>frames / tile<b id="subdivn">1</b></label>
                     </div>
                 </div>
             </details>
 
-            <details style="--c:#9c8fae">
+            <details class="adv" style="--c:#9c8fae">
                 <summary>level of detail</summary>
                 <div class="body">
                     <label class="c"><input type="checkbox" id="lod" checked> use levels</label>
@@ -457,7 +589,7 @@
                 </div>
             </details>
 
-            <details style="--c:#c96f6f">
+            <details class="adv" style="--c:#c96f6f">
                 <summary data-tip="Each of these paints something the renderer normally hides, so a claim about tiling can be checked by eye.">debug views</summary>
                 <div class="body">
                     <label class="c" data-tip="One fixed colour per tile. If a cell changes colour as you turn, cells are swapping tiles."><input type="checkbox" id="identity"> tile identity</label>
@@ -466,7 +598,7 @@
                         <input type="range" id="band" min="0.02" max="0.4" step="0.01" value="0.12">
                         <label>edge band<b id="bandn">0.12</b></label>
                     </div>
-                    <label class="c"><input type="checkbox" id="edges"> tile edges</label>
+                                        <label class="c"><input type="checkbox" id="edges"> tile edges</label>
                     <label class="c" data-tip="Where the graph cut placed each seam between two patches."><input type="checkbox" id="diagonals"> patch diagonals</label>
                     <label class="c" data-tip="Green, yellow, orange, red as detail drops."><input type="checkbox" id="lodcolours"> colour by level</label>
                 </div>
@@ -486,14 +618,30 @@
                         <input type="range" id="fog" min="0" max="3" step="0.05" value="1">
                         <label>haze<b id="fogn">1.00</b></label>
                     </div>
-                    <div class="s">
+                    <div class="s" data-tip="Ground shading from the shape of the terrain: a hollow sees less sky than open ground, so it sits darker.&#10;&#10;It only ever takes light away. The capture was lit where it was taken and cannot be relit, so adding a sun here would fight the shadows already baked into the splats.">
+                        <input type="range" id="shade" min="0" max="1" step="0.05" value="0.4">
+                        <label>ground shading<b id="shaden">0.40</b></label>
+                    </div>
+                    <div class="s" data-tip="Brightness. .splat keeps only the constant term of each Gaussian's colour, so exported scenes read flatter and paler than the capture did; this puts that back by eye.">
+                        <input type="range" id="exposure" min="0.5" max="2" step="0.05" value="1">
+                        <label>exposure<b id="exposuren">1.00</b></label>
+                    </div>
+                    <div class="s adv" data-tip="Colour strength. 0 is grey, 1 is the exported colour, above that is stronger than the capture - useful for a figure, dishonest for a measurement.">
+                        <input type="range" id="saturation" min="0" max="2" step="0.05" value="1">
+                        <label>saturation<b id="saturationn">1.00</b></label>
+                    </div>
+                    <div class="s adv">
                         <input type="range" id="gain" min="0.2" max="2" step="0.05" value="1">
                         <label>splat size</label>
                     </div>
+                    <label class="c" data-tip="Hides the panel and the axis marker so the canvas is the whole picture. Press P, or F to leave it - the panel is not there to click.">
+                        <input type="checkbox" id="figuremode"> figure mode
+                    </label>
+                    <button type="button" id="savepng" data-tip="Writes the frame as a PNG at the canvas's real resolution, named after the scene, grid, rule and camera - so a figure can be retaken exactly. Shortcut: P.">save PNG</button>
                 </div>
             </details>
 
-            <details style="--c:#7c8489">
+            <details class="adv" style="--c:#7c8489">
                 <summary data-tip="The command that would rebuild this scene from the capture with the settings above.">match in python</summary>
                 <div class="body"><div class="out" id="cmd">—</div></div>
             </details>

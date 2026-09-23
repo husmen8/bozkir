@@ -184,14 +184,17 @@ def main():
         rows.append((i, x, y, len(p), info["relief"], tilt,
                      float(alpha.mean()), mean, appearance(p),
                      info.get("edge_relief", 0.0),
-                     info.get("interior_relief", 0.0)))
+                     info.get("interior_relief", 0.0),
+                     info.get("salience", 0.0)))
 
     print(f"\n  {'#':>3} {'centre':>16} {'splats':>8} {'relief':>7} "
-          f"{'tilt':>6} {'rim':>6} {'mid':>6} {'cover':>6}  mean rgb")
-    for (i, x, y, n, relief, tilt, cover, mean, _, rim, mid) in rows:
+          f"{'tilt':>6} {'rim':>6} {'mid':>6} {'cover':>6} {'sal':>5}  mean rgb")
+    for (i, x, y, n, relief, tilt, cover, mean, _, rim, mid, sal) in rows:
+        mark = "  <- landmark" if sal > 8 else ""
         print(f"  {i:>3} ({x:6.2f},{y:6.2f}) {n:>8,} {relief:>7.2f} "
-              f"{tilt:>5.1f}\u00b0 {rim:>6.2f} {mid:>6.2f} {cover:>6.0%}  "
-              f"{mean[0]:.2f} {mean[1]:.2f} {mean[2]:.2f}")
+              f"{tilt:>5.1f}\u00b0 {rim:>6.2f} {mid:>6.2f} {cover:>6.0%} "
+              f"{sal:>5.0f}  "
+              f"{mean[0]:.2f} {mean[1]:.2f} {mean[2]:.2f}{mark}")
 
     feats = np.array([r[8] for r in rows])
     print(f"\n  appearance spread across all {len(rows)}: "
@@ -244,8 +247,12 @@ def main():
         a.axis("off")
     for k, (img, r) in enumerate(zip(thumbs, rows)):
         ax[k].imshow(img)
-        ax[k].set_title(f"{r[0]}   rim {r[9]:.2f}  mid {r[10]:.2f}",
-                        fontsize=8)
+        # Salience flags what the eye will find repeating: a landmark in
+        # a patch lands in the same place in every tile made from it.
+        flag = "  LANDMARK" if r[11] > 8 else ""
+        ax[k].set_title(f"{r[0]}   rim {r[9]:.2f}  mid {r[10]:.2f}  "
+                        f"sal {r[11]:.0f}{flag}", fontsize=8,
+                        color="#b03a2e" if flag else "black")
     fig.suptitle(f"{args.path.stem}  -  candidate patches, "
                  f"{args.size} x {args.size}", fontsize=11)
     fig.tight_layout()

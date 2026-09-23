@@ -125,6 +125,64 @@ function mirror(t, n) {
 }
 
 
+/** How much sky each point of a height field can see, 0..1.
+ *
+ *  A point sitting below the ground around it sees less of the sky than
+ *  one standing above it, and sits darker for it. That is ambient light,
+ *  and unlike a sun it can be added to splats without contradicting the
+ *  light already baked into them: it only takes light away, and only
+ *  where the terrain the tiles were laid on would take it away.
+ *
+ *  Worked out from how far the point stands above its neighbourhood -
+ *  topographic position, the same quantity the material rule reads - over
+ *  a window that scales with the field, so it describes landforms rather
+ *  than texel noise. Returned normalised, since it is a look, not a
+ *  measurement.
+ */
+export function openness(z, w, h, radius) {
+  const r = Math.max(1, radius || Math.max(2, Math.round(Math.max(w, h) / 48)));
+  const mean = boxBlur(z, w, h, r);
+  const out = new Float32Array(w * h);
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < out.length; i++) {
+    out[i] = z[i] - mean[i];
+    if (out[i] < lo) lo = out[i];
+    if (out[i] > hi) hi = out[i];
+  }
+  const d = hi - lo;
+  for (let i = 0; i < out.length; i++) {
+    out[i] = d > 1e-12 ? (out[i] - lo) / d : 0.5;
+  }
+  return out;
+}
+
+/** Mean over a (2r+1) square window, clipped at the edges, separable. */
+function boxBlur(z, w, h, r) {
+  const tmp = new Float32Array(w * h);
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, n = 0;
+      for (let d = -r; d <= r; d++) {
+        const xx = x + d;
+        if (xx >= 0 && xx < w) { sum += z[y * w + xx]; n++; }
+      }
+      tmp[y * w + x] = sum / n;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, n = 0;
+      for (let d = -r; d <= r; d++) {
+        const yy = y + d;
+        if (yy >= 0 && yy < h) { sum += tmp[yy * w + x]; n++; }
+      }
+      out[y * w + x] = sum / n;
+    }
+  }
+  return out;
+}
+
 export class HeightField {
   constructor(z, w, h, meta, name) {
     this.z = z;
@@ -223,4 +281,116 @@ export class HeightField {
       + (this.sediment ? ', with sediment' : '')
       + (this.sixteenBit === false ? ', 8-bit' : '');
   }
+}
+
+// ------------------------------------------------------- generated fields
+
+/** Bumped whenever terrain.js would produce different ground from the same
+ *  profile and seed, so a cached terrain from an older generator is never
+ *  handed back as if it were current. */
+export const GENERATOR_VERSION = 2;   // 2: cropped from a larger field
+
+const DB_NAME = 'bozkir', STORE = 'terrains';
+
+function openCache() {
+  return new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open(DB_NAME, 1); } catch (e) { resolve(null); return; }
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function cacheGet(key) {
+  const db = await openCache();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const r = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+
+async function cachePut(key, value) {
+  const db = await openCache();
+  if (!db) return;
+  try { db.transaction(STORE, 'readwrite').objectStore(STORE).put(value, key); }
+  catch (e) { /* full or private: the terrain just is not remembered */ }
+}
+
+let worker = null, nextId = 1;
+const pending = new Map();
+
+function terrainWorker() {
+  if (worker) return worker;
+  worker = new Worker(new URL('./terrain-worker.js', import.meta.url),
+                      { type: 'module' });
+  worker.onmessage = (e) => {
+    const job = pending.get(e.data.id);
+    if (!job) return;
+    if (e.data.progress != null) { if (job.onProgress) job.onProgress(e.data.progress); return; }
+    pending.delete(e.data.id);
+    if (e.data.error) job.reject(new Error(e.data.error));
+    else job.resolve(e.data);
+  };
+  return worker;
+}
+
+/** A generated terrain as a HeightField: from the browser's cache when this
+ *  profile, seed and size have been made before, otherwise generated in a
+ *  worker and then cached. `onProgress(fraction, fromCache)` reports.
+ *
+ *  Nothing here involves the server. That is the point: somebody opening
+ *  the viewer without Python, or without the data folder, still gets every
+ *  terrain every seed can make.
+ */
+export async function generatedField({ profile, seed = 0, size = 256 },
+                                     onProgress = null) {
+  const key = `v${GENERATOR_VERSION}:${profile}:${seed}:${size}`;
+  let r = await cacheGet(key);
+  const cached = !!r;
+  if (!r) {
+    r = await new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject, onProgress });
+      terrainWorker().postMessage({ id, spec: { profile, seed, size } });
+    });
+    await cachePut(key, { z: r.z, sediment: r.sediment, size: r.size,
+                          settings: r.settings });
+  }
+  if (onProgress) onProgress(1, cached);
+  const n = r.size;
+  const meta = { source: `generated ${profile} seed ${seed}`,
+                 settings: { profile, seed, size: n, ...r.settings },
+                 generated: true };
+  const f = new HeightField(new Float32Array(r.z), n, n, meta,
+                            `${profile}-${seed}`);
+  f.sediment = new Float32Array(r.sediment);
+  f.sixteenBit = true;
+  f.cached = cached;
+  return f;
+}
+
+/** Terrains made before, newest first: [{ profile, seed, size }]. Previews
+ *  (64 across) are left out; they are made by the terrain window itself. */
+export async function listCached() {
+  const db = await openCache();
+  if (!db) return [];
+  const keys = await new Promise((resolve) => {
+    try {
+      const r = db.transaction(STORE, 'readonly').objectStore(STORE).getAllKeys();
+      r.onsuccess = () => resolve(r.result || []);
+      r.onerror = () => resolve([]);
+    } catch (e) { resolve([]); }
+  });
+  const out = [];
+  for (const k of keys) {
+    const m = /^v(\d+):([^:]+):(\d+):(\d+)$/.exec(String(k));
+    if (!m || +m[1] !== GENERATOR_VERSION || +m[4] <= 64) continue;
+    out.push({ profile: m[2], seed: +m[3], size: +m[4] });
+  }
+  return out.reverse();
 }

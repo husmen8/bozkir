@@ -10,9 +10,10 @@ import { drawOrder } from './order.js';
 import { mergeGroups, MAX_GROUP } from './merge.js';
 import { openDrop, describe } from './tileset.js';
 import { Capture } from './capture.js';
-import { loadHeightField } from './heightfield.js';
+import { generatedField, listCached, loadHeightField, openness } from './heightfield.js';
 import { Benchmark, report } from './benchmark.js';
 import { classify, sampleGrid } from './landform.js';
+import { GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from './terrain.js';
 
 const BUILD = 'bozkir viewer 4.1 (16-bit heights, sediment)';
 console.log('%c' + BUILD, 'color:#c8a05a');
@@ -102,6 +103,11 @@ uniform sampler2D uField;
 uniform vec2 uFieldSize;      // texels
 uniform float uFieldExtent;   // world units across the long edge
 uniform float uHasField;
+uniform sampler2D uOpen;      // sky openness, built from the height field
+uniform float uHasOpen;
+uniform float uShade;         // how much of it to apply
+uniform float uExposure;
+uniform float uSaturation;
 
 // Fold a coordinate back into 0..n by reflection, as HeightField does.
 // Mirroring rather than wrapping: the far edge meets itself, so a field
@@ -129,6 +135,27 @@ float fieldAt(vec2 world) {
   float b = texelFetch(uField, ivec2(p1.x, p0.y), 0).r;
   float c = texelFetch(uField, ivec2(p0.x, p1.y), 0).r;
   float d = texelFetch(uField, ivec2(p1.x, p1.y), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// How much sky a point can see, 0 deep in a hollow and 1 out in the open.
+// Read from a texture rather than worked out here: it needs the ground
+// around the point, which would be another sixteen texel fetches per
+// splat, and it does not change while the camera moves.
+float openAt(vec2 world) {
+  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+  float scale = longEdge / max(uFieldExtent, 1e-6);
+  float u = world.x * scale + (uFieldSize.x - 1.0) * 0.5;
+  float v = (uFieldSize.y - 1.0) * 0.5 - world.y * scale;
+  u = mirrorCoord(u, uFieldSize.x - 1.0);
+  v = mirrorCoord(v, uFieldSize.y - 1.0);
+  ivec2 p0 = ivec2(floor(u), floor(v));
+  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
+  vec2 f = vec2(u, v) - vec2(p0);
+  float a = texelFetch(uOpen, ivec2(p0.x, p0.y), 0).r;
+  float b = texelFetch(uOpen, ivec2(p1.x, p0.y), 0).r;
+  float c = texelFetch(uOpen, ivec2(p0.x, p1.y), 0).r;
+  float d = texelFetch(uOpen, ivec2(p1.x, p1.y), 0).r;
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -339,6 +366,24 @@ void main() {
     float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
     rgb = mix(vec3(0.55 + 0.45 * grey), ec, w);
   }
+  // Ground shading. The capture was lit where it was taken and cannot be
+  // relit, so this adds nothing directional - no second sun, no shadows
+  // that would disagree with the ones baked into the splats. It only
+  // takes light away where the terrain itself would: a hollow sees less
+  // sky than open ground, so it sits darker. That is the part of lighting
+  // that depends on the shape the tiles were laid on, and the part a flat
+  // exemplar cannot know about.
+  if (uHasOpen > 0.5 && uShade > 0.0) {
+    rgb *= mix(1.0, 0.45 + 0.55 * openAt(anchorWorld), uShade);
+  }
+  // Exposure and saturation last, because .splat keeps only the constant
+  // term of each Gaussian's colour: view-dependent response is gone, and
+  // what is left reads flat and slightly washed next to the capture.
+  // These put that back by eye rather than pretending to recover it.
+  rgb = clamp(rgb * uExposure, 0.0, 1.0);
+  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
+  rgb = clamp(mix(vec3(lum), rgb, uSaturation), 0.0, 1.0);
+
   // Distance haze, toward the same colour the sky has at the horizon, so
   // far ground dissolves into it instead of ending at a hard edge.
   float fog = 1.0 - exp(-uFogDensity * max(cam.z, 0.0));
@@ -439,6 +484,13 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
                   'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
                   'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
+                  'shade', 'shaden', 'exposure', 'exposuren',
+                  'figuremode', 'savepng', 'panel', 'gizmo', 'figexit',
+                  'scenepick', 'heightpick', 'expert', 'classview',
+                  'genseed', 'gensize', 'genbtn', 'genstatus',
+                  'terrainopen', 'terrainwin', 'terrainclose', 'gencards',
+                  'seeddown', 'seedup', 'seedrand', 'genrecent', 'presetchips',
+                  'saturation', 'saturationn',
                   'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
                   'mergestat', 'capture', 'captureboth', 'capframes',
                   'capframesn', 'capcentre', 'caparc', 'caparcn',
@@ -595,6 +647,21 @@ function uniforms(p, names) {
   return out;
 }
 
+/** Mean colour of each class's splats, weighted by opacity. */
+function meanClassColours(colour, tiles, count) {
+  const acc = Array.from({ length: count }, () => [0, 0, 0, 0]);
+  for (const t of tiles) {
+    const a = acc[Math.min(count - 1, t.class || 0)];
+    for (let i = t.start; i < t.start + t.count; i++) {
+      const w = colour[4 * i + 3] / 255;
+      a[0] += colour[4 * i] * w; a[1] += colour[4 * i + 1] * w;
+      a[2] += colour[4 * i + 2] * w; a[3] += w;
+    }
+  }
+  return acc.map(([r, g, b, w]) => (w > 0
+    ? [r / w / 255, g / w / 255, b / w / 255] : [0.6, 0.6, 0.6]));
+}
+
 /** Unpack a .splat buffer. Mirrors scripts/export_splat.py. */
 function unpack(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -718,6 +785,7 @@ const splatU = uniforms(splatProg,
    'data', 'colour', 'tileSize', 'edgeMark', 'fade',
    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
    'field', 'fieldSize', 'fieldExtent', 'hasField',
+   'open', 'hasOpen', 'shade', 'exposure', 'saturation',
    'edgeN', 'edgeE', 'edgeS', 'edgeW']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
@@ -811,8 +879,13 @@ let classAltitude = 0.4;
 let classBlend = false;
 let blendWidth = 0.35;
 let cellMix = null;
+let cellAlt = null;        // the class each cell would take instead
 let blendedCells = 0;
 let classStats = null;
+// What each class of the loaded tileset looks like on average, as linear
+// 0..1 RGB. The terrain window paints its previews with these, so a preview
+// shows this capture's materials rather than a stock palette.
+let classColours = [[0.62, 0.55, 0.45]];
 let tileSize = 0;
 let gridN = 1;
 let cells = [];
@@ -828,7 +901,6 @@ let sortMode = 'live';        // 'live' | 'cached'
 let cacheViews = 9;
 let cacheDirs = null, cacheBuf = null, cacheStride = 0, cacheMs = 0;
 let cacheReady = false;
-let sortErr = null;           // measured order error, when asked for
 let showEdges = false, showDiagonals = false, showTints = false;
 let relief = 0, reliefScale = 6, edgeBand = 0.12, subdiv = 1;
 // Set once somebody drags the scale slider, after which the grid stops
@@ -839,6 +911,14 @@ let reliefScaleTouched = false;
 // interpolated in the shader, so what the geometry is displaced by is the
 // same arithmetic the rule read on the CPU.
 let fieldTex = null;
+let openTex = null;
+let shotWanted = false;
+let loadedScene = '';
+let figureMode = false;
+let figExitTimer = 0;
+let groundShade = 0.4;
+let exposure = 1;
+let saturation = 1;
 
 // Turning the whole layout off the world axes. Worth having, but it does
 // not remove the alignment effect - it moves it. A grid turned 22 degrees
@@ -911,6 +991,11 @@ let lodOn = true;
 let lodCounts = [];        // cells drawn at each level, for the readout
 let showLodColours = false;
 let showIdentity = false;
+let showClasses = false;
+// One colour per class, in the order the tileset numbers them: the class
+// that collects material first, then exposed, then any further ones.
+const CLASS_RGB = [[0.30, 0.62, 0.35], [0.88, 0.72, 0.30],
+                   [0.36, 0.54, 0.86], [0.80, 0.42, 0.62]];
 
 // Three skies rather than one slider: choosing a mood is easier than
 // choosing six numbers, and the fog has to match the horizon or the
@@ -1026,10 +1111,26 @@ worker.onmessage = (e) => {
  *  set, so the alternative to any tile is the tile with its code in
  *  another class, and swapping between them cannot break the matching.
  */
+/** The share of the grid each class gets. The slider names the first
+ *  class's share directly, as it does with two; the rest divide what is
+ *  left evenly, because a slider per class is a panel nobody reads and
+ *  the interesting control is how much of the ground the main material
+ *  covers. */
+function classShares(count) {
+  const first = Math.min(0.95, Math.max(0.05, classBalance));
+  const rest = (1 - first) / Math.max(1, count - 1);
+  return Array.from({ length: count }, (_, k) => (k === 0 ? first : rest));
+}
+
 function alternateTile(c, p) {
   if (!wangCodes || !tileClass) return -1;
   const code = wangCodes[c.patch];
+  // Blend towards the class the terrain ranked next, not towards whichever
+  // other class happens to come first in the tileset. With two classes
+  // those are the same; with three they are not, and picking the wrong one
+  // dissolves a cell into a material the rule never considered.
   for (let k = 0; k < wangCodes.length; k++) {
+    if (c.alt != null && tileClass[k] !== c.alt) continue;
     if (tileClass[k] === tileClass[c.patch]) continue;
     const o = wangCodes[k];
     if (o[0] === code[0] && o[1] === code[1]
@@ -1059,6 +1160,7 @@ function buildGrid() {
   // the other. That separation is what makes this work at all.
   let wantClass = null;
   cellMix = null;
+  cellAlt = null;
   classStats = null;
   if (classOn && classCount > 1 && tileSize) {
     // Sampled finer than one point per tile. Every map below is a
@@ -1082,18 +1184,20 @@ function buildGrid() {
                          coherence: classCoherence,
                          altitude: classAltitude,
                          sediment: sed,
-                         balance: classCount === 2 ? classBalance : null });
+                         balance: classCount === 2 ? classBalance
+                           : classShares(classCount) });
     wantClass = r.cls;
     // How strongly each cell chose. Near 1/classCount the rule is nearly
     // undecided, which is exactly where a hard choice shows as a staircase
     // and where drawing both classes is worth the second draw call.
     cellMix = r.strength;
+    cellAlt = r.runnerUp;
     const counts = new Array(classCount).fill(0);
     for (const k of wantClass) counts[k]++;
     let sure = 0;
     for (const v of r.strength) sure += v;
     classStats = { counts, sure: sure / Math.max(r.strength.length, 1),
-                   source: r.source };
+                   source: r.source, weights: r.weights };
   }
 
   for (let j = 0; j < gridN; j++) {
@@ -1134,6 +1238,7 @@ function buildGrid() {
       cells.push({ i, j, x, y, z: height(x, y),
                    warp: tangentFrame(x, y), patch: pick,
                    cls: wantClass ? wantClass[cellIdx] : 0,
+                   alt: cellAlt ? cellAlt[cellIdx] : null,
                    mix: cellMix ? cellMix[cellIdx] : 1 });
     }
   }
@@ -1355,12 +1460,14 @@ function load(buffer, manifest) {
     wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
     tileClass = manifest.tiles.map(t => t.class || 0);
     classCount = Math.max(1, manifest.classes || 1);
+    classColours = meanClassColours(colour, manifest.tiles, classCount);
   } else {
     patches = [{ start: 0, count: n, levels: [[0, n]] }];
     lodLevels = 1;
     tileSize = 0;
     wangCodes = null;
     tileClass = null;
+    classColours = meanClassColours(colour, [{ start: 0, count: n }], 1);
     classCount = 1;
   }
   usedPatches = patches.length;
@@ -1633,6 +1740,17 @@ function frame() {
     } else {
       gl.uniform1f(splatU.hasField, 0.0);
     }
+    gl.uniform1i(splatU.open, 4);
+    if (field && openTex) {
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, openTex);
+      gl.uniform1f(splatU.hasOpen, 1.0);
+    } else {
+      gl.uniform1f(splatU.hasOpen, 0.0);
+    }
+    gl.uniform1f(splatU.shade, groundShade);
+    gl.uniform1f(splatU.exposure, exposure);
+    gl.uniform1f(splatU.saturation, saturation);
     gl.uniformMatrix3fv(splatU.view, false, viewMat);
     gl.uniform3fv(splatU.eye, new Float32Array(b.eye));
     gl.uniform2f(splatU.focal, fy, fy);
@@ -1871,7 +1989,28 @@ function frame() {
       cellXYArr[0] = c.x; cellXYArr[1] = c.y;
       gl.uniform2fv(splatU.cellXY, cellXYArr.subarray(0, 2));
       gl.uniform1f(splatU.mix, mix);
-      if (showIdentity) {
+      if (showClasses && classCount > 1) {
+        // What the rule decided, painted over what the tiles look like.
+        // Without this the only evidence of the decision is the material
+        // drawn, which is a different thing: tiles are sorted into classes
+        // by average appearance, so a sand tile can hold a bush, and a
+        // cell in the blend band draws some of its runner-up as well. A
+        // summit that looks green is then either a rule that went wrong or
+        // a tile that is not what its class says, and there was no way to
+        // tell the two apart from the picture.
+        //
+        // Hue is the class. Washed out towards grey is low confidence,
+        // which is also where blending is mixing materials in.
+        const base = CLASS_RGB[c.cls % CLASS_RGB.length];
+        const sure = c.mix == null ? 1 : c.mix;
+        const g = 0.62;
+        gl.uniform3f(splatU.tint,
+                     base[0] * sure + g * (1 - sure),
+                     base[1] * sure + g * (1 - sure),
+                     base[2] * sure + g * (1 - sure));
+        gl.uniform1f(splatU.tintAmount, 0.8);
+        gl.uniform1f(splatU.edgeMark, 0.0);
+      } else if (showIdentity) {
         const c2 = tileRGB(c.patch);
         gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
         gl.uniform1f(splatU.tintAmount, 0.75);
@@ -2011,8 +2150,16 @@ function frame() {
           ? Math.round(gridN / reliefScale) : 1;
         // `sure` is the mean margin now, so it reads as how strongly the
         // terrain is driving the choice rather than as a probability.
+        // What the sliders are actually worth, rather than what they are
+        // called. 'follows height' is one number in a weighted sum and
+        // reads as if it were the whole rule; printing the shares makes
+        // the trade visible while it is being dragged.
+        const cues = (classStats.weights || [])
+          .filter((c) => c.w > 0.005)
+          .map((c) => `${c.cue} ${(c.w * 100).toFixed(0)}%`).join(' \u00b7 ');
         ui.classnote.textContent = share
           + `   confidence ${(classStats.sure * 100).toFixed(0)}%`
+          + (cues ? `\n${cues}` : '')
           + (classBlend ? `   ${blendedCells} blended` : '')
           + (classStats.source === 'sediment' ? '   from sediment' : '')
           + (repeats > 3 ? `\n${repeats} terrain repeats across the grid `
@@ -2052,8 +2199,34 @@ function frame() {
   // no preserveDrawingBuffer, so the colour buffer is only readable here.
   if (capture.active) capture.step();
   if (bench.active) bench.step(benchDt);
+  if (shotWanted) { shotWanted = false; saveFrame(); }
 
   requestAnimationFrame(frame);
+}
+
+/** Write the frame that has just been drawn to a PNG file.
+ *
+ *  Must run inside the animation frame that drew it: the context asks for
+ *  no preserveDrawingBuffer, so the colour buffer is cleared the moment
+ *  the frame ends. A figure taken this way is the full canvas at its real
+ *  resolution, with none of the panel over it, which is what a screenshot
+ *  of the window can never quite be.
+ */
+function saveFrame() {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const name = ['bozkir', loadedScene || 'scene',
+                  `grid${gridN}`, classOn ? 'rule' : 'random',
+                  `az${Math.round(cam.azimuth)}`,
+                  `el${Math.round(cam.elevation)}`].join('-') + '.png';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    console.log(`saved ${name} (${canvas.width}x${canvas.height})`);
+  }, 'image/png');
 }
 
 // ============================================================ interaction
@@ -2216,6 +2389,16 @@ on('sorting', 'change', (e) => {
     sortMs = 0;
   }
 });
+/** Flag a relief scale below the grid: the height field then covers less
+ *  than the tiles do, mirrors to fill the rest, and landforms repeat. */
+function markReliefScale() {
+  if (!ui.reliefscalen) return;
+  const short = field && reliefScale < gridN;
+  ui.reliefscalen.textContent = short
+    ? `${reliefScale} < grid ${gridN}, repeats` : String(reliefScale);
+  ui.reliefscalen.style.color = short ? '#d9a441' : '';
+}
+
 on('grid', 'input', (e) => {
   gridN = +e.target.value;
   // A field covering the grid should keep covering it as the grid changes,
@@ -2229,6 +2412,7 @@ on('grid', 'input', (e) => {
     paintSliders();
   }
   ui.gridn.textContent = `${gridN} x ${gridN}`;
+  markReliefScale();
   regenerate();
 });
 on('used', 'input', (e) => {
@@ -2237,6 +2421,7 @@ on('used', 'input', (e) => {
   regenerate();
 });
 on('tints', 'change', (e) => { showTints = e.target.checked; });
+on('classview', 'change', (e) => { showClasses = e.target.checked; });
 on('identity', 'change', (e) => {
   showIdentity = e.target.checked;
 });
@@ -2246,6 +2431,62 @@ on('fog', 'input', (e) => {
   fogScale = +e.target.value;
   ui.fogn.textContent = fogScale.toFixed(2);
 });
+on('shade', 'input', (e) => {
+  groundShade = +e.target.value;
+  ui.shaden.textContent = groundShade.toFixed(2);
+});
+on('exposure', 'input', (e) => {
+  exposure = +e.target.value;
+  ui.exposuren.textContent = exposure.toFixed(2);
+});
+on('saturation', 'input', (e) => {
+  saturation = +e.target.value;
+  ui.saturationn.textContent = saturation.toFixed(2);
+});
+/** Panel and axis marker out of the way, so the canvas is the figure.
+ *  Nothing else changes - not the camera, not the rule - because a figure
+ *  that differs from what was on screen is not evidence of anything. */
+function setFigureMode(on) {
+  figureMode = on;
+  // One class on the body rather than styles on each element: the panel,
+  // its drag handle and the axis marker all go together, and the handle
+  // was the one left behind before - an invisible strip that still grabbed
+  // the pointer at the edge where the panel had been.
+  document.body.classList.toggle('figure', on);
+  if (ui.figuremode) ui.figuremode.checked = on;
+  // The way back stays readable long enough to be noticed, then fades so
+  // it does not sit in the middle of what is being framed.
+  if (ui.figexit) {
+    ui.figexit.classList.remove('faded');
+    clearTimeout(figExitTimer);
+    if (on) figExitTimer = setTimeout(() => ui.figexit.classList.add('faded'), 2500);
+  }
+}
+on('expert', 'change', (e) => {
+  // Remembered, because somebody who wants the measurement controls wants
+  // them every time, and somebody who does not should never meet them.
+  document.body.classList.toggle('expert', e.target.checked);
+  try { localStorage.setItem('bozkir.expert', e.target.checked ? '1' : ''); }
+  catch (err) { /* private window: the choice just does not persist */ }
+});
+if (ui.expert) {
+  let saved = '';
+  try { saved = localStorage.getItem('bozkir.expert') || ''; } catch (e) { /**/ }
+  ui.expert.checked = !!saved;
+  document.body.classList.toggle('expert', !!saved);
+}
+on('figuremode', 'change', (e) => setFigureMode(e.target.checked));
+on('savepng', 'click', () => { shotWanted = true; });
+window.addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea')) return;
+  const k = e.key.toLowerCase();
+  // P takes the picture, F leaves figure mode - with the panel hidden
+  // there is no checkbox left to untick.
+  if (k === 'p') shotWanted = true;
+  else if (k === 'f') setFigureMode(!figureMode);
+  else if (k === 'escape' && figureMode) setFigureMode(false);
+});
+on('figexit', 'click', () => setFigureMode(false));
 on('orbit', 'change', (e) => { orbiting = e.target.checked; });
 on('freefly', 'change', (e) => {
   cam.setFly(e.target.checked);
@@ -2317,8 +2558,13 @@ on('relief', 'input', (e) => {
 });
 on('reliefscale', 'input', (e) => {
   reliefScale = +e.target.value;
-  reliefScaleTouched = true;
+  // Moving it takes it over; dragging it back to the grid size hands it
+  // back, so it follows the grid again. There was no way back before, and
+  // a scale left below the grid is how a terrain ends up squeezed and
+  // repeating without anyone having chosen that.
+  reliefScaleTouched = reliefScale !== gridN;
   ui.reliefscalen.textContent = reliefScale.toFixed(0);
+  markReliefScale();
   if (field) field.fitTo(reliefScale * (tileSize || 1));
   regenerate();
 });
@@ -2552,18 +2798,329 @@ on('captureboth', 'click', () => {
   beginSweep();
 });
 
-const wanted = new URLSearchParams(location.search).get('scene');
+const params = new URLSearchParams(location.search);
+const wanted = params.get('scene');
+// The terrain is its own choice. `?scene=desert&height=mesa` puts the
+// desert tiles on mesa ground; without it a tileset still looks for the
+// height field named after itself, which is what every scene did before.
+const wantedHeight = params.get('height');
+// And a terrain can be asked for by recipe instead of by file:
+// `?gen=canyon&seed=3&size=256` is generated here, the same ground on every
+// machine, since the generator is deterministic.
+const wantedGen = params.get('gen');
+const wantedSeed = Math.max(0, parseInt(params.get('seed') || '0', 10) || 0);
+const wantedSize = [128, 256, 512].includes(+params.get('size'))
+  ? +params.get('size') : 256;
+
+/** Fill the tileset and terrain menus from data/index.json.
+ *
+ *  A static server will not list a folder, so the folder lists itself.
+ *  Without the index the menus stay empty and everything else works, which
+ *  is why nothing here throws.
+ */
+async function loadCatalogue() {
+  let index = null;
+  try {
+    const r = await fetch('./data/index.json');
+    index = r.ok ? await r.json() : null;
+  } catch (e) { /* no index: menus stay empty */ }
+  if (!index) return;
+
+  const fill = (el, items, label, current) => {
+    if (!el) return;
+    for (const it of items) {
+      const o = document.createElement('option');
+      o.value = it.name;
+      o.textContent = label(it);
+      if (it.name === current) o.selected = true;
+      el.appendChild(o);
+    }
+  };
+  fill(ui.scenepick, index.scenes || [],
+       (s) => `${s.name} · ${s.classes > 1 ? s.classes + ' materials' : '1 material'}`
+              + ` · ${s.megabytes} MB`, loadedScene);
+  fill(ui.heightpick, index.terrains || [],
+       (t) => `${t.name} · ${t.profile || t.source}`
+              + (t.sediment ? ' · sediment' : ''),
+       wantedHeight || loadedScene);
+}
+
+// Changing tileset means a different .splat, so the page reloads with the
+// choice in the URL - the same address that comes back from a figure's
+// file name, and one that can be sent to somebody.
+on('scenepick', 'change', (e) => {
+  if (!e.target.value) return;
+  const p = new URLSearchParams(location.search);
+  p.set('scene', e.target.value);
+  location.search = p.toString();
+});
+// Changing terrain does not: the tiles stay where they are and the ground
+// under them is swapped, which is a second or two rather than a reload.
+// ------------------------------------------------------------ terrain window
+//
+// Twelve profiles, each drawn as a small preview at the current seed, so a
+// terrain is chosen by looking at it rather than by name. Previews are
+// generated at 64 across through the same worker and cache as the real
+// thing; changing the seed redraws them, which is how one actually browses
+// for a good piece of ground.
+
+let genProfile = wantedGen || 'desert';
+let previewToken = 0;
+
+/** A preview of a terrain as it would look under the loaded tiles: the
+ *  shape as shading, and each tile's worth of ground coloured by the class
+ *  the rule would give it, in that class's average colour. The same
+ *  preview under a scrub-and-sand desert capture and under a single-
+ *  material cobble capture should look different, because the result
+ *  would. */
+function drawPreview(canvas, z, sed, n) {
+  const cells = 16, over = n / cells;
+  let cls = null;
+  if (classCount > 1 && classOn) {
+    try {
+      cls = classify(Float64Array.from(z), cells, classCount, {
+        sediment: sed ? Float64Array.from(sed) : null,
+        sharpness: classSharp, altitude: classAltitude,
+        coherence: Math.min(classCoherence, 1),
+        balance: classCount === 2 ? classBalance : null,
+      }).cls;
+    } catch (e) { cls = null; }
+  }
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(n, n);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const k = j * n + i;
+      const dx = z[j * n + Math.min(n - 1, i + 1)] - z[j * n + Math.max(0, i - 1)];
+      const dy = z[Math.min(n - 1, j + 1) * n + i] - z[Math.max(0, j - 1) * n + i];
+      const shade = Math.max(0.18, Math.min(1.25, 0.85 - 4.0 * (dx + dy)));
+      let c;
+      if (cls) c = classColours[cls[Math.floor(j / over) * cells + Math.floor(i / over)]];
+      else if (classCount > 1) {
+        // Rule off: each cell takes a class at random, as the viewer does.
+        const h = Math.imul((Math.floor(j / over) * cells + Math.floor(i / over)) + 1,
+                            0x9E3779B1) >>> 0;
+        c = classColours[h % classCount];
+      } else c = classColours[0];
+      const lift = 0.75 + 0.5 * z[k];
+      for (let q = 0; q < 3; q++) {
+        img.data[4 * k + q] = Math.max(0, Math.min(255, 255 * c[q] * shade * lift));
+      }
+      img.data[4 * k + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function buildCards() {
+  if (!ui.gencards || ui.gencards.childElementCount) return;
+  for (const group of TERRAIN_GROUPS) {
+    const box = document.createElement('div');
+    box.className = 'tw-group';
+    const head = document.createElement('div');
+    head.className = 'tw-group-head';
+    head.textContent = group.name;
+    const row = document.createElement('div');
+    row.className = 'tw-group-row';
+    box.append(head, row);
+    ui.gencards.appendChild(box);
+    for (const name of group.profiles) row.appendChild(profileCard(name));
+  }
+}
+
+function profileCards() {
+  return ui.gencards ? ui.gencards.querySelectorAll('.tw-card') : [];
+}
+
+function profileCard(name) {
+  {
+    const card = document.createElement('div');
+    card.className = 'tw-card' + (name === genProfile ? ' on' : '');
+    card.dataset.profile = name;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 64;
+    const label = document.createElement('span');
+    label.textContent = name;
+    card.append(cv, label);
+    card.addEventListener('click', () => {
+      genProfile = name;
+      for (const c of profileCards()) c.classList.toggle('on', c === card);
+    });
+    card.addEventListener('dblclick', () => ui.genbtn.click());
+    return card;
+  }
+}
+
+async function refreshPreviews() {
+  const token = ++previewToken;
+  const seed = Math.max(0, parseInt(ui.genseed.value, 10) || 0);
+  for (const card of profileCards()) {
+    if (token !== previewToken) return;       // the seed moved on; stop
+    try {
+      const f = await generatedField({ profile: card.dataset.profile, seed, size: 64 });
+      if (token !== previewToken) return;
+      drawPreview(card.querySelector('canvas'), f.z, f.sediment, 64);
+    } catch (e) { /* a preview that fails just stays blank */ }
+  }
+}
+
+async function refreshRecent() {
+  if (!ui.genrecent) return;
+  ui.genrecent.textContent = '';
+  const made = await listCached();
+  if (!made.length) {
+    ui.genrecent.textContent = 'nothing yet';
+    return;
+  }
+  for (const t of made.slice(0, 16)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = `${t.profile} ${t.seed} · ${t.size}`;
+    b.addEventListener('click', () => {
+      genProfile = t.profile;
+      ui.genseed.value = String(t.seed);
+      ui.gensize.value = String(t.size);
+      ui.genbtn.click();
+    });
+    ui.genrecent.appendChild(b);
+  }
+}
+
+function openTerrainWindow() {
+  buildCards();
+  for (const c of profileCards()) c.classList.toggle('on', c.dataset.profile === genProfile);
+  ui.terrainwin.showModal();
+  refreshPreviews();
+  refreshRecent();
+}
+
+function stepSeed(d) {
+  const v = Math.max(0, (parseInt(ui.genseed.value, 10) || 0) + d);
+  ui.genseed.value = String(v);
+  refreshPreviews();
+}
+
+on('terrainopen', 'click', openTerrainWindow);
+on('terrainclose', 'click', () => ui.terrainwin.close());
+on('seeddown', 'click', () => stepSeed(-1));
+on('seedup', 'click', () => stepSeed(1));
+on('seedrand', 'click', () => {
+  ui.genseed.value = String(Math.floor(Math.random() * 100000));
+  refreshPreviews();
+});
+on('genseed', 'change', () => refreshPreviews());
+on('genseed', 'keydown', (e) => { if (e.key === 'Enter') ui.genbtn.click(); });
+on('genbtn', 'click', () => {
+  const profile = genProfile;
+  const seed = Math.max(0, parseInt(ui.genseed.value, 10) || 0);
+  const size = +ui.gensize.value || 256;
+  const p = new URLSearchParams(location.search);
+  p.delete('height');
+  p.set('gen', profile); p.set('seed', String(seed)); p.set('size', String(size));
+  history.replaceState(null, '', `${location.pathname}?${p}`);
+  if (ui.terrainwin && ui.terrainwin.open) ui.terrainwin.close();
+  useGeneratedField(profile, seed, size);
+});
+if (ui.genseed) {
+  ui.genseed.value = String(wantedSeed);
+  ui.gensize.value = String(wantedSize);
+}
+
+// ------------------------------------------------------------ presets
+//
+// Settings by name, from views.json. A preset sets each control it names
+// and fires the same event a hand on the slider would, so it can only do
+// what the panel can do, and what it did is visible afterwards.
+
+let presets = {};
+let pendingPreset = params.get('preset');
+
+async function loadPresets() {
+  try {
+    const r = await fetch('./views.json');
+    presets = r.ok ? await r.json() : {};
+  } catch (e) { presets = {}; }
+  if (!ui.presetchips) return;
+  // Buttons rather than a menu: a first-time visitor can see every
+  // starting point at once, and the tooltip on each says what it is for.
+  for (const [name, p] of Object.entries(presets)) {
+    if (name.startsWith('_')) continue;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.preset = name;
+    b.textContent = p.short || name;
+    b.dataset.tip = p.label || name;
+    b.title = p.label || name;
+    b.addEventListener('click', () => applyPreset(name));
+    ui.presetchips.appendChild(b);
+  }
+  // If the ground arrived before this file did, the URL's preset is still
+  // waiting; apply it now rather than never.
+  if (pendingPreset && presets[pendingPreset] && field) {
+    const name = pendingPreset;
+    pendingPreset = null;
+    applyPreset(name);
+  }
+}
+
+function setControl(id, value) {
+  const el = document.getElementById(id);
+  if (!el) { console.warn(`preset: no control '${id}'`); return; }
+  if (el.type === 'checkbox') {
+    el.checked = !!value;
+    el.dispatchEvent(new Event('change'));
+  } else if (el.tagName === 'SELECT') {
+    el.value = String(value);
+    el.dispatchEvent(new Event('change'));
+  } else {
+    el.value = String(value);
+    el.dispatchEvent(new Event('input'));
+  }
+}
+
+function applyPreset(name) {
+  const p = presets[name];
+  if (!p) { console.warn(`no preset '${name}'`); return; }
+  // Grid first, since 'reliefscale: grid' and the rule both depend on it.
+  if ('grid' in p) setControl('grid', p.grid);
+  for (const [k, v] of Object.entries(p)) {
+    if (k === 'label' || k === 'short' || k === 'grid' || k === 'view') continue;
+    setControl(k, k === 'reliefscale' && v === 'grid' ? gridN : v);
+  }
+  if (p.view) document.getElementById(p.view)?.click();
+  if (ui.presetchips) {
+    for (const b of ui.presetchips.children) b.classList.toggle('on', b.dataset.preset === name);
+  }
+  const q = new URLSearchParams(location.search);
+  q.set('preset', name);
+  history.replaceState(null, '', `${location.pathname}?${q}`);
+  console.log(`preset ${name} applied`);
+}
+
+loadPresets();
+
+on('heightpick', 'change', (e) => {
+  if (!e.target.value) return;
+  const p = new URLSearchParams(location.search);
+  p.set('height', e.target.value);
+  history.replaceState(null, '', `${location.pathname}?${p}`);
+  useHeightField(e.target.value);
+});
+
 for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
   Promise.all([
     fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
     fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]).then(([b, m]) => {
     if (!b || splatCount) return;
+    loadedScene = name;
     load(b, m);
+    loadCatalogue();
     // The height field is optional and arrives after the splats, so the
     // scene is up either way and gains its terrain a moment later rather
     // than waiting on a file most tilesets do not have.
-    useHeightField(name);
+    if (wantedGen) useGeneratedField(wantedGen, wantedSeed, wantedSize);
+    else useHeightField(wantedHeight || name);
   }).catch(() => {});
 }
 
@@ -2571,6 +3128,47 @@ for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
 async function useHeightField(name) {
   const f = await loadHeightField('./data', name);
   if (!f) return;
+  adoptField(f);
+}
+
+/** Generate a terrain in the browser (or fetch it from the browser's own
+ *  cache) and put the tiles on it. No file, no server, no Python. */
+async function useGeneratedField(profile, seed, size) {
+  const say = (t) => { if (ui.genstatus) ui.genstatus.textContent = t; };
+  say(`${profile} ${seed}: starting`);
+  if (ui.genbtn) ui.genbtn.disabled = true;
+  try {
+    const t0 = performance.now();
+    const f = await generatedField({ profile, seed, size }, (frac, cached) => {
+      if (cached) say(`${profile} ${seed}: from cache`);
+      else if (frac < 1) say(`${profile} ${seed}: eroding ${(frac * 100).toFixed(0)}%`);
+    });
+    adoptField(f);
+    // The terrain menu should say what is under the tiles now, even when
+    // it did not come from a file.
+    if (ui.heightpick) {
+      let o = ui.heightpick.querySelector('option[data-generated]');
+      if (!o) {
+        o = document.createElement('option');
+        o.dataset.generated = '1';
+        ui.heightpick.insertBefore(o, ui.heightpick.children[1] || null);
+      }
+      o.value = '';
+      o.textContent = `made here: ${profile} ${seed} · ${size}`;
+      o.selected = true;
+    }
+    say(`${profile} seed ${seed}, ${size}²`
+        + (f.cached ? ' (cached)' : `, ${((performance.now() - t0) / 1000).toFixed(1)} s`));
+  } catch (err) {
+    say(`could not generate: ${err.message}`);
+    console.error(err);
+  } finally {
+    if (ui.genbtn) ui.genbtn.disabled = false;
+  }
+}
+
+/** Make a height field the ground under the tiles, however it arrived. */
+function adoptField(f) {
   field = f;
 
   // Upload it. R32F with NEAREST because the shader does its own bilinear:
@@ -2587,12 +3185,24 @@ async function useHeightField(name) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, f.w, f.h, 0, gl.RED, gl.FLOAT,
                 f.z);
+
+  // And the openness built from it, on its own unit. Computed once here:
+  // it depends on the field and nothing the camera or the sliders do.
+  if (!openTex) openTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE4);
+  gl.bindTexture(gl.TEXTURE_2D, openTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, f.w, f.h, 0, gl.RED, gl.FLOAT,
+                openness(f.z, f.w, f.h));
   // Cover the whole grid by default rather than the six tiles the analytic
   // surface wanted. A generated field is 512 across and holds a landscape;
   // showing two tiles of it and mirroring that fourteen times across the
   // grid is the repetition, not the tiling. The analytic surface has no
   // scale of its own so it keeps its old default.
-  if (ui.reliefscale) {
+  if (ui.reliefscale && !reliefScaleTouched) {
     const want = Math.min(+ui.reliefscale.max, Math.max(4, gridN));
     ui.reliefscale.value = String(want);
     reliefScale = want;
@@ -2600,7 +3210,15 @@ async function useHeightField(name) {
     paintSliders();
   }
   field.fitTo(reliefScale * (tileSize || 1));
+  markReliefScale();
   if (ui.fieldnote) ui.fieldnote.textContent = f.describe();
+  // A preset in the URL waits for the ground: its relief scale and its
+  // rule settings mean nothing until there is a field to apply them to.
+  if (pendingPreset && presets[pendingPreset]) {
+    const name = pendingPreset;
+    pendingPreset = null;
+    setTimeout(() => applyPreset(name), 0);
+  }
   if (ui.relief && +ui.relief.value <= 0) {
     // A measured field with relief at zero shows nothing, and the person
     // has no way to know a field arrived. Lift it enough to be visible and
@@ -2610,6 +3228,11 @@ async function useHeightField(name) {
     ui.reliefn.textContent = relief.toFixed(2);
     paintSliders();
   }
+  // New ground means the rule has to decide again and the cells have to
+  // be rebuilt on it. On the first load this is a repeat of the layout
+  // that just happened; when the terrain is swapped from the menu it is
+  // the whole point.
+  regenerate();
   console.log(`height field: ${f.describe()}`);
 }
 

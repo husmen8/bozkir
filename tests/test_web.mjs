@@ -6,13 +6,15 @@
 // merge.js shipped in a previous session with no tests at all, which is the
 // failure mode this project keeps hitting. Half of what is below is arrears.
 
+import { readFileSync } from 'node:fs';
 import {
   boundarySign, constraints, drawOrder, violations,
 } from '../web/order.js';
 import { readZip, pickTileset, describe, writeZip } from '../web/tileset.js';
-import { HeightField } from '../web/heightfield.js';
+import { HeightField, openness } from '../web/heightfield.js';
 import { report } from '../web/benchmark.js';
-import { classify, flow, sampleGrid, slope, tpi } from '../web/landform.js';
+import { classify, cueWeights, flow, sampleGrid, slope, tpi } from '../web/landform.js';
+import { generate as generateTerrain, PROFILES as TERRAIN_PROFILES } from '../web/terrain.js';
 import {
   SLOT_BITS, MAX_GROUP, INDEX_BITS, INDEX_MASK,
   packIndex, unpackSlot, unpackIndex,
@@ -903,19 +905,33 @@ test('classify returns one class per cell, all in range', () => {
   for (const v of strength) ok(v >= 0 && v <= 1, `confidence ${v} out of range`);
 });
 
-test('decisiveness sharpens the split without moving it', () => {
+test('decisiveness narrows the undecided band without moving the boundary', () => {
+  // The control used to change 2 cells in 576 across its whole range,
+  // because a quantile threshold ignores any power applied to the field.
+  // It now sets how many cells count as undecided, which is the band
+  // blending dissolves across - so this test is what stops it going back
+  // to doing nothing.
   const n = 24, z = vGrid(n);
-  const soft = classify(z, n, 2, { sharpness: 1 });
-  const hard = classify(z, n, 2, { sharpness: 6 });
+  const soft = classify(z, n, 2, { sharpness: 0.5, balance: 0.4 });
+  const hard = classify(z, n, 2, { sharpness: 6, balance: 0.4 });
   let same = 0;
   for (let i = 0; i < n * n; i++) if (soft.cls[i] === hard.cls[i]) same++;
-  ok(same / (n * n) > 0.85,
-     `sharpening moved the boundary: ${(100 * same / (n * n)).toFixed(0)}% agree`);
-  // Confidence is a margin scaled against the margins across the whole
-  // field, so it is relative by construction and sharpening every weight
-  // does not inflate it. That is the point: it says which cells are less
-  // sure than their neighbours, which is what blending needs, rather than
-  // an absolute that would move whenever the rule was retuned.
+  eq(same, n * n, 'decisiveness moved the boundary');
+
+  const band = (r) => r.strength.reduce((a, v) => a + (v < 0.25 ? 1 : 0), 0);
+  ok(band(soft) > band(hard) * 2,
+     `band did not narrow: ${band(soft)} cells soft vs ${band(hard)} hard`);
+});
+
+test('the panel can read what each cue is worth', () => {
+  const total = (a) => a.reduce((t, c) => t + c.w, 0);
+  close(total(cueWeights(0.4)), 1, 1e-9, 'weights do not sum to one');
+  close(cueWeights(1).find((c) => c.cue === 'height').w, 1, 1e-9,
+        'all of the weight should be height at 100%');
+  close(cueWeights(0).find((c) => c.cue === 'height').w, 0, 1e-9,
+        'none of it at 0%');
+  close(classify(vGrid(8), 8, 2, { altitude: 0.25 }).weights[2].w, 0.25, 1e-9,
+        'classify reports a different weight from the one it used');
 });
 
 test('flat terrain does not crash the rule', () => {
@@ -1207,6 +1223,86 @@ test('without a record the rule falls back to drainage unchanged', () => {
     ok(a.cls[i] === b.cls[i], `cell ${i} differs with an explicit null`);
   }
   eq(a.source, 'drainage');
+});
+
+test('openness darkens hollows and leaves open ground alone', () => {
+  // A bowl in the middle of a flat field: the middle must see less sky
+  // than the rim, or the shading term is decorating rather than shading.
+  const n = 64, z = new Float32Array(n * n);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const d = Math.hypot(x - n / 2, y - n / 2);
+      z[y * n + x] = d < 16 ? -Math.cos(d / 16 * Math.PI / 2) : 0;
+    }
+  }
+  const o = openness(z, n, n, 6);
+  const middle = o[(n / 2) * n + n / 2];
+  const corner = o[2 * n + 2];
+  ok(middle < corner - 0.1,
+     `hollow ${middle.toFixed(2)} not darker than open ground ${corner.toFixed(2)}`);
+  for (const v of o) ok(v >= 0 && v <= 1, 'openness left 0..1');
+});
+
+test('openness of flat ground is uniform', () => {
+  const n = 16, z = new Float32Array(n * n).fill(0.3);
+  const o = openness(z, n, n, 3);
+  for (const v of o) close(v, 0.5, 1e-6, 'flat ground should read as neutral');
+});
+
+test('terrain: same profile and seed, same ground; another seed, other ground', () => {
+  const a = generateTerrain({ size: 32, seed: 1, profile: 'desert' });
+  const b = generateTerrain({ size: 32, seed: 1, profile: 'desert' });
+  const c = generateTerrain({ size: 32, seed: 2, profile: 'desert' });
+  let same = true, diff = 0;
+  for (let i = 0; i < a.z.length; i++) {
+    if (a.z[i] !== b.z[i]) same = false;
+    diff += Math.abs(a.z[i] - c.z[i]);
+  }
+  ok(same, 'one seed gave two terrains');
+  ok(diff / a.z.length > 0.02, 'two seeds gave the same terrain');
+});
+
+test('terrain: every profile comes back normalised, sediment included', () => {
+  for (const name of Object.keys(TERRAIN_PROFILES)) {
+    const r = generateTerrain({ size: 24, seed: 0, profile: name });
+    let lo = Infinity, hi = -Infinity;
+    for (const v of r.z) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    close(lo, 0, 1e-12, `${name} low`);
+    close(hi, 1, 1e-12, `${name} high`);
+    for (const v of r.sediment) ok(v >= 0 && v <= 1, `${name} sediment left 0..1`);
+  }
+});
+
+test('terrain: an unknown profile is refused by name', () => {
+  let msg = '';
+  try { generateTerrain({ size: 16, profile: 'alps' }); } catch (e) { msg = e.message; }
+  ok(msg.includes('alps') && msg.includes('canyon'),
+     'the error should name what was asked for and what exists');
+});
+
+test('every preset names real controls, with values they accept', () => {
+  // views.json is edited by hand. A misspelt id would be skipped with a
+  // console warning nobody reads, and a value outside a slider's range is
+  // silently clamped - so a preset would quietly not be what it says.
+  const here = new URL('.', import.meta.url);
+  const html = readFileSync(new URL('../web/index.html', here), 'utf8');
+  const presets = JSON.parse(readFileSync(new URL('../web/views.json', here), 'utf8'));
+  for (const [name, p] of Object.entries(presets)) {
+    if (name.startsWith('_')) continue;
+    for (const [k, v] of Object.entries(p)) {
+      if (k === 'label' || k === 'short') continue;
+      if (k === 'view') {
+        ok(html.includes(`id="${v}"`), `${name}: no camera button '${v}'`);
+        continue;
+      }
+      const m = new RegExp(`<(input|select)[^>]*id="${k}"[^>]*>`).exec(html);
+      ok(m, `${name}: no control '${k}'`);
+      if (!m || v === 'grid' || typeof v !== 'number') continue;
+      const lo = /min="([^"]+)"/.exec(m[0]), hi = /max="([^"]+)"/.exec(m[0]);
+      if (lo) ok(v >= +lo[1], `${name}: ${k} ${v} below ${lo[1]}`);
+      if (hi) ok(v <= +hi[1], `${name}: ${k} ${v} above ${hi[1]}`);
+    }
+  }
 });
 
 // ------------------------------------------------------------------ report

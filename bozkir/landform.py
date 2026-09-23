@@ -13,7 +13,8 @@ viewer adds on top (fine sampling, max-pooled drainage, altitude, the
 sediment record, a median filter and a quantile threshold). The two answer
 different questions and should not be confused.
 
-`tests/test_pipeline.py` runs both implementations on the same height fields
+`tests/test_pipeline.py` runs both implementations, through tests/bridge.mjs,
+on the same height fields
 and requires the same class in every cell. If you change one, change the
 other, and that test tells you when you have not.
 
@@ -21,10 +22,18 @@ Names and argument order follow the JavaScript, including flat arrays in
 row-major order of length n*n, so the two read side by side.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 
+# The rule's weights, shared with the viewer: web/rule.json is the only
+# place they are written.
+RULE_PATH = Path(__file__).resolve().parents[1] / "web" / "rule.json"
+RULE = json.loads(RULE_PATH.read_text())
+
 __all__ = ["downsample", "slope", "tpi", "flow", "median", "smooth",
-           "quantile", "unit", "classify", "sample_grid"]
+           "quantile", "rank_unit", "unit", "classify", "cue_weights", "sample_grid"]
 
 
 def sample_grid(n, tile_size, height, grid_angle=0.0, over=1):
@@ -189,6 +198,18 @@ def smooth(a, n, radius):
     return cur.ravel()
 
 
+def rank_unit(a):
+    """Each value replaced by where it stands among the others, 0..1, with
+    ties sharing a rank. Mirrors `rankUnit` in web/landform.js."""
+    a = np.asarray(a, dtype=np.float64)
+    if a.size < 2:
+        return a
+    vals, inv, cnt = np.unique(a, return_inverse=True, return_counts=True)
+    ends = np.cumsum(cnt) - 1
+    starts = ends - cnt + 1
+    return ((starts + ends) / 2 / (a.size - 1))[inv]
+
+
 def quantile(values, q):
     """Nearest-rank quantile: element round(q*(len-1)) of the sorted values."""
     s = np.sort(np.asarray(values, dtype=np.float64))
@@ -221,6 +242,18 @@ def _tie_hash(count):
     return u32(((h >> np.uint64(22)) ^ h).astype(np.float64)) / 4294967296.0
 
 
+def cue_weights(altitude=0.4):
+    """What each cue is worth at this altitude setting, for the class that
+    collects material; the other class mirrors it with slope and ridge.
+    Mirrors `cueWeights` in web/landform.js, which the panel prints."""
+    a = min(1.0, max(0.0, altitude))
+    names = {"drive": "drainage", "hollow": "hollows", "ridge": "ridges",
+             "slope": "slope", "flat": "flat ground", "midpos": "mid-slope"}
+    terms = RULE["positions"]["collected"]["terms"]
+    return [(names.get(k, k), (1 - a) * w) for k, w in terms.items()] + \
+        [("height", a)]
+
+
 def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
              sharpness=2.0, altitude=0.4, coherence=2, balance=None,
              rules=None):
@@ -251,42 +284,130 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     maps = {"slope": s, "tpi": t, "flow": f, "elevation": e,
             "sediment": sed, "drive": drive}
     if rules is None:
-        rules = [
-            lambda M: (1 - alt) * (0.6 * M["drive"] + 0.4 * (1 - M["tpi"]))
-            + alt * (1 - M["elevation"]),
-            lambda M: (1 - alt) * (0.5 * M["slope"] + 0.5 * M["tpi"])
-            + alt * M["elevation"],
-        ]
+        # From web/rule.json, the same file the viewer imports.
+        def midband(v):
+            return 1 - 2 * np.abs(v - 0.5)
+
+        terms = {"drive": lambda M: M["drive"],
+                 "hollow": lambda M: 1 - M["tpi"],
+                 "ridge": lambda M: M["tpi"],
+                 "slope": lambda M: M["slope"],
+                 "flat": lambda M: 1 - M["slope"],
+                 "midpos": lambda M: midband(M["tpi"])}
+        heights = {"low": lambda M: 1 - M["elevation"],
+                   "high": lambda M: M["elevation"],
+                   "middle": lambda M: midband(M["elevation"])}
+
+        def position(name):
+            p = RULE["positions"][name]
+            items = list(p["terms"].items())
+            h = heights[p["height"]]
+
+            def score(M):
+                # Summed in the file's order, from zero, as the JS does.
+                shape = 0
+                for k, wgt in items:
+                    shape = shape + wgt * terms[k](M)
+                return (1 - alt) * shape + alt * h(M)
+            return score
+
+        named = RULE["classes"].get(str(classes)) or \
+            RULE["classes"]["4"][:max(2, classes)]
+        rules = [position(nm) for nm in named]
 
     w = []
     for k in range(classes):
         col = np.maximum(0.0, np.asarray(rules[k % len(rules)](maps), np.float64))
-        w.append(np.power(smooth(col, n, 1), sharp))
+        # No exponent here; see web/landform.js. Sharpness is applied to
+        # the margin below, where it can actually be seen.
+        w.append(smooth(col, n, 1))
+
+    # Three or more classes must be made comparable before they compete;
+    # see web/landform.js.
+    if classes > 2:
+        w = [rank_unit(c) for c in w]
 
     coh = 2 if coherence is None else coherence
     bias = 0.0
-    if balance is not None and classes == 2:
+    picked = None
+    if isinstance(balance, (list, tuple, np.ndarray)) and classes > 2:
+        # Cells handed out strongest preference first; see web/landform.js.
+        for k in range(classes):
+            w[k] = median(w[k], n, coh)
+        share = np.maximum(0.0, np.asarray(balance, float))
+        total = share.sum() or 1.0
+        quota = np.zeros(classes, int)
+        left = n * n
+        for k in range(classes):
+            quota[k] = left if k == classes - 1 else min(
+                left, int(round(n * n * share[k] / total)))
+            left -= quota[k]
+        stack0 = np.stack(w)
+        want = np.argmax(stack0, axis=0)
+        part = np.sort(stack0, axis=0)
+        conf = part[-1] - part[-2]
+        order = np.lexsort((np.arange(n * n), -conf))
+        picked = np.full(n * n, -1, dtype=np.int32)
+        for i in order.tolist():
+            k = int(want[i])
+            if quota[k] > 0:
+                picked[i] = k
+                quota[k] -= 1
+        for i in order.tolist():
+            if picked[i] >= 0:
+                continue
+            room = np.flatnonzero(quota > 0)
+            if room.size:
+                k = int(room[np.argmax(stack0[room, i])])
+                picked[i] = k
+                quota[k] -= 1
+            else:
+                picked[i] = int(want[i])
+    elif balance is not None and classes == 2:
         lead = median(w[0] - w[1], n, coh)
         if lead.max() - lead.min() < 1e-9:
             lead = _tie_hash(n * n)
-        bias = -quantile(lead, 1 - balance)
+        # Exactly the cells asked for, by rank, with the index as the
+        # tie-break; see web/landform.js.
+        order = np.lexsort((np.arange(n * n), -lead))
+        take = int(round(balance * n * n))
+        picked = np.ones(n * n, dtype=np.int32)
+        picked[order[:take]] = 0
+        hi_v = lead[order[take - 1]] if take > 0 else np.inf
+        lo_v = lead[order[take]] if take < n * n else -np.inf
+        bias = -(hi_v if take == 0 else lo_v if take == n * n
+                 else (hi_v + lo_v) / 2)
         w[0] = lead
         w[1] = np.zeros(n * n)
 
     stack = np.stack(w)
     stack[0] = stack[0] + bias
     # argmax takes the first of equal values, as the JS strict '>' does.
-    cls = np.argmax(stack, axis=0).astype(np.int32)
+    top = np.argmax(stack, axis=0).astype(np.int32)
+    cls = picked if picked is not None else top
     part = np.sort(stack, axis=0)
     margin = part[-1] - part[-2] if classes > 1 else np.zeros(n * n)
+    # Which class a cell would take instead; see web/landform.js.
+    masked = stack.copy()
+    masked[top, np.arange(n * n)] = -np.inf
+    runner_up = np.argmax(masked, axis=0).astype(np.int32)
+    moved = cls != top
+    runner_up = np.where(moved, top, runner_up)
+    margin = np.where(moved, 0.0, margin)
 
+    # Sharpness lands here and only here: with a quantile threshold it
+    # cannot move the boundary (a quantile is a rank, and a power leaves
+    # ranks alone), so what it controls is the width of the undecided band
+    # that gets drawn as a per-splat dissolve. See web/landform.js.
     scale = max(quantile(margin, 0.9), 1e-9)
-    strength = np.minimum(1.0, margin / scale)
+    strength = np.minimum(1.0, np.power(margin / scale, 1 / max(sharp, 1e-6)))
     # Python-only extra: the signed field the decision thresholds, positive
     # where class 0 wins. A ranking of cells, so the rule can be scored
     # without committing to a threshold (scripts/validate_rule.py).
     lead = (stack[0] - stack[1:].max(axis=0)) if classes > 1 else np.zeros(n * n)
     return {"cls": cls, "strength": strength, "lead": lead,
+            "runner_up": runner_up,
+            "weights": cue_weights(alt),
             "maps": {"slope": s, "tpi": t, "flow": f, "elevation": e,
                      "sediment": sed},
             "source": "sediment" if sed is not None else "drainage"}

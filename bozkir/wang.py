@@ -26,7 +26,7 @@ is cruder and much simpler, and leaves the graph cut as an obvious upgrade.
 import numpy as np
 
 from .ply import Splats
-from .tile import merge, translate
+from .tile import merge
 
 # Corners are where all four triangles meet, so a feathered tile is not
 # exactly edge-matched within this fraction of the tile size of a corner.
@@ -107,8 +107,46 @@ def build_tile(patches, size, blend=0.0, up_axis=2, min_weight=0.02,
     return merge(*parts)
 
 
+def minimal_codes(kh, kv):
+    """Two tiles for every (west, south) pair, instead of every tile there is.
+
+    The complete set over k colours per axis is k^4 tiles: 16 at two
+    colours, 81 at three. Cohen, Shade, Hiller and Deussen (SIGGRAPH 2003)
+    point out that a stochastic tiling only needs every pair the layout
+    constrains to have two tiles - two choices at every step is already a
+    coin flip, and a coin flip is enough to never repeat. That is 2 k^2.
+
+    Which matters because the repetition the eye catches is not in the
+    layout, it is inside the tiles: each tile's south triangle is always the
+    same part of one of k patches, so with two colours half the grid shows
+    the same south triangle in the same place. More colours is the direct
+    fix - Cohen et al. show three colours substantially reduce it - and the
+    minimal set makes three colours cost 18 tiles instead of 81.
+
+    The free north and east colours are spread so each colour appears
+    equally often on every side; a set that favoured one would tile with a
+    bias the eye picks up as a grain. Layout here and in the viewer fixes
+    west and south, so those are the pairs covered.
+
+    Returns a list of (n, e, s, w) codes.
+    """
+    if kh < 2 or kv < 2:
+        raise ValueError("the minimal set needs at least two colours per axis")
+    codes = []
+    for w in range(kv):
+        for s in range(kh):
+            for extra in (0, 1):
+                n = (w + s + extra) % kh
+                e = (2 * w + s + 2 * extra) % kv
+                if extra and (n, e) == ((w + s) % kh, (2 * w + s) % kv):
+                    e = (e + 1) % kv
+                codes.append((n, e, s, w))
+    return codes
+
+
 def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
-                   cut=False, resolution=160, band=0.14, verbose=False):
+                   cut=False, resolution=160, band=0.14, verbose=False,
+                   codes=None):
     """Every tile over the given edge colours.
 
     `h_patches` supplies the colours available on north and south edges,
@@ -119,6 +157,9 @@ def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
     With `cut`, each tile's diagonals are placed by graph cut rather than
     left straight. Every patch is rendered once and the images reused, so
     the cost is one minimum cut per diagonal per tile.
+
+    With `codes`, only those tiles are built - `minimal_codes` gives the
+    smallest set that still tiles stochastically.
 
     Returns (tiles, codes) where codes[i] is (n, e, s, w) for tiles[i].
     """
@@ -133,24 +174,27 @@ def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
             for i, p in enumerate(group):
                 images[(tag, i)] = render_patch(p, size, resolution, up_axis)[0]
 
+    if codes is None:
+        wanted = [(n, e, s, w)
+                  for n in range(len(h_patches)) for e in range(len(v_patches))
+                  for s in range(len(h_patches)) for w in range(len(v_patches))]
+    else:
+        wanted = [tuple(int(x) for x in c) for c in codes]
     tiles, codes = [], []
-    for n in range(len(h_patches)):
-        for e in range(len(v_patches)):
-            for s in range(len(h_patches)):
-                for w in range(len(v_patches)):
-                    labels = None
-                    if cut:
-                        labels = tile_labels(
-                            [images[("h", n)], images[("v", e)],
-                             images[("h", s)], images[("v", w)]],
-                            size=size, band=band)
-                    tiles.append(build_tile(
-                        (h_patches[n], v_patches[e], h_patches[s], v_patches[w]),
-                        size, blend, up_axis, labels=labels))
-                    codes.append((n, e, s, w))
-                    if verbose:
-                        print(f"    tile {len(tiles):>3} ({n}{e}{s}{w}): "
-                              f"{len(tiles[-1]):,} splats")
+    for (n, e, s, w) in wanted:
+        labels = None
+        if cut:
+            labels = tile_labels(
+                [images[("h", n)], images[("v", e)],
+                 images[("h", s)], images[("v", w)]],
+                size=size, band=band)
+        tiles.append(build_tile(
+            (h_patches[n], v_patches[e], h_patches[s], v_patches[w]),
+            size, blend, up_axis, labels=labels))
+        codes.append((n, e, s, w))
+        if verbose:
+            print(f"    tile {len(tiles):>3} ({n}{e}{s}{w}): "
+                  f"{len(tiles[-1]):,} splats")
     return tiles, codes
 
 

@@ -28,10 +28,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.erosion import generate  # noqa: E402
+from bozkir.catalogue import rebuild as reindex  # noqa: E402
+from bozkir.erosion import PROFILES, generate  # noqa: E402
 from bozkir.terrain import (HEIGHT_ENCODING, flow_accumulation,  # noqa: E402
                             slope, write_height_png)
 
@@ -49,6 +49,10 @@ def main(argv=None):
                     help="written as web/data/<name>.height.png, so a "
                          "tileset of the same name picks it up")
     ap.add_argument("--out", default="web/data")
+    ap.add_argument("--profile", choices=sorted(PROFILES),
+                    help="a named terrain: " + ", ".join(sorted(PROFILES))
+                         + ". Fills in the settings below; anything passed "
+                           "explicitly still wins")
     ap.add_argument("--size", type=int, default=512,
                     help="grid resolution (default 512)")
     ap.add_argument("--seed", type=int, default=0)
@@ -65,9 +69,12 @@ def main(argv=None):
                     help="erosion steps. More cuts deeper valleys; the "
                          "network stops changing shape well before it "
                          "stops deepening")
-    ap.add_argument("--incision", type=float, default=0.06,
-                    help="how hard rivers cut")
-    ap.add_argument("--diffusion", type=float, default=0.25,
+    ap.add_argument("--incision", type=float, default=0.3,
+                    help="K in the stream power law: how hard rivers cut")
+    ap.add_argument("--uplift", type=float, default=0.0,
+                    help="U: relief grown per step from the noise as an "
+                         "uplift map, instead of only cut into it")
+    ap.add_argument("--diffusion", type=float, default=0.1,
                     help="how fast hillsides creep. Against --incision this "
                          "sets how far apart the valleys sit, which is the "
                          "most recognisable thing about a landscape")
@@ -77,10 +84,19 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     print(f"generating {args.size}x{args.size}, seed {args.seed}")
-    z, sed = generate(size=args.size, seed=args.seed, octaves=args.octaves,
-                      freq=args.freq, ridge=args.ridge,
-                      iterations=args.iterations, incision=args.incision,
-                      diffusion=args.diffusion)
+    # Only what was actually typed overrides the profile, so `--profile
+    # canyon --seed 3` keeps the canyon and changes the seed.
+    given = {k: v for k, v in vars(args).items()
+             if f"--{k}" in (argv if argv is not None else sys.argv[1:])}
+    settings = dict(PROFILES[args.profile]) if args.profile else {}
+    for k in ("octaves", "freq", "ridge", "iterations", "incision",
+              "diffusion", "uplift"):
+        if k in given or k not in settings:
+            settings[k] = getattr(args, k)
+    if args.profile:
+        print(f"profile {args.profile}: "
+              + ", ".join(f"{k} {v}" for k, v in sorted(settings.items())))
+    z, sed = generate(size=args.size, seed=args.seed, **settings)
 
     # What the erosion produced, in the terms the material rule reads.
     a = flow_accumulation(z)
@@ -104,24 +120,29 @@ def main(argv=None):
         "metres_high": float(args.metres) if args.metres else None,
         "metres_range": float(args.metres) if args.metres else None,
         "sample_metres": None,
-        "source": f"generated seed {args.seed}",
+        "source": (f"generated {args.profile} seed {args.seed}"
+                   if args.profile else f"generated seed {args.seed}"),
         "sediment": f"{args.name}.sediment.png",
         "encoding": HEIGHT_ENCODING,
         "settings": {
-            "size": args.size, "seed": args.seed, "ridge": args.ridge,
-            "octaves": args.octaves, "freq": args.freq,
-            "iterations": args.iterations, "incision": args.incision,
-            "diffusion": args.diffusion,
+            "size": args.size, "seed": args.seed,
+            "profile": args.profile, **settings,
         },
     }
     with open(out / f"{args.name}.height.json", "w") as f:
         json.dump(meta, f, indent=2)
+    # So the viewer's terrain menu knows this exists without anyone
+    # editing a list by hand.
+    reindex(out, quiet=True)
 
     print(f"  wrote {png}")
     print(f"  wrote {sedpng}")
     print(f"  wrote {out / f'{args.name}.height.json'}")
-    print(f"\n  reload the viewer with ?scene={args.name} to see it under "
-          f"the tiles")
+    print(f"\n  pick '{args.name}' in the viewer's terrain menu, or open "
+          f"?scene=<tileset>&height={args.name}")
+    if args.profile:
+        print(f"  the same ground without a file: "
+              f"?gen={args.profile}&seed={args.seed}&size={args.size}")
     return 0
 
 

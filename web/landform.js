@@ -27,6 +27,10 @@
  *  the rule reads is the terrain that is drawn. Reading a different surface
  *  would place material by the shape of something invisible.
  */
+// The rule's weights, shared with Python. Import attributes need a current
+// browser (Chrome/Edge 123+, Safari 17.2+, Firefox 138+) and Node 22.
+import RULE from './rule.json' with { type: 'json' };
+
 export function sampleGrid(n, tileSize, height, gridAngle = 0, over = 1) {
   const k = Math.max(1, over | 0);
   const m = n * k;
@@ -284,6 +288,26 @@ function smooth(a, n, radius) {
 }
 
 
+/** Each value replaced by where it stands among the others, 0 for the
+ *  lowest and 1 for the highest. Ties take the same rank, so a flat field
+ *  stays flat rather than becoming a gradient of nothing. */
+function rankUnit(a) {
+  const n = a.length;
+  if (n < 2) return a;
+  const order = Array.from({ length: n }, (_, i) => i)
+    .sort((p, q) => (a[p] - a[q]) || (p - q));
+  const out = new Float64Array(n);
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && a[order[j + 1]] === a[order[i]]) j++;
+    const v = ((i + j) / 2) / (n - 1);
+    for (let k = i; k <= j; k++) out[order[k]] = v;
+    i = j + 1;
+  }
+  return out;
+}
+
 /** The threshold that gives a class the share of the grid asked for.
  *
  *  Scale-free thresholds decide *where* the boundary falls but not how
@@ -369,12 +393,38 @@ export function classify(z, n, classes, opts = {}) {
   // about elevation, which is the crudest terrain shader there is and
   // still looks like something. The interesting settings are in between.
   const alt = opts.altitude == null ? 0.4 : opts.altitude;
-  const rules = opts.rules || [
-    // 0: collected. Low ground, where water runs, where it is concave.
-    (i) => (1 - alt) * (0.6 * drive[i] + 0.4 * (1 - t[i])) + alt * (1 - e[i]),
-    // 1: exposed. High ground, steep, convex, nothing draining through.
-    (i) => (1 - alt) * (0.5 * s[i] + 0.5 * t[i]) + alt * e[i],
-  ];
+  // Two classes are a valley and its walls. More classes are a sequence
+  // down the same hillside - crest, face, bench, floor - which is how a
+  // slope actually reads, and each rule below names the position it
+  // stands for. Hybrid GSWT is a multi-class method, so stopping at two
+  // would leave the comparison short.
+  //
+  // The rule itself lives in rule.json, shared with bozkir/landform.py.
+  // Each class is a position on a hillside with weighted terms and a
+  // height term; a middle class wants a band, not an extreme, so it scores
+  // on nearness to the middle of a map rather than on the map itself.
+  const mid = (v) => 1 - 2 * Math.abs(v - 0.5);
+  const TERM = {
+    drive: (i) => drive[i], hollow: (i) => 1 - t[i], ridge: (i) => t[i],
+    slope: (i) => s[i], flat: (i) => 1 - s[i], midpos: (i) => mid(t[i]),
+  };
+  const HEIGHT = {
+    low: (i) => 1 - e[i], high: (i) => e[i], middle: (i) => mid(e[i]),
+  };
+  const position = (name) => {
+    const p = RULE.positions[name];
+    const terms = Object.entries(p.terms);
+    const h = HEIGHT[p.height];
+    return (i) => {
+      // Summed in the file's order, from zero, exactly as the Python does.
+      let shape = 0;
+      for (const [k, wgt] of terms) shape = shape + wgt * TERM[k](i);
+      return (1 - alt) * shape + alt * h(i);
+    };
+  };
+  const named = RULE.classes[String(classes)]
+    || RULE.classes['4'].slice(0, Math.max(2, classes));
+  const rules = opts.rules || named.map(position);
 
   const out = new Int32Array(n * n);
   const strength = new Float64Array(n * n);
@@ -391,10 +441,24 @@ export function classify(z, n, classes, opts = {}) {
     const fn = rules[k % rules.length];
     const col = new Float64Array(n * n);
     for (let i = 0; i < n * n; i++) col[i] = Math.max(0, fn(i));
-    const blurred = smooth(col, n, 1);
-    for (let i = 0; i < n * n; i++) blurred[i] = Math.pow(blurred[i], sharp);
-    w.push(blurred);
+    // No exponent here. Raising every class's field to a power is the
+    // shape of Hybrid GSWT's Eq. 1, but with a quantile threshold it
+    // changes nothing a viewer can see - ranks survive powers - so it
+    // used to make the decisiveness control inert. The exponent is
+    // applied to the margin below instead, where it sets the width of
+    // the blended band.
+    w.push(smooth(col, n, 1));
   }
+
+  // With three or more classes the fields have to be made comparable
+  // before they compete. They are not: 'bench' scores high on almost any
+  // terrain while 'collected' only scores high in a hollow, so raw values
+  // handed the desert 94% bench, and forcing quotas on top of that
+  // displaced two cells in three. Ranking each class's field against
+  // itself asks the question that actually matters - is this cell more of
+  // a bench than most, more of a hollow than most - and leaves two
+  // classes, where a difference of two fields is already fair, alone.
+  if (classes > 2) for (let k = 0; k < classes; k++) w[k] = rankUnit(w[k]);
 
   // `balance` shifts how much land the first class takes, without moving
   // where the boundary would naturally fall: the first class gets the
@@ -402,8 +466,59 @@ export function classify(z, n, classes, opts = {}) {
   // alone, which is what it always did.
   const coherence = opts.coherence == null ? 2 : opts.coherence;
 
-  let bias = 0;
-  if (opts.balance != null && classes === 2) {
+  let bias = 0, picked = null;
+  // Several classes, each with a share of the grid. Two classes can be
+  // settled by one threshold on the difference; three or more cannot, so
+  // the cells are handed out instead: strongest preference first, each
+  // cell to the class it wants most that still has room. A cell that ends
+  // up somewhere it did not want reads as undecided, which is exactly
+  // where blending should be drawing both materials.
+  if (Array.isArray(opts.balance) && classes > 2) {
+    const coh = opts.coherence == null ? 2 : opts.coherence;
+    for (let k = 0; k < classes; k++) w[k] = median(w[k], n, coh);
+
+    let sum = 0;
+    for (let k = 0; k < classes; k++) sum += Math.max(0, opts.balance[k] || 0);
+    const quota = new Int32Array(classes);
+    let left = n * n;
+    for (let k = 0; k < classes; k++) {
+      quota[k] = k === classes - 1 ? left
+        : Math.min(left, Math.round(n * n * Math.max(0, opts.balance[k] || 0)
+                                    / (sum || 1)));
+      left -= quota[k];
+    }
+
+    // Strongest preference first: a cell that only just prefers its class
+    // should give way to one that prefers it by a mile.
+    const want = new Int32Array(n * n);
+    const conf = new Float64Array(n * n);
+    for (let i = 0; i < n * n; i++) {
+      let best = -Infinity, second = -Infinity, bestK = 0;
+      for (let k = 0; k < classes; k++) {
+        const v = w[k][i];
+        if (v > best) { second = best; best = v; bestK = k; }
+        else if (v > second) { second = v; }
+      }
+      want[i] = bestK;
+      conf[i] = best - second;
+    }
+    const order = Array.from({ length: n * n }, (_, i) => i)
+      .sort((p, q) => (conf[q] - conf[p]) || (p - q));
+    picked = new Int32Array(n * n).fill(-1);
+    for (const i of order) {
+      if (quota[want[i]] > 0) { picked[i] = want[i]; quota[want[i]]--; }
+    }
+    // Whoever is left takes whatever room is left, best first.
+    for (const i of order) {
+      if (picked[i] >= 0) continue;
+      let bestK = -1, bestV = -Infinity;
+      for (let k = 0; k < classes; k++) {
+        if (quota[k] > 0 && w[k][i] > bestV) { bestV = w[k][i]; bestK = k; }
+      }
+      picked[i] = bestK < 0 ? want[i] : bestK;
+      if (bestK >= 0) quota[bestK]--;
+    }
+  } else if (opts.balance != null && classes === 2) {
     let lead = new Float64Array(n * n);
     for (let i = 0; i < n * n; i++) lead[i] = w[0][i] - w[1][i];
     // Cleaned before the threshold, so the quantile below is taken on the
@@ -427,7 +542,23 @@ export function classify(z, n, classes, opts = {}) {
         lead[i] = (((h >>> 22) ^ h) >>> 0) / 4294967296;
       }
     }
-    bias = -quantile(lead, 1 - opts.balance);
+    // Exactly the cells asked for, taken in order of how strongly they
+    // lead. A quantile alone is one rank short of exact: the median
+    // filter leaves many cells sharing a value, and every cell sitting
+    // on the threshold falls the same way, so a 50% request came back as
+    // 50.9%. Ranking with the index as the tie-break gives the count
+    // asked for and is still deterministic.
+    const order = Array.from({ length: n * n }, (_, i) => i)
+      .sort((p, q) => (lead[q] - lead[p]) || (p - q));
+    const take = Math.round(opts.balance * n * n);
+    picked = new Int32Array(n * n).fill(1);
+    for (let i = 0; i < take; i++) picked[order[i]] = 0;
+    // Halfway between the last cell taken and the first left out, so the
+    // margin below is a distance from the boundary rather than from one
+    // cell's value.
+    const hiV = take > 0 ? lead[order[take - 1]] : Infinity;
+    const loV = take < n * n ? lead[order[take]] : -Infinity;
+    bias = -(take === 0 ? hiV : take === n * n ? loV : (hiV + loV) / 2);
     for (let i = 0; i < n * n; i++) w[0][i] = lead[i];
     for (let i = 0; i < n * n; i++) w[1][i] = 0;
   }
@@ -440,25 +571,70 @@ export function classify(z, n, classes, opts = {}) {
   // fully decided or fully undecided, and widening the blend simply
   // switched every second-class cell on at once.
   const margin = new Float64Array(n * n);
+  // The class each cell would take if it could not have the one it got.
+  // Blending needs it: with two classes the other one is obvious, with
+  // more it is whichever the terrain ranks next, and drawing an arbitrary
+  // third material there would be worse than not blending at all.
+  const runnerUp = new Int32Array(n * n);
   for (let i = 0; i < n * n; i++) {
-    let best = -Infinity, second = -Infinity, bestK = 0;
+    let best = -Infinity, second = -Infinity, bestK = 0, secondK = 0;
     for (let k = 0; k < classes; k++) {
       const v = w[k][i] + (k === 0 ? bias : 0);
-      if (v > best) { second = best; best = v; bestK = k; }
-      else if (v > second) { second = v; }
+      if (v > best) { second = best; secondK = bestK; best = v; bestK = k; }
+      else if (v > second) { second = v; secondK = k; }
     }
-    out[i] = bestK;
-    margin[i] = best - second;
+    const got = picked ? picked[i] : bestK;
+    out[i] = got;
+    if (got === bestK) {
+      margin[i] = best - second;
+      runnerUp[i] = secondK;
+    } else {
+      // Placed somewhere it did not prefer, so it is undecided by
+      // definition, and the class it wanted is the one to blend towards.
+      margin[i] = 0;
+      runnerUp[i] = bestK;
+    }
   }
 
   // Scaled by a high percentile rather than the maximum, so one unusual
   // cell cannot flatten everything else to nothing.
+  //
+  // Sharpness lands here, and only here. Raising every class's field to a
+  // power cannot move the boundary at all once a quantile sets the
+  // threshold - a quantile is a rank, and a power leaves ranks alone - so
+  // for a long time the control changed 2 cells in 576 across its whole
+  // range. What it can honestly control is how *wide* the undecided band
+  // is, which is the band drawn as a per-splat dissolve between the two
+  // materials. Exponent 1/sharp: a decisive setting pushes middling
+  // margins up towards 1 and narrows the band to the cells that really
+  // are a tie; a soft setting pulls them down and widens it. That is
+  // Hybrid GSWT's exponent doing its work where per-Gaussian mixing
+  // happens, which is where theirs does it too.
   const scale = Math.max(quantile(margin, 0.9), 1e-9);
+  const power = 1 / Math.max(sharp, 1e-6);
   for (let i = 0; i < n * n; i++) {
-    strength[i] = Math.min(1, margin[i] / scale);
+    strength[i] = Math.min(1, Math.pow(margin[i] / scale, power));
   }
 
-  return { cls: out, strength,
+  return { cls: out, strength, runnerUp, weights: cueWeights(alt),
            maps: { slope: s, tpi: t, flow: f, elevation: e, sediment: sed },
            source: sed ? 'sediment' : 'drainage' };
+}
+
+/** What each cue is actually worth at this altitude setting, as shares of
+ *  one, for the class that collects material - the other class mirrors
+ *  them with slope and ridge. The rule's weights are written inside the
+ *  default rules, where a
+ *  slider called "follows height" gives no clue how much of the decision
+ *  is left for the shape of the ground. The panel prints these, so the
+ *  control can be read rather than guessed at. */
+export function cueWeights(altitude = 0.4) {
+  const a = Math.min(1, Math.max(0, altitude));
+  const NAMES = { drive: 'drainage', hollow: 'hollows', ridge: 'ridges',
+                  slope: 'slope', flat: 'flat ground', midpos: 'mid-slope' };
+  const terms = RULE.positions.collected.terms;
+  return [
+    ...Object.entries(terms).map(([k, w]) => ({ cue: NAMES[k] || k, w: (1 - a) * w })),
+    { cue: 'height', w: a },
+  ];
 }

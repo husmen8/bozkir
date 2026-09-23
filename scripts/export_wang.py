@@ -28,9 +28,63 @@ from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
 from bozkir import presets as presets_mod  # noqa: E402
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
-from bozkir.wang import (build_tile_set, layout, check_layout,  # noqa: E402
+from bozkir.wang import (build_tile_set, minimal_codes, layout, check_layout,  # noqa: E402
                          edge_gaussians)
 from bozkir.pack import pack, STRIDE  # noqa: E402
+from bozkir.catalogue import rebuild as reindex  # noqa: E402
+
+
+def overlap_report(chosen, size):
+    """Warn when the patches of one class share ground.
+
+    Two patches that overlap are, in their shared part, the same ground -
+    and an edge colour built from each is a shifted copy of the other. The
+    variety more colours were meant to add is then not there, and a
+    distinctive feature in the shared part turns up in tile after tile. It
+    happens whenever a material covers only a small part of the capture:
+    its patches have nowhere else to come from.
+    """
+    pts = [c[1] for c in chosen]
+    pairs, worst = 0, 0.0
+    for a in range(len(pts)):
+        for b in range(a + 1, len(pts)):
+            dx = max(0.0, size - abs(pts[a][0] - pts[b][0]))
+            dy = max(0.0, size - abs(pts[a][1] - pts[b][1]))
+            share = dx * dy / (size * size)
+            if share > 0.01:
+                pairs += 1
+                worst = max(worst, share)
+    if not pairs:
+        return
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    w = max(xs) - min(xs) + size
+    h = max(ys) - min(ys) + size
+    print(f"  ! {len(pts)} patches from a {w:.1f} x {h:.1f} area; {pairs} "
+          f"pair(s) share ground, up to {worst:.0%}. Overlapping patches are "
+          f"shifted copies of one another, so expect repetition in this "
+          f"material. A capture with more of it is the fix; fewer colours "
+          f"(--colours 2) needs fewer patches.")
+
+
+def scale_report(s, size):
+    """Say so when the tile size and the capture's units disagree.
+
+    --size is in the capture's own units. A drone survey is in metres,
+    where a 1.5 tile holds about fifty splats across; a capture trained at
+    an arbitrary scale can make 1.5 mean a fingernail or a football pitch,
+    and the search then fails in ways that look like the capture's fault.
+    """
+    m = float(np.median(s.scale.max(axis=1)))
+    if m <= 0:
+        return
+    ratio = size / m
+    if 12 <= ratio <= 400:
+        return
+    guess = 55 * m
+    print(f"  ! --size {size:g} is {ratio:.0f}x the typical splat "
+          f"({m:.3g}); ground captures in metres sit around 30-150x. If this "
+          f"capture is not in metres, try --size {guess:.3g}.")
 
 
 def prepare_patches(chosen, need, args, up):
@@ -59,6 +113,8 @@ def prepare_patches(chosen, need, args, up):
         # again and the cap does nothing. Spread the survivors rather than
         # taking the brightest, or the tile ends up dense in one corner.
         if args.max_per_tile and len(q) > args.max_per_tile:
+            print(f"    patch {i} at ({x:.2f}, {y:.2f}): {len(q):,} splats "
+                  f"capped to {args.max_per_tile:,}")
             q = q.subset(stratified_keep(q, args.max_per_tile,
                                          args.size * (1.0 + args.extract_margin),
                                          up))
@@ -80,17 +136,46 @@ def prepare_patches(chosen, need, args, up):
     return patches
 
 
+
+class _ShortClass(Exception):
+    """A class came back with fewer patches than the colours need."""
+
+
+def _progress_line():
+    """One rewriting line of progress: a long search that prints nothing
+    looks the same as one that has hung."""
+    width = [0]
+
+    def progress(done, total, viable):
+        msg = (f"\r  {done}/{total} positions, {viable} viable"
+               f"   {100.0 * done / max(total, 1):4.0f}%")
+        width[0] = max(width[0], len(msg))
+        sys.stdout.write(msg.ljust(width[0]))
+        sys.stdout.flush()
+        if done == total:
+            sys.stdout.write("\r" + " " * width[0] + "\r")
+            sys.stdout.flush()
+    return progress
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", type=Path)
     ap.add_argument("--size", type=float, default=1.5)
     ap.add_argument("--colours", type=int, default=2,
                     help="edge colours per axis; 2 gives 16 tiles from 4 patches")
+    ap.add_argument("--minimal", action="store_true",
+                    help="build two tiles per (west, south) pair instead of "
+                         "every combination (Cohen et al. 2003): 18 tiles at "
+                         "3 colours instead of 81. On by default from 3 "
+                         "colours up; the variety that fights repetition "
+                         "comes from the colours, not the tile count")
+    ap.add_argument("--complete", action="store_true",
+                    help="build every combination even at 3+ colours")
     ap.add_argument("--blend", type=float, default=0.05,
                     help="width of the feathered band along each diagonal, "
                          "in world units; 0 is a hard cut. Ignored with --cut.")
-    ap.add_argument("--cut", action="store_true",
-                    help="place each diagonal by graph cut instead of leaving "
+    ap.add_argument("--cut", action=argparse.BooleanOptionalAction, default=True,
+                    help="(on by default; --no-cut for speed) place each diagonal by graph cut instead of leaving "
                          "it straight: the boundary follows wherever the two "
                          "patches already agree, so the join hides in the "
                          "texture (Kwatra et al. 2003, GSWT 3.2)")
@@ -183,7 +268,11 @@ def main():
                     help="with --features: how wide the rim is, as a fraction "
                          "of the tile")
     ap.add_argument("--max-below", type=float, default=0.5)
-    ap.add_argument("--max-per-tile", type=int, default=None)
+    ap.add_argument("--max-per-tile", type=int, default=60000,
+                    help="most splats kept per patch (default 60000; 0 keeps "
+                         "all). A dense capture otherwise makes tiles of "
+                         "300k+ splats each and a tileset the browser cannot "
+                         "draw at speed")
     ap.add_argument("--no-lod-compensate", dest="lod_compensate",
                     action="store_false",
                     help="do not grow surviving splats to cover for the ones "
@@ -197,6 +286,7 @@ def main():
     args = apply_preset(ap)
 
     s = scene_from_args(args)
+    scale_report(s, args.size)
     up = args.up_axis
     thickness = args.thickness if args.thickness else args.size * 0.25
     need = 2 * args.colours
@@ -215,95 +305,143 @@ def main():
     # capture whose second material is a tenth of the ground finds sixteen
     # of the first material and splits it into two halves of itself.
     want = args.count or max(need * 4 * max(args.classes, 1), 12)
-    common = search_kwargs(args, thickness)
-    if args.auto and not args.patches:
-        # Loosen only when choosing for ourselves. With --patches the
-        # indices came from a preview run, and they only mean anything
-        # against the settings that produced them - so those settings are
-        # used exactly as given, and a short list is an error rather than
-        # something to work around.
-        chosen, trail = auto_pick(s, args.size, want, up,
-                                  cache=args.search_cache, **common)
-        print(describe_trail(trail, need, args.size))
-        apply_settings(args, trail[-1][1])
-        if args.save_preset:
-            presets_mod.save(args, args.save_preset, ap)
-    else:
-        sep = common.pop("min_separation", 1.0)
-        found, _, hit = cached_search(s, args.size, up, common,
-                                      cache=args.search_cache, verbose=True)
-        chosen = choose(found, want, args.size, sep)
-        for _, _, p, info in chosen:
-            info["cover"] = rendered_coverage(p, args.size, up)
-        if hit:
-            print(f"  recalled {len(found)} candidates from the search "
-                  f"preview_patches.py already did")
-    if len(chosen) < need:
-        raise SystemExit(
-            f"  only {len(chosen)} patches passed, need {need}."
-            + ("\n  --patches was given, so the settings were used exactly "
-               "as supplied; re-run preview_patches.py and pass the same "
-               "settings, or a preset, to both." if args.patches else
-               "\n  This capture does not yield a tile set at any setting "
-               "tried. preview_patches.py shows what is rejecting."))
-    # Dropped by hand, before anything narrows the list. Scoring sees flat,
-    # dense and uniform; it has no term for "contains one bright thing", and
-    # a survey marker is flat, dense and uniform. Doing this after selection
-    # would be excluding from four, which is not a choice.
-    if args.exclude.strip():
-        drop = {int(x) for x in args.exclude.replace(",", " ").split()}
-        before = len(chosen)
-        chosen = [c for i, c in enumerate(chosen) if i not in drop]
-        print(f"  excluded {sorted(drop)}: "
-              f"{before} candidates -> {len(chosen)}")
-
-    if args.patches:
-        want = [int(v) for v in args.patches.replace(" ", "").split(",") if v]
-        if len(want) != need:
-            raise SystemExit(f"--patches needs exactly {need} indices for "
-                             f"{args.colours} colours per axis, got {len(want)}")
-        if max(want) >= len(chosen):
-            raise SystemExit(f"index {max(want)} is past the {len(chosen)} "
-                             f"candidates found; lower --stride to find more")
-        chosen = [chosen[i] for i in want]
-        print(f"  using candidates {want} as given")
-    elif args.classes <= 1:
-        # Narrowing to the four that look most alike is the right move for
-        # one tile set and exactly wrong for several: it would hand the
-        # split four patches already chosen for being indistinguishable.
-        # With classes, split_classes does the same narrowing inside each
-        # group instead.
-        chosen = select_similar(chosen, need, args.similarity)
-
-    if args.classes <= 1:
-        feats = np.array([appearance(c[2]) for c in chosen])
-        spread = float(np.linalg.norm(feats - feats.mean(axis=0), axis=1).mean())
-        print(f"  appearance spread across the {need} chosen: {spread:.3f} "
-              f"({'similar' if spread < 0.08 else 'diagonals will show'})")
-
-    # One set of four patches per class. With a single class this is the
-    # chosen four and nothing changes; with more, the candidates are split
-    # into groups that look unlike each other and each group becomes its own
-    # tile set.
-    if args.classes > 1:
-        groups = split_classes(chosen, classes=args.classes, per_class=need)
-        sep = class_separation(groups)
-        print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
-        if sep < 1.0:
+    def gather(want, widen=False):
+        common = search_kwargs(args, thickness)
+        if widen:
+            # More of what was already found, not a new search. The first
+            # pass keeps every viable position it saw; only the top few were
+            # handed on, and a rarer material is exactly what sits further
+            # down that list. Loosening the filters instead - which is what
+            # asking auto_pick for more would do - re-searches the whole
+            # capture once per setting, minutes each, for candidates that
+            # were never missing.
+            common.pop("min_separation", None)
+            found, _, _ = cached_search(s, args.size, up, common,
+                                        cache=args.search_cache, verbose=False)
+            chosen = choose(found, want, args.size, 0.5)
+            print(f"  taking {len(chosen)} of the {len(found)} viable "
+                  f"positions already found")
+        elif args.auto and not args.patches:
+            # Loosen only when choosing for ourselves. With --patches the
+            # indices came from a preview run, and they only mean anything
+            # against the settings that produced them - so those settings are
+            # used exactly as given, and a short list is an error rather than
+            # something to work around.
+            chosen, trail = auto_pick(s, args.size, want, up,
+                                      cache=args.search_cache,
+                                      progress=_progress_line(), **common)
+            print(describe_trail(trail, need, args.size))
+            apply_settings(args, trail[-1][1])
+            if args.save_preset:
+                presets_mod.save(args, args.save_preset, ap)
+        else:
+            sep = common.pop("min_separation", 1.0)
+            found, _, hit = cached_search(s, args.size, up, common,
+                                          cache=args.search_cache, verbose=True)
+            chosen = choose(found, want, args.size, sep)
+            for _, _, p, info in chosen:
+                info["cover"] = rendered_coverage(p, args.size, up)
+            if hit:
+                print(f"  recalled {len(found)} candidates from the search "
+                      f"preview_patches.py already did")
+        if len(chosen) < need:
             raise SystemExit(
-                "  the classes are no further apart than they are varied: "
-                "this capture holds one material.\n"
-                "  Building tile sets from it would give two that differ by "
-                "nothing, and a terrain rule with nothing to choose between.")
-        short = [i for i, g in enumerate(groups) if len(g) < need]
-        if short:
-            raise SystemExit(
-                f"  class {short} has fewer than {need} patches. Raise "
-                f"--count so each class has more to choose from, or drop "
-                f"--classes.")
-        class_sets = [g[:need] for g in groups]
-    else:
-        class_sets = [chosen[:need]]
+                f"  only {len(chosen)} patches passed, need {need}."
+                + ("\n  --patches was given, so the settings were used exactly "
+                   "as supplied; re-run preview_patches.py and pass the same "
+                   "settings, or a preset, to both." if args.patches else
+                   "\n  This capture does not yield a tile set at any setting "
+                   "tried. preview_patches.py shows what is rejecting."))
+        # Dropped by hand, before anything narrows the list. Scoring sees flat,
+        # dense and uniform; it has no term for "contains one bright thing", and
+        # a survey marker is flat, dense and uniform. Doing this after selection
+        # would be excluding from four, which is not a choice.
+        if args.exclude.strip():
+            drop = {int(x) for x in args.exclude.replace(",", " ").split()}
+            before = len(chosen)
+            chosen = [c for i, c in enumerate(chosen) if i not in drop]
+            print(f"  excluded {sorted(drop)}: "
+                  f"{before} candidates -> {len(chosen)}")
+
+        if args.patches:
+            want = [int(v) for v in args.patches.replace(" ", "").split(",") if v]
+            if len(want) != need:
+                raise SystemExit(f"--patches needs exactly {need} indices for "
+                                 f"{args.colours} colours per axis, got {len(want)}")
+            if max(want) >= len(chosen):
+                raise SystemExit(f"index {max(want)} is past the {len(chosen)} "
+                                 f"candidates found; lower --stride to find more")
+            chosen = [chosen[i] for i in want]
+            print(f"  using candidates {want} as given")
+        elif args.classes <= 1:
+            # Narrowing to the four that look most alike is the right move for
+            # one tile set and exactly wrong for several: it would hand the
+            # split four patches already chosen for being indistinguishable.
+            # With classes, split_classes does the same narrowing inside each
+            # group instead.
+            chosen = select_similar(chosen, need, args.similarity)
+
+        if args.classes <= 1:
+            feats = np.array([appearance(c[2]) for c in chosen])
+            spread = float(np.linalg.norm(feats - feats.mean(axis=0), axis=1).mean())
+            print(f"  appearance spread across the {need} chosen: {spread:.3f} "
+                  f"({'similar' if spread < 0.08 else 'diagonals will show'})")
+
+        # One set of four patches per class. With a single class this is the
+        # chosen four and nothing changes; with more, the candidates are split
+        # into groups that look unlike each other and each group becomes its own
+        # tile set.
+        if args.classes > 1:
+            groups = split_classes(chosen, classes=args.classes, per_class=need)
+            sep = class_separation(groups)
+            print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
+            # A split of one material into two still finds some gap: noise
+            # divided in half always has two halves. On a uniform capture
+            # that came out at 1.1, with both "classes" the same colour to
+            # two decimals; the desert's real sand and scrub score 7-16.
+            # So the bar is a clear ratio and a colour difference an eye
+            # would call a different material.
+            rgb = [np.mean([appearance(c[2])[:3] for c in g], axis=0)
+                   for g in groups if g]
+            colour_gap = (float(np.abs(rgb[0] - rgb[1]).max())
+                          if len(rgb) > 1 else 0.0)
+            if sep < 3.0 or colour_gap < 0.04:
+                raise SystemExit(
+                    "  the classes are no further apart than they are varied: "
+                    "this capture holds one material.\n"
+                    "  Building tile sets from it would give two that differ by "
+                    "nothing, and a terrain rule with nothing to choose between.")
+            short = [i for i, g in enumerate(groups) if len(g) < need]
+            if short:
+                raise _ShortClass(short)
+            class_sets = [g[:need] for g in groups]
+        else:
+            class_sets = [chosen[:need]]
+
+        return chosen, class_sets
+
+    # A rarer material may not make the first pool at all: search for 48 on
+    # ground that is mostly sand and the scrub class comes back short. When
+    # choosing for ourselves, widen the search and try again rather than
+    # stop and ask the user to guess a bigger --count.
+    # A count, from the command line or a preset, is where the search
+    # starts, not a promise to stop there: a preset saved for two colours
+    # asks for too few candidates for three.
+    auto_widen = args.auto and not args.patches
+    for attempt in range(4 if auto_widen else 1):
+        try:
+            chosen, class_sets = gather(want, widen=attempt > 0)
+            break
+        except _ShortClass as e:
+            if attempt == (3 if auto_widen else 0):
+                raise SystemExit(
+                    f"  class {e.args[0]} still has fewer than {need} patches "
+                    f"after searching for {want}. This capture holds too little "
+                    f"of that material for {args.colours} colours per axis: "
+                    f"try --colours 2, or drop --classes.")
+            want *= 2
+            print(f"\n  class {e.args[0]} came back short; searching wider, "
+                  f"for {want} candidates")
 
     all_tiles, all_codes, all_class = [], [], []
     for ci, picked in enumerate(class_sets):
@@ -311,6 +449,7 @@ def main():
             f = np.array([appearance(c[2]) for c in picked])
             print(f"\n  class {ci}: rgb {f[:, 0].mean():.2f} "
                   f"{f[:, 1].mean():.2f} {f[:, 2].mean():.2f}")
+        overlap_report(picked[:need], args.size)
         patches = prepare_patches(picked, need, args, up)
 
         # Which patches supply which axis is not arbitrary: put the odd one
@@ -323,17 +462,24 @@ def main():
                       axis=0)))
         print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
               f"({naive:.3f} if split by score)"
-              + ("  <- the grid would have a grain" if naive > 0.05 else ""))
+              + ("  <- the grid will have a grain" if axis_gap > 0.05 else ""))
 
         if args.cut:
             print(f"\n  assembling tiles (graph cut, {args.cut_res}px, "
                   f"band {args.cut_band})")
         else:
             print(f"\n  assembling tiles (feathered, blend {args.blend})")
+        subset = (minimal_codes(args.colours, args.colours)
+                  if (args.minimal or args.colours >= 3) and not args.complete
+                  else None)
+        if subset is not None and ci == 0:
+            print(f"  minimal set: {len(subset)} tiles per class over "
+                  f"{args.colours} colours (the complete set would be "
+                  f"{args.colours ** 4})")
         t, c = build_tile_set(h_patches, v_patches, args.size,
                               blend=args.blend, up_axis=up,
                               cut=args.cut, resolution=args.cut_res,
-                              band=args.cut_band)
+                              band=args.cut_band, codes=subset)
         all_tiles += t
         all_codes += c
         all_class += [ci] * len(t)
@@ -487,6 +633,8 @@ def main():
     print(f"  {cursor:,} splats total, {len(buf) / 1e6:.1f} MB")
     print(f"  wrote {dest}")
     print(f"  wrote {dest.with_suffix('.json')}")
+    # Keep the viewer's tileset menu honest without anyone editing a list.
+    reindex(dest.parent, quiet=True)
 
 
 if __name__ == "__main__":
