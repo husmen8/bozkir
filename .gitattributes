@@ -1,0 +1,9 @@
+# Text is stored with LF in the repository and checked out with the
+# platform's line endings; binaries are never touched.
+* text=auto
+
+*.png binary
+*.jpg binary
+*.splat binary
+*.ply binary
+*.zip binary

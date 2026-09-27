@@ -8,13 +8,9 @@ bozkir/popping.py for what that means and what it does not.
     python scripts/pop_metric.py frames/near_side --block 24 --search 16
     python scripts/pop_metric.py frames/a --against frames/b
 
-The intended use is an ablation: render the same camera path twice, once
-per ordering, and compare. --against does that in one call and prints the
-two side by side, which is the form the numbers want to be read in.
-
-Frames must be the same size in both sequences, and should come from the
-same camera path - otherwise the comparison is between two different
-journeys and says nothing about ordering.
+Meant as an ablation: the same camera path rendered once per ordering
+(the viewer's "capture both"), compared with --against. Both sequences
+must be the same size and the same path.
 """
 
 import argparse
@@ -31,31 +27,16 @@ SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
 
 
 def images_in(d):
-    """Image files directly inside a folder, in filename order.
-
-    Sorted by name rather than by modification time: a capture writes frames
-    faster than the clock resolves, and two frames written in the same
-    millisecond would otherwise come back in an arbitrary order.
-    """
+    """Image files directly inside a folder, in filename order (frames are
+    written faster than file times resolve)."""
     return sorted(p for p in d.iterdir()
                   if p.is_file() and p.suffix.lower() in SUFFIXES)
 
 
 def find_frames(folder):
-    """The frames for one run, allowing for one level of nesting.
-
-    Unzipping on Windows puts the contents inside a folder named after the
-    archive, so frames land in frames/topological/topological rather than in
-    frames/topological. Requiring people to flatten that by hand is a step
-    invented by this script for its own convenience, so it looks one level
-    down when the folder itself holds no images.
-
-    It does not merge several subfolders. Two runs sitting side by side
-    under one parent is exactly the mistake worth catching - the frames
-    would interleave into a sequence that never happened, and the metric
-    would report the difference between two orderings as if it were popping
-    within one.
-    """
+    """The frames for one run, looking one folder down if needed (Windows
+    unzips into a folder named after the archive). Several subfolders are
+    refused: two runs interleaved would read as popping."""
     d = Path(folder)
     if not d.is_dir():
         raise SystemExit(f'not a folder: {d}')
@@ -105,12 +86,9 @@ def report(label, paths, frames, args):
     print(f'  popped    peak    {s["fraction_peak"]:.3%}')
     print(f'  worst pair        {paths[worst].name} -> {paths[worst + 1].name}')
 
-    # A number this high is not a finding, it is the instrument at its
-    # limit. Block matching undoes a translation; a large turn changes the
-    # view enough that near and far parts of the scene move differently,
-    # which no per-block translation can remove. The leftover then counts as
-    # popping for every ordering alike, and two sequences that look quite
-    # different come out within a percent of each other.
+    # This high, it is the instrument at its limit: a large turn moves near
+    # and far differently, which per-block translation cannot undo, and
+    # every ordering scores alike.
     if s['fraction_mean'] > 0.25:
         print(f'  NOTE  {s["fraction_mean"]:.0%} of pixels called popped on '
               f'average. That is too high to')

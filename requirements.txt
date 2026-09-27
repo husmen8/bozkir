@@ -1,3 +1,11 @@
+# Python 3.10+. The browser tests and the Python/JS parity checks also need
+# Node 22 or newer on the path.
 numpy>=1.26
 plyfile>=1.0
-matplotlib>=3.8
+scipy>=1.11        # graph-cut seams (on by default) and floater removal
+Pillow>=10.0       # height maps, atlases, figures
+matplotlib>=3.8    # previews and figures
+
+# Optional: reading GeoTIFF surveys in scripts/validate_rule.py and
+# scripts/heightmap.py. Without it a plain-TIFF fallback is used.
+# rasterio>=1.3

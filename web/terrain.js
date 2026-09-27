@@ -1,22 +1,16 @@
-// Generating terrain in the browser: the same generator as
+// Terrain generation in the browser: the same generator as
 // bozkir/erosion.py, arithmetic for arithmetic.
 //
-// Stream power erosion solved the FastScape way (Braun and Willett,
-// Geomorphology 2013): every cell drains to its steepest neighbour, the
-// incision term is implicit, heights are updated receivers-first. Noise is
-// gradient noise from an integer hash, depressions are filled once with
-// Priority-Flood (Barnes, Lehman and Mulla 2014) at the start and the end.
-// docs/terrain.md has the
-// sources; the Python module's docstring has the reasoning.
+// Stream power erosion solved the FastScape way (Braun and Willett 2013),
+// gradient noise from an integer hash, Priority-Flood depression filling
+// (Barnes et al. 2014) at the start and the end. Sources in docs/terrain.md.
 //
-// This file and the Python one are held to the same output by
-// tests/test_pipeline.py through tests/bridge.mjs. That only works
-// because both do their floating-point work in the same order: the comments
-// marking an order are not style, they are the contract. Change one side,
-// change the other, and run the tests.
+// Held bit-identical to the Python by tests/test_pipeline.py through
+// tests/bridge.mjs, which only works because both do their floating-point
+// work in the same order - comments marking an order are the contract.
+// Change one side, change the other, run the tests.
 //
-// Pure functions, no DOM: runs in a worker (terrain-worker.js), in Node for
-// the tests, or on the main thread if it has to.
+// No DOM: runs in terrain-worker.js, and in Node for the tests.
 
 // ------------------------------------------------------------- profiles
 
@@ -60,10 +54,8 @@ export const PROFILES = {
   scree:     { dome: 0.35, octaves: 7, freq: 7, ridge: 0.7, relief: 1.0,
                iterations: 70, incision: 0.9, diffusion: 0.01 },
 };
-/** The profiles by kind of country, three each, in the order the terrain
- *  window shows them. A list of twelve names asks the reader to know what
- *  "piedmont" means; four kinds of place with three variations each only
- *  asks which kind of place they want. */
+/** The profiles by kind of country, in the order the terrain window shows
+ *  them: picking a kind of place is easier than knowing what "piedmont" means. */
 export const GROUPS = [
   { name: 'lowlands', profiles: ['plains', 'steppe', 'rolling'] },
   { name: 'hills', profiles: ['hills', 'terraced', 'foothills'] },

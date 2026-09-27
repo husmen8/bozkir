@@ -1,21 +1,10 @@
-"""Cutting patches out of a scene, placing copies of them, and rendering
-the result two different ways.
+"""Cutting patches out of a scene, turning and placing copies of them.
 
-The two ways are the whole point.
-
-`render_global` sorts every splat in the scene together, which is what a
-single-scene 3DGS renderer does. It is the best answer available under the
-usual per-splat-depth approximation.
-
-`render_tiled` sorts each tile independently and composites the tiles in
-tile order. That is what GSWT does (Section 3.4): tiles are pre-sorted
-once and never merged into a common buffer, because a tile set is
-instanced too many times to sort globally at runtime. It is also where the
-boundary artifact comes from - splats from adjacent tiles that should
-interleave in depth cannot, because they live in different layers.
-
-Rendering identical content both ways and subtracting isolates the
-artifact from everything else.
+Also two CPU renders of a tiled layout, used by the seam experiment
+(scripts/experiments/seam_baseline.py): `render_global` sorts every splat
+together; `render_tiled` sorts each tile alone and composites tiles in
+order, as GSWT does (3.4). Subtracting the two isolates the boundary
+artifact - splats of neighbouring tiles that cannot interleave.
 """
 
 import numpy as np
@@ -26,15 +15,10 @@ from .camera import Camera, project_perspective
 
 
 class PlaneIndex:
-    """Splats bucketed by ground-plane cell, built once per scene.
-
-    A patch search cuts a square at every candidate position - a thousand
-    of them on a large capture - and cutting by testing every splat made
-    each one a pass over the whole scene: on bigsur's ten million splats,
-    ten billion comparisons before anything was scored. Sorting the splats
-    into cells once means each cut only looks at the few cells its square
-    touches, and the result is the same splats in the same order.
-    """
+    """Splats bucketed by ground-plane cell, built once per scene, so each
+    candidate cut in a patch search looks only at nearby cells (on a
+    ten-million-splat scene the naive way was ten billion comparisons).
+    Same splats, same order, ~5x faster."""
 
     def __init__(self, s, up_axis=2, cell=0.5):
         self.plane = [i for i in range(3) if i != up_axis]
@@ -70,17 +54,12 @@ class PlaneIndex:
 
 
 def extract_patch(s, centre, size, up_axis=2, recentre=True, index=None):
-    """Cut a square patch out of the ground plane.
+    """Cut a square patch out of the ground plane, by ground-plane position
+    only, height unbounded (GSWT 3.2).
 
-    Membership is decided from the ground-plane position only; height is
-    unbounded. That is GSWT's patch rule (Section 3.2): they project to the
-    plane, cut there, and keep every Gaussian whose projected position
-    falls inside, ignoring depth entirely.
-
-    `centre` is a 2-vector in the ground plane. With `recentre`, the patch
-    comes back centred on the origin horizontally, which makes copies easy
-    to place. `index`, a PlaneIndex over `s`, makes the cut look only at
-    nearby splats; the result is identical.
+    `centre` is a 2-vector in the plane. `recentre` moves the patch to the
+    origin. `index`, a PlaneIndex over `s`, makes the cut faster with an
+    identical result.
     """
     plane = [i for i in range(3) if i != up_axis]
     centre = np.asarray(centre, dtype=np.float32).reshape(2)
@@ -114,12 +93,7 @@ def translate(s, offset):
 
 
 def merge(*scenes):
-    """Concatenate scenes into one. No blending, no deduplication.
-
-    This is the naive merge that Graph-GSReg characterises: overlapping
-    regions end up with redundant density, and nothing reconciles the two
-    sets of splats.
-    """
+    """Concatenate scenes into one. No blending, no deduplication."""
     scenes = [s for s in scenes if len(s)]
     if not scenes:
         raise ValueError("nothing to merge")
@@ -162,15 +136,9 @@ def render_global(cam, tiles, sh_degree=None, background=(0, 0, 0)):
 
 
 def render_tiled(cam, tiles, sh_degree=None, background=(0, 0, 0)):
-    """Each tile sorted alone, tiles composited in tile order.
-
-    Tile order here is by the depth of each tile's centre. GSWT does
-    something more careful - a topological sort derived from the boundary
-    normals between adjacent tiles - but for a small number of tiles the
-    two agree, and the artifact under study does not depend on which is
-    used. What matters is that splats in different tiles are never sorted
-    against each other.
-    """
+    """Each tile sorted alone, tiles composited by centre depth (GSWT uses a
+    topological sort; for a few tiles they agree). Splats in different
+    tiles are never sorted against each other."""
     layers = []
     for t in tiles:
         if not len(t):
@@ -196,13 +164,8 @@ def render_tiled(cam, tiles, sh_degree=None, background=(0, 0, 0)):
 
 def seam_camera(seam_point, distance, elevation_deg, azimuth_deg,
                 up_axis=2, **kw):
-    """A camera aimed at a point on a tile boundary.
-
-    `azimuth_deg` is measured from the seam direction: 0 looks along the
-    seam, 90 looks straight across it. GSWT (Section 3.4) reports the worst
-    artifacts on boundaries aligned with the view direction, which is the
-    0 case.
-    """
+    """A camera aimed at a tile boundary. `azimuth_deg` 0 looks along the
+    seam (GSWT 3.4's worst case), 90 straight across it."""
     seam_point = np.asarray(seam_point, dtype=np.float32).reshape(3)
     plane = [i for i in range(3) if i != up_axis]
     az = np.radians(azimuth_deg + 90.0)      # 0 -> along +y, the seam axis
@@ -220,18 +183,11 @@ def seam_camera(seam_point, distance, elevation_deg, azimuth_deg,
 def rotate_patch(p, quarter_turns, up_axis=2):
     """A patch turned about the vertical by a multiple of 90 degrees.
 
-    Used to make new edge colours out of old ground: a patch turned a
-    quarter is, to the eye, a different piece of ground - its features lie
-    elsewhere - while its splats are all real. Rotation cannot be applied to
-    a finished tile, because that would carry its edge codes round with it
-    and break the matching; applied to a patch *before* tiles are built, it
-    is just one more patch.
-
-    Positions and orientations are turned; colour is not. Lighting baked
-    into a capture turns with it, so shadows in a sunny capture point a new
-    way - the reason this is an option rather than a default. Higher-order
-    SH (view-dependent colour) is not rotated; .splat keeps only the
-    constant term, so nothing exported depends on it.
+    New edge colours from the same ground: turned a quarter, a patch reads
+    as different ground. Turning a finished tile would break Wang matching;
+    turning a patch before tiles are built does not. Positions and
+    orientations turn; baked shadows turn with them (why it is optional).
+    Higher-order SH is not rotated; .splat keeps only the constant term.
     """
     k = int(quarter_turns) % 4
     if k == 0:

@@ -1,36 +1,16 @@
-"""Reading landforms out of a height field.
+"""Reading landforms out of a height field, and height-field I/O.
 
-Hybrid Gaussian Wang Tiles (Zeng, Ma and Sander, SIGGRAPH 2026) selects
-which class of tile appears at a world position from a scalar field per
-class, the target coverage alpha_c(x). Their formulation takes that field
-as input; their tool has a person paint it.
+Hybrid Gaussian Wang Tiles (Zeng, Ma and Sander, SIGGRAPH 2026) picks a
+tile class per position from a coverage field alpha_c(x) that a person
+paints. Here it comes from the terrain, with standard geomorphometry:
 
-Nobody paints a ten-kilometre map. In procedural terrain the rule has to
-come from the terrain: gravel collects where water runs, bare rock shows on
-ridges where material is stripped, fines settle in hollows. That is how
-every terrain shader in every engine has always worked, and it is the
-opposite of painting regions.
+  slope   gradient magnitude; steep ground sheds material.
+  TPI     height minus the neighbourhood mean (Weiss 2001): positive on
+          ridges, negative in hollows, ~0 on slopes and flats.
+  flow    how much terrain drains through a cell; it traces channels.
 
-So this module computes alpha_c from the height field, and what it computes
-is not invented here. Geomorphometry has been classifying landforms from
-elevation for decades:
-
-  slope           the gradient magnitude. Steep ground sheds material.
-  TPI             a cell's height minus its neighbourhood mean. Positive is
-                  a ridge, negative a hollow, near zero a slope or a flat.
-                  Weiss (2001); the standard ten-class landform map comes
-                  from combining two neighbourhood sizes with slope.
-  flow            how much of the terrain drains through a cell. This is
-                  the one that produces channels, because it is the thing
-                  that makes channels.
-
-None of it needs training or a model. All of it is arithmetic on a grid.
-
-What is not standard is using the result to place captured material, and
-that is the part worth being careful about: the maps below are inputs to a
-decision, and the decision - which material belongs on a ridge - still has
-to come from somewhere. Deriving it by measurement rather than taste is the
-open question, not the classification.
+The maps are only inputs. Which material belongs on a ridge is still a
+choice, and deriving it by measurement is the open question.
 """
 
 import numpy as np
@@ -41,21 +21,15 @@ __all__ = ["gradient", "slope", "tpi", "curvature", "flow_accumulation",
            "height_from_points", "write_height_png",
            "read_height_png", "HEIGHT_ENCODING"]
 
-# The ten-class scheme these produce, in the order the codes run. Named to
-# match the geomorphometry literature so a map from here can be compared
-# with one from GRASS or ArcGIS without a translation table.
+# The ten-class scheme, named as in the geomorphometry literature so maps
+# compare with GRASS or ArcGIS directly.
 LANDFORMS = ["valley", "hollow", "footslope", "flat", "slope",
              "shoulder", "spur", "ridge", "peak", "pit"]
 
 
 def gradient(z, spacing=1.0):
-    """Partial derivatives of the surface, by central differences.
-
-    Edges use a one-sided difference rather than wrapping. Wrapping would
-    join the far side of the terrain to the near side and invent a cliff
-    along the seam, which then reads as a ridge and collects a material
-    that has no business being there.
-    """
+    """Partial derivatives by central differences. One-sided at the edges:
+    wrapping would invent a cliff (a fake ridge) along the seam."""
     z = np.asarray(z, dtype=np.float64)
     dy, dx = np.gradient(z, spacing)
     return dx, dy
@@ -68,12 +42,8 @@ def slope(z, spacing=1.0):
 
 
 def _box_mean(z, radius):
-    """Mean over a square neighbourhood, by summed-area table.
-
-    Constant time per cell whatever the radius, which matters because the
-    standard landform classification wants two very different radii and the
-    large one would otherwise dominate the cost.
-    """
+    """Mean over a square neighbourhood by summed-area table: constant cost
+    per cell whatever the radius."""
     r = int(max(1, radius))
     h, w = z.shape
     pad = np.pad(z, r, mode="edge")
@@ -88,29 +58,16 @@ def _box_mean(z, radius):
 
 
 def tpi(z, radius=8):
-    """Topographic position index: height above the local mean.
-
-    Positive on ridges and spurs, negative in hollows and valleys, near
-    zero on planar slopes and flats - which is why it cannot separate those
-    two on its own, and why `landform` below brings slope in as well.
-
-    The radius sets what counts as local, and it is the whole character of
-    the result: a small radius finds every boulder, a large one finds the
-    shape of the landscape. Neither is more correct.
-    """
+    """Topographic position index: height above the local mean. Cannot
+    separate slopes from flats on its own (landform adds slope). The radius
+    sets the scale: small finds boulders, large the landscape."""
     z = np.asarray(z, dtype=np.float64)
     return z - _box_mean(z, radius)
 
 
 def curvature(z, spacing=1.0):
-    """The Laplacian: how the surface bends.
-
-    Negative where the ground is convex and shedding, positive where it is
-    concave and collecting. Similar in spirit to TPI at a small radius, and
-    cheaper, but far noisier on a measured surface - it is a second
-    derivative, and a DSM's noise survives one differentiation to become
-    the signal in the next.
-    """
+    """The Laplacian: negative where convex (shedding), positive where
+    concave (collecting). Much noisier than TPI on a measured DSM."""
     z = np.asarray(z, dtype=np.float64)
     p = np.pad(z, 1, mode="edge")
     return ((p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
@@ -118,25 +75,11 @@ def curvature(z, spacing=1.0):
 
 
 def flow_accumulation(z, spacing=1.0):
-    """How much terrain drains through each cell.
+    """Cells drained through each cell (D8).
 
-    The single-direction method: every cell sends all of its water to its
-    lowest neighbour, and the totals are accumulated from the highest cell
-    downwards. Processing in descending height order means a cell's own
-    total is complete before it passes anything on, so one pass suffices
-    and no iteration is needed.
-
-    This is the map that produces branching channels, and it produces them
-    for the right reason - it is tracing where water actually goes on this
-    surface, not drawing something channel-shaped. Returns the count of
-    cells drained through each cell, so the value is in cells and scales
-    with the grid rather than with the terrain.
-
-    Sinks are not filled. A pit keeps whatever drains into it and passes
-    nothing on, which is what a pit does; filling them first is the right
-    move for hydrology over real catchments and unnecessary here, where the
-    interest is in where the channels run rather than where the water ends
-    up.
+    Each cell sends its water to its steepest-descent neighbour; processed
+    highest first, so one pass suffices. Pits are not filled: the interest
+    is where channels run, not where water ends up.
     """
     z = np.asarray(z, dtype=np.float64)
     h, w = z.shape
@@ -152,9 +95,8 @@ def flow_accumulation(z, spacing=1.0):
         for dx in (-1, 0, 1):
             if dx == 0 and dy == 0:
                 continue
-            # The neighbour's height, brought into this cell's position.
-            # Cells whose neighbour lies off the grid keep +inf and so are
-            # never chosen, which leaves the border draining inwards.
+            # Neighbour heights shifted into place; off-grid stays +inf, so
+            # the border drains inwards.
             nz = np.full((h, w), np.inf)
             ni = np.full((h, w), -1, dtype=np.int64)
             src_y = slice(max(0, dy), h + min(0, dy))
@@ -172,8 +114,7 @@ def flow_accumulation(z, spacing=1.0):
 
     to = best_to.ravel()
     acc = np.ones(h * w, dtype=np.float64)
-    # Highest first, so a cell's own total is complete before it passes
-    # anything downhill. One pass, no iteration.
+    # Highest first, so a cell's total is complete before it passes it on.
     for i in np.argsort(-flat, kind="stable"):
         j = to[i]
         if j >= 0:
@@ -183,17 +124,10 @@ def flow_accumulation(z, spacing=1.0):
 
 def landform(z, spacing=1.0, small=4, large=16, flat_slope=0.08,
              tpi_sd=1.0):
-    """The ten-class landform map, from two TPI radii and slope.
-
-    Weiss's scheme: a small neighbourhood says what the cell is doing
-    locally, a large one says where it sits in the landscape, and slope
-    separates a planar hillside from a flat. A cell high in both is a peak;
-    high locally but low regionally is a spur on a valley wall; near zero in
-    both is either a flat or an open slope depending on how steep it is.
-
-    Thresholds are in standard deviations of each TPI, not in metres, so
-    the same numbers work on a gentle survey and on a mountain.
-    """
+    """Weiss's ten-class landform map from two TPI radii and slope: the
+    small radius says what a cell does locally, the large where it sits in
+    the landscape, slope separates a hillside from a flat. Thresholds are
+    in standard deviations, so they work at any relief."""
     z = np.asarray(z, dtype=np.float64)
     t_small = tpi(z, small)
     t_large = tpi(z, large)
@@ -224,38 +158,23 @@ def landform(z, spacing=1.0, small=4, large=16, flat_slope=0.08,
 
 
 def coverage(z, spacing=1.0, rules=None, sharpness=2.0, **kw):
-    """Target coverage per class, the alpha_c(x) of Hybrid GSWT Eq. 1.
+    """Soft per-class coverage, alpha_c(x) of Hybrid GSWT Eq. 1, for analysis.
 
-    The soft, per-class form, for analysis. The decision the viewer
-    actually draws - with altitude, sediment, the median filter and the
-    quantile threshold - is `bozkir.landform.classify`, a port of
-    web/landform.js held to it by the tests. Use that one to measure the
+    The decision the viewer draws (altitude, sediment, median filter,
+    quantile threshold) is bozkir.landform.classify; use that to measure the
     rule.
 
-    `rules` maps a class name to a function of the terrain maps, returning
-    an unnormalised weight per cell. The default is deliberately the
-    simplest thing that is defensible rather than a tuned one: material
-    collects where water runs and where the ground is concave, and is
-    stripped where it is steep and convex.
-
-    Returned normalised so the classes sum to one at every cell, because
-    that is what a coverage is, and because their selection takes the
-    largest and a field that did not sum to one would let one class win
-    everywhere by being scaled up.
-
-    `sharpness` is how decisively the rule picks: 1 blends broadly, large
-    values approach a hard boundary. It exists because the right answer is
-    a judgement about how a landscape looks, not something the terrain can
-    settle.
+    `rules` maps a class name to a function of the maps. Default: material
+    collects where water runs and ground is concave, and is stripped where
+    steep and convex. Normalised to sum to one per cell. `sharpness` is how
+    hard the boundary is (1 blends broadly).
     """
     z = np.asarray(z, dtype=np.float64)
     s = slope(z, spacing)
     t = tpi(z, kw.get("radius", 8))
     f = flow_accumulation(z, spacing)
 
-    # Flow spans orders of magnitude - a main channel drains thousands of
-    # cells and a hillside drains one - so it is used as a log, which is
-    # also how it is always mapped.
+    # Flow spans orders of magnitude, so it is used as a log.
     lf = np.log1p(f)
 
     def unit(a):
@@ -281,22 +200,16 @@ def coverage(z, spacing=1.0, rules=None, sharpness=2.0, **kw):
 
 
 # --- reading a measured surface ----------------------------------------
-#
-# A digital surface model is the usual source for everything above, so
-# loading one belongs beside the analysis rather than inside the script
-# that happens to call it first. scripts/heightmap.py is a wrapper over
-# these, the same as every other script in that folder.
 
 NODATA_BELOW = -1000.0
 
 
 def read_dsm(path):
-    """Height in metres and a mask of what is real.
+    """Height in metres, a validity mask and the pixel size (or None).
 
-    rasterio when it is installed, since it knows the file's own nodata
-    value; PIL otherwise, which reads the pixels but not the metadata, so
-    the sentinel has to be guessed from the values. Both paths are used -
-    the fallback is what runs on a machine that only has Pillow.
+    rasterio when installed (it knows the nodata value); otherwise Pillow,
+    with nodata guessed from the values. Also reads plain TIFFs with no
+    georeferencing, unlike validate.read_geotiff.
     """
     try:
         import rasterio
@@ -310,9 +223,7 @@ def read_dsm(path):
         good &= a > NODATA_BELOW
         return a, good, res
     except ImportError:
-        # Imported here rather than at the top: everything else in this
-        # module is numpy alone, and a machine doing terrain analysis on an
-        # array it already has should not need Pillow installed to do it.
+        # Imported here: the rest of this module needs numpy only.
         from PIL import Image
         a = np.asarray(Image.open(path)).astype(np.float64)
         if a.ndim == 3:
@@ -322,14 +233,9 @@ def read_dsm(path):
 
 
 def largest_rectangle(mask):
-    """The largest all-True axis-aligned rectangle, as (top, left, h, w).
-
-    Row by row, keeping for each column how many valid rows reach up to
-    here; each row is then a histogram whose largest rectangle is the
-    classic stack scan. Linear in pixels, which matters because a DSM is
-    a few hundred thousand of them and the obvious four-nested-loop
-    version is not.
-    """
+    """The largest all-True axis-aligned rectangle, (top, left, h, w).
+    Row by row with a column-height histogram and the classic stack scan:
+    linear in pixels."""
     if not mask.any():
         return (0, 0, 0, 0)
     rows, cols = mask.shape
@@ -355,22 +261,13 @@ def largest_rectangle(mask):
 
 def height_from_points(xyz, up_axis=2, resolution=192, percentile=15.0,
                        fill=True):
-    """A height grid rasterised from a point cloud.
+    """A height grid rasterised from a point cloud, for captures without a
+    DSM.
 
-    Drone surveys come with a DSM; a phone capture does not. But every
-    capture of ground contains the ground, and the patch search already
-    asks where it is column by column - this does the same thing across the
-    whole scene and keeps the answer.
-
-    `percentile` rather than the minimum: the lowest point in a column is
-    as likely to be a floater below the surface as the surface itself, and
-    one such point drags a whole cell down into a spike. The fifteenth
-    percentile is under the grass and above the noise.
-
-    Empty cells are filled from their neighbours by repeated averaging,
-    which is the cheapest thing that produces a continuous surface. It
-    invents terrain where there was no capture, so `fill=False` leaves them
-    as NaN for a caller that would rather crop than invent.
+    The 15th percentile per column rather than the minimum, which a single
+    floater below the surface would drag into a spike. Empty cells are
+    filled by repeated neighbour averaging (invented terrain); `fill=False`
+    leaves them NaN.
     """
     xyz = np.asarray(xyz, dtype=np.float64)
     axes = [a for a in (0, 1, 2) if a != up_axis]
@@ -380,8 +277,7 @@ def height_from_points(xyz, up_axis=2, resolution=192, percentile=15.0,
     lo_u, hi_u = np.percentile(u, [1, 99])
     lo_v, hi_v = np.percentile(v, [1, 99])
     span = max(hi_u - lo_u, hi_v - lo_v, 1e-9)
-    # Square cells: a grid stretched to the cloud's bounding box would make
-    # slope and flow depend on which way the capture happened to be walked.
+    # Square cells, so slope and flow do not depend on the capture's shape.
     cu = (lo_u + hi_u) / 2, (lo_v + hi_v) / 2
     iu = np.clip(((u - cu[0]) / span + 0.5) * (n - 1), 0, n - 1).astype(int)
     iv = np.clip(((v - cu[1]) / span + 0.5) * (n - 1), 0, n - 1).astype(int)
@@ -412,35 +308,19 @@ def height_from_points(xyz, up_axis=2, resolution=192, percentile=15.0,
 
 # --- storing a height field --------------------------------------------
 #
-# A height field has to reach the browser at more than eight bits. A nine
-# metre range in 256 steps is 3.5 cm per step, which terraces visibly on a
-# gentle slope - and worse, it manufactures flat plateaus, and flow routing
-# treats every flat cell as a sink. So quantisation does not only look bad;
-# it breaks the drainage the material rule reads.
-#
-# A 16-bit greyscale PNG was the obvious answer and does not work. The
-# browser decodes an image into a canvas at eight bits per channel whatever
-# the file held, and a greyscale image comes back with red, green and blue
-# all equal to the high byte. The low byte is simply gone, silently, in
-# every browser, and the field arrives at 8 bits while the file on disk
-# claims 16.
-#
-# So the two bytes are written into two channels deliberately: the high
-# byte in red, the low in green, in an ordinary 8-bit colour PNG. Nothing
-# about that depends on how a browser treats 16-bit images, because there
-# is no 16-bit image anywhere. Blue repeats the high byte so the file still
-# looks like the terrain when opened in an image viewer, rather than like
-# noise.
+# Heights must reach the browser at more than 8 bits: 256 steps over 9 m is
+# 3.5 cm, which terraces gentle slopes and makes flats that flow routing
+# reads as sinks. A 16-bit greyscale PNG does not work - browsers decode it
+# to 8 bits per channel. So the two bytes go into red (high) and green (low)
+# of an ordinary 8-bit RGB PNG; blue repeats the high byte so the file still
+# looks like terrain in an image viewer.
 
 HEIGHT_ENCODING = "rg16"
 
 
 def write_height_png(a, path):
-    """Write a height field at 16 bits, split across two 8-bit channels.
-
-    Normalises to the full range first, and returns the normalised array
-    so the caller can record what it wrote.
-    """
+    """Write a height field at 16 bits across two 8-bit channels.
+    Returns the normalised (0..1) array that was written."""
     from PIL import Image
     a = np.asarray(a, dtype=np.float64)
     lo, hi = float(np.nanmin(a)), float(np.nanmax(a))
@@ -454,13 +334,8 @@ def write_height_png(a, path):
 
 
 def read_height_png(path, encoding=HEIGHT_ENCODING):
-    """Read a height field back, in 0..1.
-
-    Older files were written as 16-bit greyscale; those are read as they
-    are. The two-channel encoding is only assumed when asked for, so an
-    ordinary image passed in by mistake is read as greyscale rather than
-    being misinterpreted as bytes.
-    """
+    """Read a height field back, in 0..1. Older 16-bit greyscale files are
+    read as they are; the two-channel encoding only when asked for."""
     from PIL import Image
     im = Image.open(path)
     if encoding == HEIGHT_ENCODING and im.mode in ("RGB", "RGBA"):

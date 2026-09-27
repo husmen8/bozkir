@@ -1,22 +1,20 @@
-"""Named settings, so a working command line survives being closed.
-
-Getting a good export out of a scene takes a dozen flags found by trial and
-error, and a flag list is a bad place to keep a result. A preset records
-what worked under a name, and `--preset name` replays it.
-
-Presets set defaults, so anything given on the command line still wins:
+"""Named capture settings: a dozen flags found by trial and error, kept
+under a name. `--preset name` replays them; anything on the command line
+still wins:
 
     python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur
     python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur --size 2.0
     python scripts/export_wang.py data/raw/x.ply --clean --flip --save-preset x
 
-The file is plain JSON at presets.json, meant to be read and edited by hand.
+Stored in capture_presets.json at the repository root (hand-editable),
+found from this file's location so it works from any folder. Not to be
+confused with web/views.json, the viewer's settings.
 """
 
 import json
 from pathlib import Path
 
-PRESETS = Path("presets.json")
+PRESETS = Path(__file__).resolve().parents[1] / "capture_presets.json"
 
 
 def load_all(path=PRESETS):
@@ -45,13 +43,8 @@ def add_preset_args(parser, path=PRESETS):
 
 
 def apply(parser, argv=None, path=PRESETS):
-    """Parse arguments with a preset supplying the defaults.
-
-    Two passes: the first only reads --preset, the second parses properly
-    with that preset's values as defaults. Anything typed explicitly
-    overrides the preset, because argparse prefers a given value to a
-    default.
-    """
+    """Parse arguments with a preset supplying the defaults: one pass reads
+    --preset, the second parses with its values as defaults."""
     presets = load_all(path)
 
     # A separate parser for the peek: the real one has required positionals,
@@ -77,10 +70,8 @@ def apply(parser, argv=None, path=PRESETS):
             raise SystemExit(
                 f"no preset called {name!r}. "
                 f"Known: {', '.join(sorted(presets)) or 'none'}")
-        # One preset per scene should work with every script, so settings
-        # this script has no option for are skipped rather than fatal:
-        # export_wang knows --cut, render_view does not, and both should be
-        # able to say --preset bigsur.
+        # Settings this script has no option for are skipped, so one preset
+        # works with every script.
         known = {a.dest for a in parser._actions}
         values = {k: v for k, v in presets[name].items() if k in known}
         skipped = sorted(set(presets[name]) - known)

@@ -2,17 +2,14 @@
 
     python tests/run_all.py
     python tests/run_all.py --quick     skip the PLY-backed suite
+    python tests/run_all.py --strict    a skipped suite fails the run (CI)
 
-There are three, because they need three different things: the Python
-package needs numpy and plyfile, the popping metric needs numpy alone, and
-the browser modules need node. Splitting them is what lets each be run
-where it makes sense - the metric suite on a machine with no PLY stack, the
-browser suite from a terminal with no Python at all. This file exists so
-that "did I break anything" is still one command.
+Three suites with different needs: the package (numpy, scipy, plyfile),
+the pipeline (adds Pillow, and node for the Python/JS parity checks), and
+the browser modules (node only).
 
-A missing dependency is reported as skipped rather than failed. A suite
-that cannot run is not a suite that failed, and conflating the two teaches
-people to ignore the output.
+A missing dependency is reported as skipped, not failed. In CI everything
+is installed, so --strict makes a skip (a missing module or file) fail.
 """
 
 import argparse
@@ -43,6 +40,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--quick', action='store_true',
                     help='skip the suite that needs the PLY stack')
+    ap.add_argument('--strict', action='store_true',
+                    help='treat a skipped suite as a failure')
     args = ap.parse_args(argv)
 
     results = []
@@ -55,10 +54,7 @@ def main(argv=None):
             continue
 
         print(f'\n=== {name} ' + '=' * (60 - len(name)))
-        # stderr is captured rather than inherited so a missing import can be
-        # told apart from a failing assertion. Both exit 1, and reporting an
-        # uninstalled dependency as a test failure would send someone
-        # looking for a bug that is not there.
+        # stderr captured to tell a missing import from a failed assertion.
         p = subprocess.run(cmd, cwd=ROOT, stderr=subprocess.PIPE, text=True)
         err = p.stderr or ''
         missing = None
@@ -88,7 +84,7 @@ def main(argv=None):
         return 1
     if skipped:
         print(f'\nall runnable suites passed, {len(skipped)} skipped')
-        return 0
+        return 1 if args.strict else 0
     print('\neverything passed')
     return 0
 

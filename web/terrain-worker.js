@@ -1,6 +1,5 @@
-// Runs the terrain generator off the main thread. A 512 alpine terrain is
-// several seconds of arithmetic; on the page itself that is several
-// seconds of a frozen viewer.
+// Runs the terrain generator off the main thread (a 512 alpine terrain is
+// several seconds of work).
 //
 //   in:   { id, spec }                 spec as generate() in terrain.js
 //   out:  { id, progress }             once per erosion step, 0..1

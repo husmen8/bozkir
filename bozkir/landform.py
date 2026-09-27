@@ -1,25 +1,15 @@
 """The material rule, the same one the viewer runs.
 
-A line-for-line port of `web/landform.js`. The browser decides which class
-each cell gets; this module makes the same decision in Python, so that the
-rule can be measured - against a real survey in `scripts/validate_rule.py`,
-and in figures - using the code that is actually drawn rather than a
-look-alike.
+A line-for-line port of web/landform.js, so the rule can be measured
+(scripts/validate_rule.py, figures) with the code that is actually drawn.
+Separate from terrain.coverage, which is the soft per-class coverage for
+analysis; this is the viewer's hard decision with everything it adds (fine
+sampling, max-pooled drainage, altitude, sediment, median filter, quantile
+threshold).
 
-It is kept separate from `bozkir/terrain.py` on purpose. `terrain.coverage`
-is the soft, per-class coverage of Hybrid GSWT's Eq. 1 and is useful for
-analysis; `classify` here is the viewer's hard decision, with everything the
-viewer adds on top (fine sampling, max-pooled drainage, altitude, the
-sediment record, a median filter and a quantile threshold). The two answer
-different questions and should not be confused.
-
-`tests/test_pipeline.py` runs both implementations, through tests/bridge.mjs,
-on the same height fields
-and requires the same class in every cell. If you change one, change the
-other, and that test tells you when you have not.
-
-Names and argument order follow the JavaScript, including flat arrays in
-row-major order of length n*n, so the two read side by side.
+tests/test_pipeline.py runs both implementations through tests/bridge.mjs
+and requires the same class in every cell: change one, change the other.
+Names, argument order and flat row-major arrays follow the JavaScript.
 """
 
 import json
@@ -27,8 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-# The rule's weights, shared with the viewer: web/rule.json is the only
-# place they are written.
+# The rule's weights, shared with the viewer; written only in web/rule.json.
 RULE_PATH = Path(__file__).resolve().parents[1] / "web" / "rule.json"
 RULE = json.loads(RULE_PATH.read_text())
 
@@ -220,12 +209,8 @@ def quantile(values, q):
 
 
 def _tie_hash(count):
-    """The per-cell hash landform.js uses on featureless terrain.
-
-    Reproduces JavaScript's number semantics exactly: the multiply happens
-    in doubles (not Math.imul), then ToUint32. Only reached when every cell
-    ties, so it only matters for a flat field, but there it decides the map.
-    """
+    """The per-cell hash landform.js uses when every cell ties (flat
+    terrain). JS semantics exactly: multiply in doubles, then ToUint32."""
     def u32(x):
         # ToUint32 on an integral double: truncate, then wrap.
         return np.mod(np.trunc(x), 4294967296.0)
@@ -284,7 +269,7 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     maps = {"slope": s, "tpi": t, "flow": f, "elevation": e,
             "sediment": sed, "drive": drive}
     if rules is None:
-        # From web/rule.json, the same file the viewer imports.
+        # From web/rule.json, the same file the viewer loads.
         def midband(v):
             return 1 - 2 * np.abs(v - 0.5)
 
@@ -395,15 +380,12 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     runner_up = np.where(moved, top, runner_up)
     margin = np.where(moved, 0.0, margin)
 
-    # Sharpness lands here and only here: with a quantile threshold it
-    # cannot move the boundary (a quantile is a rank, and a power leaves
-    # ranks alone), so what it controls is the width of the undecided band
-    # that gets drawn as a per-splat dissolve. See web/landform.js.
+    # Sharpness acts only here, on the width of the undecided band
+    # (a power cannot move a quantile boundary). See web/landform.js.
     scale = max(quantile(margin, 0.9), 1e-9)
     strength = np.minimum(1.0, np.power(margin / scale, 1 / max(sharp, 1e-6)))
-    # Python-only extra: the signed field the decision thresholds, positive
-    # where class 0 wins. A ranking of cells, so the rule can be scored
-    # without committing to a threshold (scripts/validate_rule.py).
+    # Python only: the signed field the decision thresholds (positive
+    # where class 0 wins), so the rule can be scored as a ranking.
     lead = (stack[0] - stack[1:].max(axis=0)) if classes > 1 else np.zeros(n * n)
     return {"cls": cls, "strength": strength, "lead": lead,
             "runner_up": runner_up,

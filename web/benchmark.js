@@ -1,19 +1,9 @@
 // Finding where the renderer stops keeping up.
 //
-// The grid slider goes to 24 and nobody knows what happens at 32, or which
-// of several things gives out first. Guessing produces a cautious limit
-// that is probably wrong in both directions: too low to show what the
-// technique can do, and too high on a weaker machine.
-//
-// So it is measured. The sweep sets a grid size, holds the camera still,
-// waits for the sort and the merge to settle, then averages over a fixed
-// number of frames. Each row is one grid size; reading down the table shows
-// which quantity turns over first - frame time, the sort, or the splat
-// count - and that says what to fix rather than merely what the ceiling is.
-//
-// Holding the camera still matters. Frame rate during a turn mixes in the
-// re-sort and the LOD cross-fade, which is a different measurement, and one
-// that moves depending on how fast the mouse was going.
+// For each grid size: hold the camera still (a turn mixes in re-sorts and
+// LOD fades), wait for sort and merge to settle, average over a fixed
+// number of frames. Reading down the table shows which gives out first -
+// frame time, the sort or the draw calls - which says what to fix.
 
 const SETTLE_FRAMES = 8;
 const MEASURE_FRAMES = 40;
@@ -59,15 +49,13 @@ export class Benchmark {
     if (this.settled < SETTLE_FRAMES) { this.settled++; return; }
 
     const r = this.read();
-    // dt of zero happens on the first frame after a tab regains focus, and
-    // an infinite frame rate poisons the average it lands in.
+    // dt is 0 on the first frame after the tab regains focus.
     if (dt > 0) this.samples.push({ dt, ...r });
 
     if (this.samples.length >= MEASURE_FRAMES) {
       const mean = (k) => this.samples.reduce((t, s) => t + s[k], 0)
                           / this.samples.length;
-      // The slowest frames are what a person notices, so the worst is
-      // carried alongside the mean rather than averaged away.
+      // The worst frame is what people notice; kept beside the mean.
       const worst = Math.max(...this.samples.map((s) => s.dt));
       const row = {
         grid: this.sizes[this.i],
@@ -85,12 +73,8 @@ export class Benchmark {
   }
 }
 
-/** The measured rows as a table, plus what they say.
- *
- *  A number on its own invites the wrong conclusion. 30 fps at grid 32 is
- *  fine if the sort is idle and the frame is fill-bound, and a problem if
- *  the sort is taking 40 ms, because those have different fixes.
- */
+/** The measured rows as a table, plus which limit they point at (the same
+ *  fps means different fixes if the sort or the fill is the bottleneck). */
 export function report(rows) {
   if (!rows.length) return 'nothing measured';
   const lines = [];

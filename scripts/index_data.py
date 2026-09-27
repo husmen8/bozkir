@@ -3,10 +3,8 @@
     python scripts/index_data.py
     python scripts/index_data.py --dir web/data
 
-A static server cannot be asked what is in a folder, so the viewer reads
-this file instead and offers the tilesets and terrains it names. The tools
-that write into the folder rebuild it themselves; run this after moving,
-renaming or deleting files by hand.
+The exporters rebuild it themselves; run this after moving or deleting
+files by hand.
 """
 
 import argparse

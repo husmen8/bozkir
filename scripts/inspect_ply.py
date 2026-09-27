@@ -1,14 +1,10 @@
-"""Measure a 3DGS scene. Nine probes, each answering a question that
-affects a later design decision.
+"""Measure a 3DGS capture: up axis, planarity, splat shape and footprint,
+spacing against size, depth complexity, cost of dropping SH - the numbers
+that say whether it can become tiles (see docs/captures.md).
 
-Run from the repo root:
+    python scripts/inspect_ply.py data/raw/desert.ply
 
-    python scripts/inspect_ply.py data/raw/minecraft.ply 
-
-    
-
-Prints a report and writes out/probe_<name>.png. Nothing here modifies the
-scene; it only measures it.
+Prints a report and writes out/probe_<name>.png; the scene is not changed.
 """
 
 import argparse

@@ -3,13 +3,9 @@
     python scripts/figures.py            all of them, into docs/
     python scripts/figures.py rule       only those whose name contains 'rule'
 
-Every number drawn here is computed on the spot - the rule by
-bozkir/landform.py (held to the viewer's web/landform.js by the tests), the
-ordering by the same probe as scripts/probe_order.py - so a figure cannot
-drift from the code the way a pasted screenshot can.
-
-Renders of the splats themselves still come from the viewer; these are the
-maps and measurements behind them.
+Everything is computed on the spot (the rule by bozkir/landform.py, the
+ordering by scripts/probe_order.py), so a figure cannot drift from the code.
+Screenshots of the viewer are separate (docs/hero*.jpg).
 """
 
 import argparse
@@ -23,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from bozkir.erosion import generate                       # noqa: E402
 from bozkir.landform import classify                      # noqa: E402
-from bozkir.terrain import read_height_png                # noqa: E402
 
 N = 24          # the grid the README's settings use
 OVER = 4        # the viewer samples the terrain 4x per tile
@@ -69,10 +64,8 @@ def hillshade(z, az=315, alt=40):
 def terrain(seed):
     """The desert scene's terrain for seed 0 (read from web/data if it is
     there), otherwise generated with the same settings."""
-    # Generated rather than read from web/data: the generator is
-    # deterministic and bit-identical to the viewer's, so this is the same
-    # ground `terrain_gen.py --profile desert` writes, and a figure cannot
-    # silently depend on whichever height file happens to be on disk.
+    # Generated, not read from web/data, so the figure does not depend on
+    # whichever height file is on disk.
     z, sed = generate(size=512, seed=seed, profile="desert")
     return z, sed
 
@@ -252,12 +245,8 @@ def _wang_layout(tiles, want, seed=0):
 
 
 def fig_map(out):
-    """The rule off and on, rendered from the tiles themselves.
-
-    Not a screenshot: every cell is the real tile the viewer's layout would
-    put there, rendered straight down, with the terrain as shading. The
-    only difference between the panels is where each class goes.
-    """
+    """The rule off and on, rendered from the real tiles straight down with
+    the terrain as shading; only where each class goes differs."""
     plt = _plt()
     tiles, imgs = _tile_images()
     res = imgs[0].shape[0]
@@ -291,18 +280,33 @@ def fig_map(out):
 
 
 def fig_profiles(out):
-    """The twelve named terrains at one seed: what the generator can make."""
+    """Every named terrain at one seed, a row per group as the terrain
+    window shows them: what the generator can make."""
     from bozkir.erosion import PROFILES
+    # The grouping of GROUPS in web/terrain.js. Checked against PROFILES so
+    # a profile added on one side cannot silently go missing here.
+    groups = [("lowlands", ["plains", "steppe", "rolling"]),
+              ("hills", ["hills", "terraced", "foothills"]),
+              ("desert", ["desert", "dunes", "badlands", "buttes"]),
+              ("highlands", ["mesa", "plateau", "canyon", "gorge", "piedmont"]),
+              ("mountains", ["ridges", "alpine", "crags", "scree"])]
+    listed = [n for _, names in groups for n in names]
+    assert sorted(listed) == sorted(PROFILES), "figure groups out of date"
     plt = _plt()
-    names = list(PROFILES)
-    fig, ax = plt.subplots(3, 4, figsize=(13, 10))
-    for a, name in zip(ax.ravel(), names):
-        z, _ = generate(size=256, seed=0, profile=name)
-        a.imshow(hillshade(z), cmap="gray")
-        a.contour(z, levels=8, colors="k", linewidths=0.3, alpha=0.5)
-        a.set_title(name)
-        a.set_xticks([])
-        a.set_yticks([])
+    cols = max(len(names) for _, names in groups)
+    fig, ax = plt.subplots(len(groups), cols, figsize=(2.6 * cols, 2.8 * len(groups)))
+    for row, (group, names) in zip(ax, groups):
+        for k, a in enumerate(row):
+            a.set_xticks([])
+            a.set_yticks([])
+            if k >= len(names):
+                a.axis("off")
+                continue
+            z, _ = generate(size=256, seed=0, profile=names[k])
+            a.imshow(hillshade(z), cmap="gray")
+            a.contour(z, levels=8, colors="k", linewidths=0.3, alpha=0.5)
+            a.set_title(names[k])
+        row[0].set_ylabel(group, fontsize=12)
     fig.suptitle("Named terrains, seed 0: noise, then stream power erosion "
                  "(FastScape scheme)")
     fig.savefig(out / "fig_profiles.png")

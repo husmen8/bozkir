@@ -1,19 +1,11 @@
-// A tileset made in the browser, for when there is no capture to show.
+// A tileset made in the browser, for when there is no capture to show
+// (?scene=starter, or when nothing loads): a Wang set in the same format an
+// export writes, built in a few milliseconds.
 //
-// The viewer should never open onto nothing - not for somebody following a
-// link, and not on a fresh copy of the repository with an empty data
-// folder. So when no scene can be loaded, this makes one: a Wang tile set
-// of the same format an export writes, generated in a few milliseconds.
-//
-// It is also the plainest explanation of how the tiling works. Each tile
-// is four triangles, one per edge, and each triangle takes the colour of
-// its edge - exactly the construction the real tiles use (Cohen et al.
-// 2003), with colours standing in for patches of captured ground. Shared
-// edges therefore match by construction, and the four-way meeting at each
-// corner shows the one place Wang tiles cannot guarantee a match.
-//
-// Two materials, moss and sand, so the material rule, the blending and the
-// class overlay all have something to act on from the first moment.
+// Each tile is four triangles, one per edge, coloured by that edge - the
+// same construction as the real tiles (Cohen et al. 2003) with colours in
+// place of captured patches. Two materials, moss and sand, so the rule,
+// blending and class view have something to act on.
 
 const STRIDE = 32;
 

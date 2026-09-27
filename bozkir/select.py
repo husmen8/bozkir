@@ -1,27 +1,16 @@
-"""Selecting parts of a scene, and throwing away the parts that are noise.
+"""Cropping a scene and removing noise: floaters (splats in empty space)
+and the coarse background shell of a 360-degree capture.
 
-Two jobs that turn out to be the same code.
-
-Cleaning: captured scenes carry floaters (splats hanging in empty space,
-supported by no real geometry) and a coarse background shell meant to be
-viewed from inside. Both ruin a close view of the subject.
-
-Patch extraction: GSWT (Section 3.2) builds tiles by choosing a region on
-the ground plane and keeping every Gaussian whose projected position falls
-inside it - height is ignored entirely. That is a crop with the vertical
-axis left unbounded.
+Patch extraction is also a crop, but lives in bozkir/tile.py next to the
+plane index that makes it fast.
 """
 
 import numpy as np
 
 
 def crop_box(s, lo, hi, axes=(0, 1, 2)):
-    """Keep splats whose centres lie inside an axis-aligned box.
-
-    `axes` chooses which axes are tested. Leaving one out makes the box
-    unbounded along it, which is what patch extraction wants: GSWT decides
-    membership from the ground-plane position alone and ignores height.
-    """
+    """Keep splats whose centres lie inside an axis-aligned box; axes left
+    out of `axes` are unbounded."""
     lo = np.atleast_1d(np.asarray(lo, dtype=np.float32))
     hi = np.atleast_1d(np.asarray(hi, dtype=np.float32))
     axes = list(axes)
@@ -34,12 +23,8 @@ def crop_box(s, lo, hi, axes=(0, 1, 2)):
 
 
 def crop_cylinder(s, centre, radius, up_axis=2, height=None):
-    """Keep splats within `radius` of a vertical axis through `centre`.
-
-    Better than a box for framing a single subject: a box crops the corners
-    at a different distance than the sides, which shows up as straight cuts
-    in the background.
-    """
+    """Keep splats within `radius` of a vertical axis through `centre` (a
+    box would crop the corners at a different distance than the sides)."""
     centre = np.asarray(centre, dtype=np.float32).reshape(3)
     plane = [i for i in range(3) if i != up_axis]
 
@@ -52,27 +37,17 @@ def crop_cylinder(s, centre, radius, up_axis=2, height=None):
 
 
 def remove_large(s, max_extent):
-    """Drop splats whose longest axis exceeds `max_extent` world units.
-
-    The background shell of a 360-degree capture is a small number of very
-    large splats. They carry most of the screen area and none of the detail.
-    """
+    """Drop splats longer than `max_extent` world units: the background
+    shell is a few huge splats with most of the area and no detail."""
     keep = s.scale.max(axis=1) <= max_extent
     return s.subset(keep), keep
 
 
 def remove_floaters(s, k=8, std_ratio=2.0, weight_by_opacity=True):
-    """Statistical outlier removal.
-
-    For each splat, measure the mean distance to its k nearest neighbours.
-    Splats sitting in empty space have no close neighbours, so that distance
-    is large. Anything beyond `std_ratio` standard deviations above the mean
-    is dropped.
-
-    This is the standard point-cloud filter (Rusu et al. 2008), applied to
-    Gaussian centres. It does not know about opacity or size, so nearly
-    transparent splats are kept unless `weight_by_opacity` also removes them.
-    """
+    """Statistical outlier removal (Rusu et al. 2008) on splat centres: drop
+    splats whose mean distance to their k nearest neighbours is more than
+    `std_ratio` standard deviations above average. Very opaque splats are
+    kept when `weight_by_opacity`."""
     try:
         from scipy.spatial import cKDTree
     except ImportError as e:

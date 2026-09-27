@@ -1,31 +1,16 @@
-// A height field read from an image instead of computed from sine waves.
+// Height fields: loaded from a PNG, or generated in the browser.
 //
-// The surface the tiles are laid on was two sine waves: smooth, periodic,
-// and with no drainage anywhere. That is enough to check that warping and
-// the tangent frame work, and it is useless for anything that depends on
-// terrain being terrain. Water does not run anywhere on a sine wave; there
-// are no channels for loose material to collect in and no ridges for it to
-// be stripped from. Which is exactly what a rule that places material by
-// landform needs to read.
+// The built-in surface is two sine waves - enough to test warping, but
+// water runs nowhere on it, so a rule that places material by landform has
+// nothing to read. scripts/heightmap.py and terrain_gen.py write the pair
+// loaded here: a 16-bit PNG of heights in 0..1 and a JSON sidecar. The
+// source can be a drone DSM, a capture's height grid or an eroded field.
 //
-// scripts/heightmap.py writes the pair this loads: a 16-bit PNG of heights
-// normalised to 0..1, and a sidecar saying what those map to in metres. The
-// source can be a drone survey's DSM, a height grid rasterised out of a
-// capture, or an eroded procedural field - this side does not care, which
-// is the point of going through a file.
-//
-// Sampling is bilinear and clamped at the edges. Nearest-neighbour would
-// put a visible step at every texel, and the tangent frame is computed from
-// finite differences of this function, so a stepped height field gives a
-// normal that flips about rather than turning.
+// Sampling is bilinear: nearest-neighbour steps would make the tangent
+// frame (finite differences of this) flip about.
 
-/** Load a height field written by scripts/heightmap.py.
- *
- *  `name` is the tileset's name, so `desert` looks for desert.height.png
- *  beside desert.splat. Returns null when there is none, which is not an
- *  error: most scenes have no height field and fall back to the analytic
- *  surface.
- */
+/** Load <name>.height.png/.json from `base`. Returns null when there is
+ *  none, which is normal: most scenes fall back to the analytic surface. */
 export async function loadHeightField(base, name) {
   let meta = null;
   try {
@@ -50,12 +35,8 @@ export async function loadHeightField(base, name) {
   const out = new HeightField(z, w, h, meta, name);
   out.sixteenBit = sixteen;
 
-  // The generator also records where sediment settled. The rule can infer
-  // where loose material would collect from the shape of the surface, and
-  // does when there is nothing better - but on generated terrain there is
-  // something better, because the erosion moved the material and wrote
-  // down where it stopped. Inference is what you do when you cannot
-  // observe.
+  // Generated terrain also records where erosion left sediment; the rule
+  // reads that instead of inferring it from drainage.
   if (meta && meta.sediment) {
     try {
       const sed = new Image();
@@ -64,8 +45,7 @@ export async function loadHeightField(base, name) {
       const d = await decode(sed, split);
       if (d.w === w && d.h === h) out.sediment = d.z;
     } catch (e) {
-      // A missing sediment map is not an error; the rule falls back to
-      // reading drainage out of the shape, which is what it always did.
+      // No sediment map: the rule falls back to drainage.
     }
   }
   return out;
@@ -73,19 +53,10 @@ export async function loadHeightField(base, name) {
 
 /** Heights out of an image, in 0..1.
  *
- *  `split` says the file packs 16 bits into two 8-bit channels, high byte
- *  in red and low in green, which is how heightmap.py and terrain_gen.py
- *  write them now. Without it the image is read as plain 8-bit.
- *
- *  The two-channel packing exists because a 16-bit greyscale PNG cannot
- *  reach the page at 16 bits. A canvas decodes to eight bits per channel
- *  whatever the file held and puts the same high byte in all three, so the
- *  low byte is gone before any code sees it - in every browser, not just
- *  some. The field then arrives in 256 levels: 3.5 cm steps on a 9 m range,
- *  which terraces on a gentle slope and, worse, makes flat plateaus that
- *  flow routing reads as sinks. Writing both bytes into ordinary channels
- *  on purpose means no 16-bit image is involved anywhere.
- */
+ *  `split`: 16 bits packed as high byte in red, low byte in green (how the
+ *  Python writes them). A canvas decodes a 16-bit grey PNG to 8 bits in every
+ *  browser, and 256 levels terraced gentle slopes and made flats that flow
+ *  routing read as sinks, so 16-bit greyscale is avoided entirely. */
 async function decode(img, split) {
   const cv = document.createElement('canvas');
   cv.width = img.naturalWidth;
@@ -111,11 +82,8 @@ async function decode(img, split) {
   return { z, w, h, sixteen: !!split };
 }
 
-/** Fold a coordinate back into 0..n by reflection.
- *
- *  A triangle wave of period 2n: 0..n runs forward, n..2n runs back, and it
- *  repeats. Continuous at every join, which a modulo is not.
- */
+/** Fold a coordinate into 0..n by reflection (a triangle wave of period
+ *  2n), continuous at every join, unlike a modulo. */
 function mirror(t, n) {
   if (n <= 0) return 0;
   const p = 2 * n;
@@ -125,20 +93,10 @@ function mirror(t, n) {
 }
 
 
-/** How much sky each point of a height field can see, 0..1.
- *
- *  A point sitting below the ground around it sees less of the sky than
- *  one standing above it, and sits darker for it. That is ambient light,
- *  and unlike a sun it can be added to splats without contradicting the
- *  light already baked into them: it only takes light away, and only
- *  where the terrain the tiles were laid on would take it away.
- *
- *  Worked out from how far the point stands above its neighbourhood -
- *  topographic position, the same quantity the material rule reads - over
- *  a window that scales with the field, so it describes landforms rather
- *  than texel noise. Returned normalised, since it is a look, not a
- *  measurement.
- */
+/** Sky openness, 0..1: how far a point stands above its neighbourhood (the
+ *  same TPI the rule reads), over a window that scales with the field.
+ *  Used for ambient darkening, which only removes light and so never
+ *  contradicts the light baked into the splats. */
 export function openness(z, w, h, radius) {
   const r = Math.max(1, radius || Math.max(2, Math.round(Math.max(w, h) / 48)));
   const mean = boxBlur(z, w, h, r);
@@ -156,16 +114,10 @@ export function openness(z, w, h, radius) {
   return out;
 }
 
-/** Where fine detail belongs, 0..1: steep slopes and convex crests.
- *
- *  Rough, broken ground is where the land is steep or exposed; flats and
- *  hollows are where sediment settles and lies smooth. Terrain renderers
- *  mask detail the same way - Frostbite computes a mask in the shader from
- *  slope with a ramp between two slopes; heightfield tools build masks from
- *  slope and curvature - so the creases appear where they make sense
- *  instead of on every flat. Slope is normalised by its 95th percentile so
- *  the mask means the same on gentle and on steep terrain.
- */
+/** Where fine detail belongs, 0..1: steep slopes and convex crests; flats
+ *  and hollows stay smooth. A slope ramp as in Frostbite's terrain shader,
+ *  plus a crest term from openness. Slope is scaled by its 95th percentile
+ *  so the mask means the same on gentle and steep terrain. */
 export function roughnessMask(z, w, h, open) {
   const g = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
@@ -224,10 +176,7 @@ export class HeightField {
     this.h = h;
     this.meta = meta || {};
     this.name = name;
-    // World size of the field. The renderer lays tiles out in world units
-    // around the origin, so the field has to be told how much ground it
-    // covers; without metres in the sidecar it is stretched over whatever
-    // the caller asks for.
+    // World units across the long edge, set by fitTo().
     this.extent = 1;
   }
 
@@ -237,34 +186,14 @@ export class HeightField {
     return this;
   }
 
-  /** Height at a world position, in 0..1.
-   *
-   *  Beyond the field the coordinate is mirrored back, not clamped and not
-   *  wrapped. The three differ in what they put at the join:
-   *
-   *    clamping  holds the edge value, so terrain outside the survey is a
-   *              dead flat apron - fine when the field covers everything,
-   *              useless when it covers a fraction of the grid.
-   *    wrapping  joins the far edge to the near one, and the two rarely
-   *              meet at the same height, so there is a cliff on every
-   *              repeat boundary.
-   *    mirroring joins each edge to itself, so the surface is continuous
-   *              by construction. It repeats, but with no seam to see.
-   *
-   *  Mirroring is what makes the extent worth controlling: a field smaller
-   *  than the grid tiles across it, and how much ground it covers becomes
-   *  how large the landforms are.
-   */
+  /** Height at a world position, in 0..1. Past the edge it mirrors: a
+   *  clamp gives a flat apron, a wrap a cliff at every repeat; a mirror
+   *  repeats with no seam. */
   sample(x, y) {
     return this._bilinear(this.z, x, y);
   }
 
-  /** Where erosion left sediment, at a world position, in 0..1.
-   *
-   *  Null when the field came with no sediment map - a drone survey, or a
-   *  height grid read out of a capture. Only generated terrain has one,
-   *  because only there did anything actually move material.
-   */
+  /** Sediment at a world position, 0..1; null unless the field was generated. */
   sampleSediment(x, y) {
     return this.sediment ? this._bilinear(this.sediment, x, y) : null;
   }
@@ -275,14 +204,10 @@ export class HeightField {
   }
 
   /** Bilinear read from any grid the size of this field, mirrored past its
-   *  edge. Shared so the height and the sediment are sampled at exactly the
-   *  same place - a sediment map offset by half a texel from the surface it
-   *  describes would put material beside its channel rather than in it. */
+   *  edge. Shared so height and sediment line up exactly. */
   _bilinear(grid, x, y) {
-    // Texel centres sit on the sampled positions, so the field spans the
-    // extent exactly: texel 0 at one edge, texel w-1 at the other. Scaling
-    // by w rather than w-1 would leave the last texel unreachable, which
-    // reads as the terrain stopping short of its own edge.
+    // Texel 0 at one edge, texel w-1 at the other (scaling by w would leave
+    // the last texel unreachable).
     const long = Math.max(this.w, this.h) - 1;
     const scale = long / (this.extent || 1);
     // Centred, and v flipped: image rows run down, world y runs up.
@@ -293,8 +218,6 @@ export class HeightField {
     v = mirror(v, this.h - 1);
 
     const x0 = u | 0, y0 = v | 0;
-    // Clamped rather than wrapped, so the far edge blends against itself
-    // instead of against the opposite side of the field.
     const x1 = Math.min(x0 + 1, this.w - 1);
     const y1 = Math.min(y0 + 1, this.h - 1);
     const fx = u - x0, fy = v - y0;
@@ -324,9 +247,8 @@ export class HeightField {
 
 // ------------------------------------------------------- generated fields
 
-/** Bumped whenever terrain.js would produce different ground from the same
- *  profile and seed, so a cached terrain from an older generator is never
- *  handed back as if it were current. */
+/** Bump when terrain.js would make different ground from the same profile
+ *  and seed, so old cached terrains are not reused. */
 export const GENERATOR_VERSION = 2;   // 2: cropped from a larger field
 
 const DB_NAME = 'bozkir', STORE = 'terrains';
@@ -378,14 +300,9 @@ function terrainWorker() {
   return worker;
 }
 
-/** A generated terrain as a HeightField: from the browser's cache when this
- *  profile, seed and size have been made before, otherwise generated in a
- *  worker and then cached. `onProgress(fraction, fromCache)` reports.
- *
- *  Nothing here involves the server. That is the point: somebody opening
- *  the viewer without Python, or without the data folder, still gets every
- *  terrain every seed can make.
- */
+/** A generated terrain as a HeightField: from the browser's cache if made
+ *  before, else generated in a worker and cached. No server involved.
+ *  `onProgress(fraction, fromCache)` reports. */
 export async function generatedField({ profile, seed = 0, size = 256 },
                                      onProgress = null) {
   const key = `v${GENERATOR_VERSION}:${profile}:${seed}:${size}`;
@@ -413,8 +330,8 @@ export async function generatedField({ profile, seed = 0, size = 256 },
   return f;
 }
 
-/** Terrains made before, newest first: [{ profile, seed, size }]. Previews
- *  (64 across) are left out; they are made by the terrain window itself. */
+/** Terrains made before, newest first: [{ profile, seed, size }]. The
+ *  64-pixel previews are left out. */
 export async function listCached() {
   const db = await openCache();
   if (!db) return [];

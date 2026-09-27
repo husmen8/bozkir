@@ -1,39 +1,24 @@
-// Opening a tileset in the browser, from a zip or from loose files.
+// Opening a tileset in the browser, from a zip or from loose files, so a
+// tileset exported on any machine can be dropped on the page (as GSWT's
+// renderer takes a zip of tiles). Python writes tilesets, the page reads
+// them; a file joins the two, not a server.
 //
-// Until now a scene arrived one of two ways: a file sitting in web/data
-// that the page fetches by name, or a .splat picked from the file dialog
-// whose .json the page then looked for in web/data by the same name. Both
-// assume the tileset is already on the server, which means the demo can
-// only ever show what was exported into the repo. Somebody handed a link
-// cannot bring their own.
-//
-// GSWT's own renderer solves this by taking a zip of tiles as its input and
-// preprocessing it in the page, and the same shape fits here: the Python
-// side stays a constructor that writes a tileset, the page stays a renderer
-// that reads one, and the two are joined by a file rather than by a server.
-//
-// The zip reader is written out rather than pulled in. A tileset is two
-// files stored with no encryption and no zip64, which is a small enough
-// corner of the format to read directly, and DecompressionStream has done
-// the inflating since Chrome 103. A library would be more code shipped for
-// a case that is already covered.
+// The zip reader is hand-written: a tileset is two stored or deflated files
+// with no encryption or zip64, and DecompressionStream does the inflating.
 
 const SIG_EOCD = 0x06054b50;
 const SIG_CENTRAL = 0x02014b50;
 const SIG_LOCAL = 0x04034b50;
 
-/** Read a zip into a map of name to bytes.
- *
- *  The central directory is authoritative, not the local headers: a local
- *  header may carry zeroed sizes with the real ones trailing the data, and
- *  a zip written that way reads as empty if you trust the local copy.
- */
+/** Read a zip into a map of name to bytes. Sizes come from the central
+ *  directory: a local header may hold zeroes with the real sizes after the
+ *  data. */
 export async function readZip(buffer) {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
 
-  // The end record sits at the very end unless there is a comment, so scan
-  // back over the largest comment the format allows plus the record itself.
+  // The end record is last unless there is a comment: scan back over the
+  // largest comment allowed.
   let eocd = -1;
   const from = Math.max(0, bytes.length - 22 - 0xffff);
   for (let i = bytes.length - 22; i >= from; i--) {
@@ -60,8 +45,8 @@ export async function readZip(buffer) {
 
     if (name.endsWith('/')) continue;                 // a directory entry
     if (view.getUint32(local, true) !== SIG_LOCAL) continue;
-    // The local header's own name and extra lengths, not the central ones:
-    // the two are allowed to differ and usually do.
+    // The local header's own name/extra lengths, which may differ from the
+    // central ones.
     const dataAt = local + 30 + view.getUint16(local + 26, true)
                             + view.getUint16(local + 28, true);
     const raw = bytes.subarray(dataAt, dataAt + compressed);
@@ -82,15 +67,9 @@ export async function readZip(buffer) {
 /** The basename of a path inside a zip, ignoring any folder it sits in. */
 function base(path) { return path.split('/').pop(); }
 
-/** Pick the tileset out of a set of named blobs.
- *
- *  A zip exported by hand usually has the two files inside a folder, and
- *  may carry a __MACOSX shadow tree or a .DS_Store beside them, so entries
- *  are matched by extension rather than by path. When several .splat files
- *  are present the largest wins, on the grounds that the others are
- *  previews or offcuts; when a .json shares a name with the chosen .splat
- *  that one is preferred over any other.
- */
+/** Pick the tileset out of a set of named blobs, by extension (zips made
+ *  by hand put files in folders and carry __MACOSX or .DS_Store). The
+ *  largest .splat wins; a .json with the same stem is preferred. */
 export function pickTileset(files) {
   const usable = [...files.entries()]
     .filter(([n]) => !base(n).startsWith('.') && !n.startsWith('__MACOSX/'));
@@ -117,14 +96,9 @@ export function pickTileset(files) {
     splatBytes.byteOffset, splatBytes.byteOffset + splatBytes.length), meta };
 }
 
-/** What the settings mean, for anything the metadata does not say.
- *
- *  A .splat carries no header, so without metadata the page has to guess,
- *  and the one guess that matters is the tile size - get it wrong and the
- *  tiles either overlap or leave gaps, which reads as a broken export
- *  rather than a missing file. Returning nulls rather than defaults lets
- *  the caller say so.
- */
+/** The settings the metadata gives, with nulls (not defaults) for what it
+ *  lacks, so the caller can warn: a .splat has no header, and a wrong tile
+ *  size looks like a broken export. */
 export function describe(meta) {
   if (!meta) return { size: null, wang: false, lod: 1, note: 'no metadata' };
   return {
@@ -135,13 +109,7 @@ export function describe(meta) {
   };
 }
 
-/** Open whatever the person dropped: one zip, or the loose files themselves.
- *
- *  Accepting loose files matters more than it looks. Exporting produces a
- *  .splat and a .json side by side, and the obvious thing to do with two
- *  files is select both - being told to zip them first would be a step
- *  invented by the page for its own convenience.
- */
+/** Open whatever was dropped: one zip, or the .splat and .json themselves. */
 export async function openDrop(fileList) {
   const files = [...fileList];
   if (!files.length) throw new Error('nothing to open');
@@ -176,13 +144,8 @@ function crc32(bytes) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
-/** Write a zip. Entries are [name, Uint8Array], stored uncompressed.
- *
- *  Stored rather than deflated because everything this writes is already
- *  compressed - PNG frames - and deflating them again costs time to save
- *  nothing. It also keeps the writer to arithmetic, with no async in the
- *  middle of building a file.
- */
+/** Write a zip of [name, Uint8Array] entries, stored uncompressed (the
+ *  contents are PNGs, already compressed). */
 export function writeZip(entries) {
   const enc = new TextEncoder();
   const parts = [];

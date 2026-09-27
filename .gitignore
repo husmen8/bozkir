@@ -15,26 +15,29 @@ out/
 # Source captures. Gigabyte-scale PLY files that belong wherever you keep
 # your captures, not in git.
 *.ply
-data/
+/data/
 scenes/
 downloads/
 
-# Exported tilesets.
+# Exported tilesets and height fields.
 #
-# bigsur is deliberately committed: the page loads it on startup, so without
-# it a fresh clone opens to an empty viewer, and a demo that needs a
-# 10-minute export before it shows anything is not a demo. At 22 MB it is
-# under GitHub's warning threshold.
+# Only the desert tileset is public: its splats, manifest, height field,
+# sediment and far-field atlas. Without it a fresh clone or the live page
+# would open on the starter scene alone, and a demo that needs a 10-minute
+# export before it shows anything is not a demo. The starter needs no file;
+# terrains are generated in the browser.
 #
-# The others are not. They exist to compare against and can be rebuilt with
-#     python scripts/export_wang.py --preset bicycle
+# Every other tileset, height field and the folder's index.json stay in the
+# working copy that made them (rebuilt with
+#     python scripts/export_wang.py data/raw/<name>.ply --preset <name>
+# ); the viewer looks for the desert whether or not an index is there.
+#
+# The root data/ rule above is anchored with a leading slash on purpose: an
+# unanchored 'data/' also matches web/data/, and git cannot re-include files
+# inside an excluded folder, so exceptions here silently did nothing.
 
-web/data/*.splat
-!web/data/bigsur.splat
-!web/data/desert.splat
-
-# The .json beside each tileset stays in either case - a few kilobytes, and
-# it is the only written record of the format the browser reads.
+web/data/*
+!web/data/desert.*
 
 # Editors and OS
 .vscode/

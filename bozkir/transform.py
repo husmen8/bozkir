@@ -1,13 +1,9 @@
-"""Rotating a Gaussian scene.
+"""Rotating a Gaussian scene, and finding its ground plane.
 
-3DGS scenes come out of COLMAP with an arbitrary world orientation - the
-first camera decides which way is up, and there is no reason for it to be
-level. Every later step (tiling, height fields, ground-plane parameterisation)
-assumes a known up direction, so the scene has to be straightened first.
-
-Rotating a Gaussian means rotating two things: where it is, and which way
-it points. Doing only the first is a silent bug - the scene looks plausible
-and every shape is wrong.
+Captures come with an arbitrary orientation (bigsur arrived at 81 degrees),
+and everything later assumes a known up. Rotating a Gaussian means turning
+both its position and its orientation; turning only positions looks
+plausible and gets every shape wrong.
 """
 
 import numpy as np
@@ -16,15 +12,8 @@ from .ply import Splats, quat_to_matrix
 
 
 def quat_multiply(a, b):
-    """Hamilton product of quaternions, (w, x, y, z) order.
-
-    Composing rotations. `quat_multiply(a, b)` means "apply b, then a" -
-    the same order convention as matrix multiplication. Swapping the
-    arguments gives a different rotation, not an error, so it is worth
-    being deliberate about.
-
-    Accepts (4,) or (N, 4) for either argument and broadcasts.
-    """
+    """Hamilton product, (w, x, y, z): "apply b, then a", as with matrices.
+    Accepts (4,) or (N, 4) for either argument and broadcasts."""
     a = np.atleast_2d(np.asarray(a, dtype=np.float32))
     b = np.atleast_2d(np.asarray(b, dtype=np.float32))
     aw, ax, ay, az = a[:, 0:1], a[:, 1:2], a[:, 2:3], a[:, 3:4]
@@ -97,22 +86,12 @@ def rotate(s, q):
 def ground_normal(s, core_pct=90.0, low_pct=30.0):
     """Estimate the ground plane normal, pointing up.
 
-    The dense part of a captured outdoor scene is mostly ground, so its
-    thinnest principal direction is the surface normal. This is plain PCA:
-    eigenvectors of the covariance of the point positions, smallest
-    eigenvalue first.
-
-    Two things a plane fit cannot tell you on its own.
-
-    Which end of the scene is the ground: `eigh` returns an arbitrary sign,
-    so both ends are fitted and the flatter one wins, since ground is a
-    plane and the tops of objects are not.
-
-    Which side of that plane is up: a plane looks the same from both sides.
-    The tie is broken by where the rest of the scene is - things sit on top
-    of the ground, so up is the direction from the ground band toward
-    everything else. Without this the scene comes out inverted about half
-    the time, and every render is upside down.
+    The dense part of an outdoor capture is mostly ground, so its thinnest
+    principal direction (PCA) is the normal. A plane fit cannot say which
+    side is up; things stand on the ground, so up points from the ground
+    band towards the rest of the scene (without this, half the scenes came
+    out upside down). One-way check: a warning means something, silence
+    proves nothing.
     """
     centre = np.median(s.xyz, axis=0)
     r = np.linalg.norm(s.xyz - centre, axis=1)
@@ -142,23 +121,11 @@ def ground_normal(s, core_pct=90.0, low_pct=30.0):
 
 
 def _points_down(xyz, n, core, band):
-    """Guess whether `n` points into the ground rather than out of it.
-
-    A plane looks the same from both sides, so this cannot be read off the
-    fit. Two weak signals are combined instead.
-
-    Skew: a captured outdoor scene has a hard floor and a long tail of
-    foliage, sky and floaters above it, so the distribution of heights is
-    right-skewed when measured along a normal that points up.
-
-    Mass: things stand on the ground, so the rest of the scene tends to sit
-    on the outward side of the ground band. This one fails when the surface
-    that got fitted is a raised platform - a table with a pot underneath -
-    which is why it only breaks ties.
-
-    Neither is reliable alone, and for some scenes neither is right. The
-    caller can always override with `up_hint`.
-    """
+    """Guess whether `n` points into the ground, from two weak signals.
+    Skew: heights along an upward normal are right-skewed (hard floor,
+    long tail of foliage and floaters above). Mass: the rest of the scene
+    sits above the ground band - wrong for a raised platform, so it only
+    breaks ties. `up_hint` overrides both."""
     t = xyz @ n
     lo, hi = np.percentile(t, [1, 99])          # floaters would swamp the mean
     inner = t[(t >= lo) & (t <= hi)]
@@ -187,9 +154,7 @@ def align_to_ground(s, target_axis=2, up_hint=None):
     target = np.zeros(3, dtype=np.float32)
     target[target_axis] = 1.0
 
-    # ground_normal already points up (away from the ground, toward the
-    # rest of the scene). Overriding that sign is what turns a scene upside
-    # down, so only do it when explicitly asked.
+    # ground_normal already points up; flip only when asked.
     if up_hint is not None:
         hint = np.asarray(up_hint, dtype=np.float32)
         if float(np.dot(n, hint)) < 0:

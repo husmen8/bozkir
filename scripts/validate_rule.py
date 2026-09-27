@@ -4,21 +4,12 @@
         C:/odm/copr/odm_orthophoto/odm_orthophoto.tif ^
         --dsm C:/odm/copr/odm_dem/dsm.tif
 
-The viewer places scrub and sand by the shape of the ground. A drone survey
-can check that: the DTM is the shape, the orthophoto is where the scrub
-actually grows. This lines the two up on the viewer's cell grid, runs the
-viewer's own rule on the DTM (bozkir/landform.py, held to web/landform.js by
-the test suite), and reports how well the rule's map agrees with the real
-one - with the chance level measured by shifting the truth around a torus,
-because two clumpy maps overlap by chance far more than two random ones.
-
-Truth comes from colour (nearest of the two tile classes' mean colours) and,
-with --dsm, independently from vegetation height (DSM minus DTM). Both are
-reported; they fail differently, colour on shadows and height on the ground
-filter, so agreement between them is worth more than either.
-
-Writes a figure and a JSON of every number. See bozkir/validate.py for what
-each number means and why the test is set up this way.
+Runs the viewer's rule on the survey DTM and scores it against where scrub
+really grows, on grids 24, 16 and 32, with chance measured by torus shifts.
+Truth from colour and, with --dsm, from vegetation height (DSM - DTM); they
+fail differently (shadows vs the ground filter). Ends with the caveats that
+apply to this survey. Writes docs/validation.png, validation_cues.png and
+validation.json; bozkir/validate.py explains the numbers.
 """
 
 import argparse
@@ -29,9 +20,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.validate import (cell_fraction, colour_truth, evaluate,  # noqa: E402
-                             height_truth, read_geotiff, sample_bilinear,
-                             square_window, Raster)
+from bozkir.validate import (caveats, cell_fraction, colour_truth,  # noqa: E402
+                             evaluate, height_truth, plane_fit_r2,
+                             read_geotiff, sample_bilinear, square_window,
+                             Raster)
 
 
 def fine_grid(x_min, y_min, side, m):
@@ -181,10 +173,13 @@ def main(argv=None):
     grids = [args.grid] + [int(g) for g in args.also.split(",") if g.strip()
                            and int(g) != args.grid]
     main_results = {}
+    plane_r2 = None
     for n in grids:
         m = 4 * n
         xs, ys = fine_grid(x_min, y_min, side, m)
         z = sample_bilinear(dtm, xs, ys).ravel()
+        if n == args.grid:
+            plane_r2 = plane_fit_r2(z, m)
         report["grids"][n] = {}
         for tname, traster in truths.items():
             frac = cell_fraction(traster, x_min, y_min, side, n)
@@ -204,6 +199,9 @@ def main(argv=None):
                            res, f"{Path(args.dtm).stem}, grid {n}")
 
     cue_chart(out / "validation_cues.png", main_results)
+    notes = caveats(report["grids"], plane_r2)
+    report["plane_r2"] = plane_r2
+    report["caveats"] = notes
     (out / "validation.json").write_text(json.dumps(report, indent=2))
     print(f"\nwrote {out / 'validation.png'}, {out / 'validation_cues.png'}, "
           f"{out / 'validation.json'}")
@@ -211,6 +209,10 @@ def main(argv=None):
           "where water runs). It\nmeans something only if its kappa clears "
           "the chance column and holds across grids\nand both truths. A "
           "better score for 'rule, flipped' means the rule is wrong here.")
+    if notes:
+        print("\nBefore trusting any of it:")
+        for note in notes:
+            print(f"  - {note}")
 
 
 if __name__ == "__main__":

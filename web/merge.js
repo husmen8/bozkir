@@ -1,35 +1,22 @@
-// Selective tile merging. GSWT Section 3.4.
+// Selective tile merging, GSWT 3.4.
 //
-// Cells are drawn one at a time, each from its own pre-sorted order, so where
-// two neighbours overlap in pixels one simply covers the other. That is wrong
-// twice over: the covering cell changes when the two cross in depth, and even
-// with the order held fixed the two sets of splats should interleave rather
-// than stack.
+// Each cell is drawn from its own sorted order, so where neighbours overlap
+// one simply covers the other - and which one flips as they cross in depth.
+// Near the plane of their shared boundary their splats should interleave,
+// so the pair is merged into one sorted stream. GSWT detects this with
+// |n . (edge - eye)| using the unnormalised vector: the perpendicular
+// distance to the plane, which does not fall off with range - being in the
+// plane is the condition, not being near the edge.
 //
-// GSWT merges such a pair into one sorted stream when the camera lies near the
-// plane of their shared boundary, detected by the absolute dot product between
-// the boundary normal and the *unnormalised* camera-to-edge vector. Leaving it
-// unnormalised is the whole trick: the quantity is then the perpendicular
-// distance from the camera to the boundary plane, so a boundary the camera is
-// standing on scores near zero and a boundary it is well to one side of scores
-// high and is left alone. Note that this does not fall off with range - an eye
-// lying in a boundary's plane scores zero however far away it is - because
-// lying in the plane is the condition being detected, not being near the edge.
-//
-// Nothing here touches WebGL, so it runs under node and is tested there.
+// No WebGL, so it runs under node and is tested there.
 
-/** How many cells a merged group may hold.
- *
- *  The cap is not arbitrary. A merged draw packs the group-local cell slot
- *  into the high bits of the splat index, and the index has to keep enough
- *  room for the splat count: 3 bits leaves 29, which is 536 million splats.
- *  It also bounds the work, since merging is linear in the splats of a group
- *  and grouping is transitive - without a cap, one chain of low-scoring
- *  boundaries pulls a whole row into a single stream and the frame budget
- *  goes with it. */
 import { boundary, boundarySign, neighbourPairs } from './grid.js';
 export { boundary, boundarySign, neighbourPairs } from './grid.js';
 
+// A merged draw packs the cell's slot in the group into the top bits of the
+// splat index: 3 bits leaves 29 for the index (536M splats). The cap of 8
+// also bounds the work, since grouping is transitive and could otherwise
+// pull a whole row into one stream.
 export const SLOT_BITS = 3;
 export const MAX_GROUP = 1 << SLOT_BITS;      // 8
 export const INDEX_BITS = 32 - SLOT_BITS;
@@ -41,26 +28,18 @@ export function packIndex(slot, index) {
 export function unpackSlot(v) { return v >>> INDEX_BITS; }
 export function unpackIndex(v) { return v & INDEX_MASK; }
 
-/** GSWT's merge criterion, in world units.
- *
- *  Distance from the eye to the plane of the shared boundary. Small means the
- *  camera is near that plane, which is when the two cells' splats genuinely
- *  interpenetrate on screen. */
+/** GSWT's merge criterion: distance from the eye to the shared boundary
+ *  plane, in world units. Small = the two cells interpenetrate on screen. */
 export function mergeScore(a, b, eye) {
   return Math.abs(boundarySign(a, b, eye));
 }
 
-/** Which cells to merge with which, for one camera position.
+/** Which cells to merge, for one eye position.
  *
- *  Pairs below the threshold are unioned, cheapest first, so that when the cap
- *  bites it is the boundaries the camera is furthest from that get dropped -
- *  the ones that needed merging least. Returns one entry per cell holding the
- *  index of its group, and the groups themselves; a cell in no pair gets a
- *  group of its own, so the caller can treat every cell uniformly.
- *
- *  `threshold` is a distance in world units. Tile-relative is the useful way
- *  to set it, since it is the tile that decides how far a splat reaches past
- *  its own boundary. */
+ *  Pairs under `threshold` (world units; set it relative to the tile) are
+ *  unioned cheapest first, so when the cap bites it is the pairs that
+ *  needed it least that are dropped. Every cell gets a group, singletons
+ *  included. */
 export function mergeGroups(cells, eye, { threshold = 1.0, cap = MAX_GROUP } = {}) {
   const parent = new Int32Array(cells.length);
   const size = new Int32Array(cells.length).fill(1);
@@ -99,15 +78,10 @@ export function mergeGroups(cells, eye, { threshold = 1.0, cap = MAX_GROUP } = {
   return { groupOf, groups, pairsMerged: merged, pairsConsidered: scored.length };
 }
 
-/** Interleave several already-sorted streams into one.
- *
- *  Each stream is one cell's pre-sorted order together with the world depth of
- *  each entry, both running far to near. The result is the same splats in one
- *  far-to-near order, with each index tagged by the slot of the cell it came
- *  from so a single draw call can place them all.
- *
- *  A linear scan over the heads beats a heap here: `cap` is eight, and eight
- *  comparisons with no pointer chasing is faster than maintaining the heap. */
+/** Interleave already-sorted streams ({order, depth, slot}, far to near)
+ *  into one far-to-near stream of packed indices. The exact reference the
+ *  worker's counting sort is tested against. A linear scan over the heads
+ *  beats a heap at eight streams. */
 export function kwayMerge(streams) {
   let total = 0;
   for (const s of streams) total += s.order.length;

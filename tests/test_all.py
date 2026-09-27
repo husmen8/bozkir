@@ -1350,7 +1350,7 @@ def test_every_script_declares_the_flags_it_reads():
     import ast as _ast
     root = Path(__file__).resolve().parents[1]
     problems = []
-    for path in sorted((root / "scripts").glob("*.py")):
+    for path in sorted((root / "scripts").rglob("*.py")):
         tree = _ast.parse(path.read_text(encoding="utf-8"))
         declared = set()
         for node in _ast.walk(tree):
@@ -1388,7 +1388,7 @@ def test_every_script_builds_its_parser():
     import subprocess
     root = Path(__file__).resolve().parents[1]
     failures = []
-    for path in sorted((root / "scripts").glob("*.py")):
+    for path in sorted((root / "scripts").rglob("*.py")):
         r = subprocess.run([sys.executable, str(path), "--help"],
                            cwd=root, capture_output=True, text=True,
                            timeout=120)
@@ -1407,7 +1407,7 @@ def test_every_script_imports():
     """
     import importlib.util
     root = Path(__file__).resolve().parents[1]
-    scripts = sorted((root / "scripts").glob("*.py"))
+    scripts = sorted((root / "scripts").rglob("*.py"))
     assert scripts, "no scripts found"
     sys.path.insert(0, str(root / "scripts"))
     for path in scripts:

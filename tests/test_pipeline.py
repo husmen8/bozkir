@@ -55,8 +55,7 @@ def close(a, b, tol=1e-9, msg='not close'):
         raise AssertionError(f'{msg}: {a} vs {b}')
 
 
-# Everything the sections below reach for. Gathered here rather than beside
-# each section so the same name cannot mean two things in one file.
+# All imports for the sections below, in one place.
 from PIL import Image                                             # noqa: E402
 from bozkir.ply import Splats                                     # noqa: E402
 from bozkir.popping import (motion_field, popping,                # noqa: E402
@@ -151,11 +150,8 @@ def _():
 
 @test('a small block does not lose the motion to coarse rounding')
 def _():
-    # Regression. The coarse pass estimates on a quarter-size copy, so its
-    # answer is only good to four pixels. With the fine radius set from the
-    # block size alone, a 16-pixel block gave a radius of two, and a real
-    # motion of three pixels became unreachable - reported as 16% of the
-    # frame popping when nothing had popped at all.
+    # Regression: a fine radius from the block size alone (2 px for 16 px
+    # blocks) could not reach a 3 px motion, and reported 16% popped.
     a = texture()
     b = shift(a, 2, 3)
     r = popping(a, b, block=16, search=10)
@@ -178,11 +174,9 @@ def _():
 
 @test('a shift far larger than the search radius is still found')
 def _():
-    # The failure that made a real capture read 55% popped for every
-    # ordering. A sweep of 48 frames over a full turn moves the image by
-    # more than a hundred pixels between frames; a searched coarse pass
-    # with a radius of twelve cannot reach that, so every block failed and
-    # the metric saturated. Phase correlation has no radius.
+    # Regression: a real capture read 55% popped for every ordering. A
+    # 48-frame turn moves 100+ px per frame, beyond a searched radius of 12;
+    # phase correlation has no radius.
     a = texture(192, 256)
     b = shift(a, 40, -70)
     r = popping(a, b, block=32, search=8)
@@ -775,10 +769,8 @@ def _():
 
 @test('module state survives a failed search')
 def _():
-    # auto_pick retires exhausted filters as it goes. Doing that to the
-    # module-level table would leave the next call with fewer options than
-    # the first, which is the kind of bug that only shows up on the second
-    # scene somebody tries.
+    # auto_pick retires exhausted filters; it must not do that to the
+    # module-level table, or the second scene gets fewer options.
     from bozkir import patches
     before = list(patches.RELAXATIONS)
     auto_pick(ground(density=40, seed=5), 1.5, 4, up_axis=2, verbose=False,
@@ -818,10 +810,8 @@ def _():
 
 @test('every search script builds the same settings dict')
 def _():
-    # The three scripts each assembled this by hand, and one had already
-    # drifted in whitespace. If they ever drift in content, a preview and an
-    # export would search differently and --patches indices would silently
-    # point at other patches.
+    # If preview and export ever searched differently, --patches indices
+    # would silently point at other patches.
     import argparse
     from bozkir.patches import SEARCH_KEYS, search_kwargs
 
@@ -862,10 +852,8 @@ def _():
 
 @test('the cache key changes when the source file does')
 def _():
-    # Retraining a capture and writing it over the same filename used to
-    # produce the same key, so the next run silently loaded the previous
-    # model. The count printed was the old one, which is the only place it
-    # showed.
+    # Regression: a retrained capture saved over the same name got the same
+    # key, and the old cached model was loaded silently.
     import os
     import tempfile
     import time
@@ -1145,12 +1133,9 @@ def _():
 
 @test('a nearly constant dimension cannot outvote the real difference')
 def _():
-    # Regression. The signature is three colour means and three colour
-    # spreads. The spreads barely differ between patches of one scene, so
-    # standardising each dimension by its own deviation multiplied what was
-    # left of them - noise - up to the size of the real colour gap. In a
-    # scene of ten pale patches and two dark ones, one of the dark ones was
-    # clustered with the pale.
+    # Regression: standardising the near-constant spread dimensions blew
+    # noise up to the size of the colour gap, and one dark patch of two was
+    # clustered with ten pale ones.
     g = split_classes(candidates([(SAND, 10), (SCRUB, 2)]), classes=2,
                       per_class=99)
     small = min(g, key=len)
@@ -1195,12 +1180,8 @@ def _class_patch(level, n=900, seed=0):
 
 @test('every class carries the same set of edge codes')
 def _():
-    # The property the whole scheme rests on. A cell picks a code from its
-    # neighbours and a class from the terrain, independently - which only
-    # works if every class has a tile for every code. If one class were
-    # missing a combination, a cell needing it would have to fall back to
-    # another class and the terrain rule would be silently overruled by the
-    # matching constraint.
+    # Every class must have every code: a cell takes its code from the
+    # neighbours and its class from the terrain, independently.
     from bozkir.wang import build_tile_set
 
     def tile_codes(colour_offset):
@@ -1671,6 +1652,29 @@ SECTION = 'rule validation'
 from bozkir import validate as val                                # noqa: E402
 
 
+@test('validation caveats: one plane, disagreeing truths, a lucky p')
+def _():
+    # The three things found by hand on the desert survey, now said by the
+    # script: none of them may fire on a clean result.
+    m = 32
+    j, i = np.mgrid[0:m, 0:m]
+    tilted = 0.1 * i + 0.05 * j
+    hills = np.sin(i / 3.0) * np.cos(j / 4.0)
+    assert val.plane_fit_r2(tilted.ravel(), m) > 0.99
+    assert val.plane_fit_r2(hills.ravel(), m) < 0.2
+
+    def row(p, share):
+        return {'p': p, 'share': share}
+    lucky = {24: {'colour': {'rule': row(0.7, 0.18), 'drainage': row(0.02, 0.18)},
+                  'height': {'rule': row(0.9, 0.03), 'drainage': row(0.5, 0.03)}}}
+    notes = val.caveats(lucky, plane_r2=0.95)
+    assert len(notes) == 3, notes
+    assert 'plane' in notes[0] and 'disagree' in notes[1] and '4 comparisons' in notes[2]
+    clean = {24: {'colour': {'rule': row(0.001, 0.2)},
+                  'height': {'rule': row(0.002, 0.25)}}}
+    assert val.caveats(clean, plane_r2=0.3) == []
+
+
 def _geotiff(path, a, dx, x0=500000.0, y0=4000000.0):
     from PIL.TiffImagePlugin import ImageFileDirectory_v2
     ifd = ImageFileDirectory_v2()
@@ -1838,10 +1842,7 @@ SECTION = 'terrain parity'
 
 @test('the browser generates the same terrain as Python, bit for bit')
 def _():
-    # A profile and a seed have to name one piece of ground, whichever
-    # language made it: the URL a figure came from regenerates it in the
-    # viewer, and terrain_gen.py writes the file the validation reads. Both
-    # sides do their arithmetic in the same order for exactly this.
+    # A profile and a seed must name the same ground in Python and JS.
     import json
     import shutil
     import subprocess
@@ -2122,6 +2123,24 @@ def _():
     assert abs(none) < 0.05, f'noise read {none:.2f}'
 
 
+@test('busyness is high for four different triangles and low for one ground')
+def _():
+    # The second axis the eye used on the desert tilesets: a tile whose four
+    # triangles differ shows its construction as an X.
+    rep = _script('repetition')
+    r = np.random.default_rng(0)
+    res = 32
+    y, x = (np.mgrid[0:res, 0:res] + 0.5) / res
+    a, b = y < x, y < 1 - x
+    blocks = np.select([a & b, a & ~b, ~a & ~b], [0.2, 0.8, 0.4], 0.6)
+    grain = r.random((res, res))
+    busy = rep.busyness(blocks + r.random((res, res)) * 0.02)
+    calm = rep.busyness(grain)
+    assert busy > 0.9, f'four flat triangles read {busy:.2f}'
+    assert calm < 0.05, f'uniform grain read {calm:.2f}'
+    assert rep.busyness(np.full((res, res), 0.5)) == 0.0
+
+
 @test('a turned patch turns its splats and their orientations together')
 def _():
     # Rotated patches become new edge colours, so a wrong turn would show as
@@ -2179,10 +2198,8 @@ SECTION = 'script smoke'
 
 @test('preview_patches and export_wang run end to end on a small capture')
 def _():
-    # The unit tests cover the pieces; this covers the wiring between
-    # them, which is where a changed row or a renamed argument breaks a
-    # script without any single function being wrong. Small and flat so it
-    # takes seconds; no graph cut, no caches, everything in a temp folder.
+    # End to end: catches wiring breaks no unit test sees. Small, no graph
+    # cut, no caches, all in a temp folder.
     import json
     import os
     import subprocess

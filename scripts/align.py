@@ -61,11 +61,9 @@ def main():
     print(f"  extent (1-99 pct)  {np.round(hi - lo, 2)}")
     print(f"  aligned in {time.time() - t0:.1f}s")
 
-    # Sanity: rotation must not change any splat's shape, only its
-    # orientation. Comparing eigenvalues to themselves is ill-conditioned -
-    # the thinnest splats have eigenvalues near the floor of float64 and
-    # some round below zero. Comparing the covariance directly against
-    # R Sigma R^T, scaled by the largest value present, is well behaved.
+    # Sanity: rotation must change orientation, not shape. Compared as
+    # covariance against R Sigma R^T (eigenvalues of the thinnest splats are
+    # too close to zero to compare).
     from bozkir.ply import quat_to_matrix
     R = quat_to_matrix(info["quaternion"])[0].astype(np.float64)
     idx = np.random.default_rng(0).choice(
@@ -95,10 +93,7 @@ def main():
 
         fig = Path("out")
         fig.mkdir(parents=True, exist_ok=True)
-        # After alignment the ground is at z ~ 0 with content above it, so
-        # the camera belongs at +z looking down: nearer means larger z,
-        # which is up_sign = +1. Getting this backwards renders the scene
-        # from underground, where the ground hides everything.
+        # Ground at z ~ 0 with content above: camera at +z (up_sign = +1).
         for label, scene, axis, sign in (("before", s, 1, -1),
                                          ("after", out, args.axis, +1)):
             t = time.time()

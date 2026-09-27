@@ -9,8 +9,7 @@ not in the form a renderer wants:
     rot       raw quaternion -> normalised, (w, x, y, z)
     f_rest    channel-major  -> (N, K, 3)
 
-This module undoes all four so the rest of the codebase never has to think
-about it again.
+Decoded once here, so nothing else deals with it.
 """
 
 from dataclasses import dataclass

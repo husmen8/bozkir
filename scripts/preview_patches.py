@@ -1,15 +1,9 @@
-"""Look at the candidate patches before committing to four of them.
-
-Patch choice decides everything downstream: four squares that look like
-each other tile into ground, four that do not tile into patchwork. Until
-now a scoring function chose them and you never saw what it passed over.
-
-This renders every viable candidate as a labelled thumbnail so the choice
-can be made by eye, and prints the index of each. Those indices go straight
+"""See the candidate patches before choosing, as a sheet of labelled
+thumbnails (landmarks in red), with an index for each that goes straight
 into export_wang:
 
-    python scripts/preview_patches.py data/raw/bigsur.ply --preset bigsur
-    python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur \
+    python scripts/preview_patches.py data/raw/desert.ply --preset desert3
+    python scripts/export_wang.py data/raw/desert.ply --preset desert3 \
         --patches 3,7,11,2
 """
 
@@ -108,9 +102,7 @@ def main():
     up = args.up_axis
     thickness = args.thickness if args.thickness else args.size * 0.25
 
-    # A search of a few thousand positions takes minutes, and printed
-    # nothing at all until it finished. One rewriting line is the whole fix:
-    # not knowing whether a run is working or hung is its own kind of bug.
+    # One rewriting progress line: a silent search looks hung.
     width = [0]
 
     def progress(done, total, viable):
@@ -133,10 +125,8 @@ def main():
         # auto_pick stops at --count; the question that matters is whether
         # it reached --want, since four is what a Wang set needs.
         print(describe_trail(trail, want, args.size))
-        # The indices printed below only mean anything alongside the
-        # settings that produced them, so record those settings on the
-        # namespace: --save-preset then stores what worked, and
-        # export_wang --preset reproduces the same candidate list.
+        # Record the resolved settings, so --save-preset stores what worked
+        # and export_wang --preset gets the same candidate list.
         apply_settings(args, trail[-1][1])
         if args.save_preset:
             presets_mod.save(args, args.save_preset, ap)
@@ -222,10 +212,8 @@ def main():
                   f"rgb {f[:, :3].mean(0)[0]:.2f} {f[:, :3].mean(0)[1]:.2f} "
                   f"{f[:, :3].mean(0)[2]:.2f}  spread {inside:.3f}")
             print(f"             at {where}")
-        # A ratio of the gap between classes to the spread inside them.
-        # Below about 1 the capture holds one material and the split is
-        # dividing noise, which would produce two tile sets that differ by
-        # nothing and a terrain rule with nothing to choose between.
+        # Gap between classes over spread within; below ~1 it is one
+        # material split in two.
         if sep < 1.0:
             print("    the classes are no further apart than they are "
                   "varied: this capture holds one material")

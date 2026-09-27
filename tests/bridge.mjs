@@ -1,18 +1,11 @@
-// The bridge between the two languages, for testing.
-//
-// Some of this project exists twice - the material rule and the terrain
-// generator are written in Python and in JavaScript, because figures and
-// validation run in one and the viewer in the other. Two copies drift
-// unless something holds them together, and this is that something: it
-// runs a JavaScript function on cases sent from Python and sends the
-// results back, so tests/test_pipeline.py can require the same answer from
-// both, cell for cell.
+// Python/JS bridge for the parity tests. The material rule and the terrain
+// generator exist in both languages; this runs the JS side on cases sent
+// from tests/test_pipeline.py so both can be required to agree cell for cell.
 //
 //   stdin:  {"fn": "classify" | "generate", "cases": [...]}
 //   stdout: [result, ...]
 //
-// Adding a third shared module means adding one entry to RUN below and one
-// test on the Python side - nothing else.
+// A new shared module needs one entry in RUN and one Python test.
 import { classify } from '../web/landform.js';
 import { generate } from '../web/terrain.js';
 

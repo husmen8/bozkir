@@ -443,5 +443,11 @@
         }
       }
     }
-  }
+  },
+  "plane_r2": 0.8599026478978722,
+  "caveats": [
+    "the ground is nearly one plane (a tilted plane explains 86% of its height): few hollows or ridges for the rule to tell apart, so neither a hit nor a miss says much",
+    "the truths disagree on how much scrub there is (colour 18%, height 3%): at least one of them is measuring something else (shadows for colour, the ground filter for height)",
+    "the smallest p (0.014, 'hollows (low TPI)', grid 32, height) is one of 42 comparisons; below 0.05 by itself, but not below 0.0012, the level that many tests need: it is what chance produces"
+  ]
 }

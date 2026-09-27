@@ -14,6 +14,7 @@ the field uses.
 | Fractal sum of octaves | `fbm` | the standard fBm construction of procedural terrain |
 | Ridged octaves | `ridged` | Musgrave's ridged multifractal (Ebert et al., *Texturing and Modeling*), simplified |
 | Terraces | `terrace` | a shaping function; no single source |
+| Stretched noise | `stretch=` in every noise function | anisotropic noise: the lattice squeezed along x, so ridges run one way (dune crests); a scaling of the domain, no single source |
 | Fill closed hollows | `fill_depressions` / `fillDepressions` | Barnes, Lehman and Mulla, *Priority-Flood*, Computers & Geosciences 2014 |
 | Steepest-descent receivers | `_receivers` | D8 flow routing, O'Callaghan and Mark 1984 |
 | Receivers-first ordering, drainage area | `_levels` | the stack order of Braun and Willett 2013 |
@@ -21,6 +22,26 @@ the field uses.
 | Hillslope diffusion | `erode` | the linear diffusion term FastScape uses for creep |
 | Uplift map from the noise | `generate`, `uplift=` | the uplift-domain approach of Cordonnier et al., Eurographics 2016, and Schott et al., ACM TOG 2023 |
 | Sediment map | `erode`, `track=` | **a proxy**; see below |
+
+## The profiles
+
+Nineteen named profiles in five groups, the order the terrain window shows
+them. Each is a set of the parameters above; anything passed explicitly
+still wins (`--profile canyon --seed 3` in Python, `?gen=canyon&seed=3` in
+the viewer).
+
+| group | profiles |
+|---|---|
+| lowlands | plains, steppe, rolling |
+| hills | hills, terraced, foothills |
+| desert | desert, dunes, badlands, buttes |
+| highlands | mesa, plateau, canyon, gorge, piedmont |
+| mountains | ridges, alpine, crags, scree |
+
+`dunes` is the one profile that uses `stretch` (0.3). `terraced`, `mesa`,
+`buttes` and `plateau` lean on terraces; `foothills`, `ridges` and `alpine`
+on uplift. There are deliberately no sinkholes: depression filling removes
+closed hollows by construction (see below).
 
 ## The equation
 

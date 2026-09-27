@@ -6,12 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>bozkır</title>
     <style>
-        /* Panel styling after Blender's: information dense, one control per
-           row, nothing explained in prose that a tooltip can carry. The
-           reason is not taste. This panel has sixty controls, and paragraphs
-           under each one push the interesting ones off the screen - which is
-           how the ordering controls ended up three scrolls below the fold
-           and reached from the console instead. */
+        /* Panel styled after Blender's: dense, one control per row, prose in
+           tooltips. With sixty controls, paragraphs pushed the useful ones
+           off screen. */
         :root {
             --bg: #0b0d0e;
             --panel: #1d2021;
@@ -20,9 +17,7 @@
             --text: #d6d2c8;
             --dim: #7d8488;
             --accent: #c9a227;
-            /* Text size and row height move together. A row that stayed 19px
-               while the text grew would clip the labels written inside the
-               sliders, which is where most of the panel's text lives. */
+            /* Row height follows text size, or slider labels clip. */
             --fs: 11px;
             --row: calc(var(--fs) + 8px);
             --panel-w: 232px;
@@ -69,9 +64,8 @@
             padding: 0 0 24px;
         }
 
-        /* The panel's left edge, widened into something you can grab. It sits
-           over the canvas rather than taking space in the layout, so dragging
-           it does not shift the view by the width of the handle itself. */
+        /* Drag handle on the panel's left edge, over the canvas so it takes
+           no layout space. */
         #grip {
             position: absolute; top: 0; bottom: 0; width: 7px;
             right: var(--panel-w); z-index: 30; cursor: ew-resize;
@@ -108,24 +102,15 @@
         }
         .head .sz button:hover { color: var(--text); }
 
-        /* Each section carries its own colour in --c. It is not decoration
-           alone: nine collapsed headers read as a list of identical grey
-           rows, and a colour down the left edge is what lets you find the
-           one you want without reading any of them. */
+        /* Each section has its own colour in --c, so collapsed headers can be
+           told apart at a glance. */
         details {
             border-bottom: 1px solid var(--line);
             --c: var(--dim);
         }
-        /* Most of this panel is for measuring the renderer, not for using
-           it. Hidden until asked for, so what is left is the scene, the
-           terrain, the rule and the look - the controls somebody opening
-           this for the first time is looking for. */
-        /* The terrain window. Its own space, because a profile is chosen by
-           looking at it, and twelve choices with a seed and a size do not fit
-           on one line of a panel that is also a slider rack. */
-        /* The scene section as three steps, in the order a first-time
-           visitor needs them: what the tiles are, what they lie on, how to
-           look at it. Everything else in the panel is adjustment. */
+        /* Measurement controls, hidden until 'show everything'. */
+        /* The terrain window: profiles are chosen by looking at previews. */
+        /* The scene section as three steps: tiles, terrain, view. */
         .step { display: flex; align-items: baseline; gap: 6px; margin: 9px 0 3px; }
         .step:first-child { margin-top: 2px; }
         .step-n { width: 15px; height: 15px; line-height: 15px; text-align: center;
@@ -189,9 +174,8 @@
             border: 1px solid rgba(255, 255, 255, .15); font-size: 11px;
         }
         .adv { display: none; }
-        /* The way out of figure mode. An HTML element over the canvas, not
-           part of it, so a saved PNG never contains it. Fades once it has
-           been seen, and comes back under the pointer. */
+        /* Exit button for figure mode: HTML over the canvas, so saved PNGs
+           never contain it. Fades, and returns under the pointer. */
         #figexit {
             position: absolute; top: 12px; right: 12px; z-index: 40;
             display: none; padding: 6px 10px; border-radius: 3px;
@@ -241,8 +225,7 @@
         .body > * + * { margin-top: 3px; }
         .body > .r + .s, .body > .s + .s { margin-top: 2px; }
 
-        /* A row is label left, value right, one line. Everything uses it,
-           so the eye can scan a column of values instead of hunting. */
+        /* A row: label left, value right, one line. */
         .r {
             display: flex; align-items: center; justify-content: space-between;
             height: var(--row); gap: 6px;
@@ -253,9 +236,8 @@
         .r.wrap { height: auto; min-height: var(--row); }
         .r.wrap .v { white-space: normal; text-align: right; }
 
-        /* Slider with its label and value written on top, Blender style, so
-           a control costs one row instead of two. The filled portion is set
-           from JS into --f. */
+        /* Slider with label and value written on it (Blender style), one row
+           per control. The filled part comes from JS via --f. */
         .s { position: relative; height: var(--row); margin: 1px 0; }
         .s input[type=range] {
             position: absolute; inset: 0; width: 100%; height: 100%;
@@ -330,10 +312,7 @@
         kbd { color: var(--text); }
         code { color: var(--accent); }
 
-        /* Tooltips. Everything that needed a paragraph now carries one here,
-           which keeps the explanation available without it occupying the
-           panel permanently. Shown to the left, since the panel is already
-           at the right edge. */
+        /* Tooltips (data-tip), shown to the left of the panel. */
         [data-tip] { position: relative; }
         [data-tip]::after {
             content: attr(data-tip);
@@ -418,12 +397,12 @@
                 <div class="body">
                     <div class="step"><span class="step-n">1</span><span class="step-t">tiles</span>
                         <span class="step-h">what the ground is made of</span></div>
-                    <select id="scenepick" data-tip="Tilesets this server has, read from data/index.json. Rebuilt by the tools that write there, or by python scripts/index_data.py."><option value="">tileset…</option></select>
+                    <select id="scenepick" data-tip="Tilesets this server has: the desert tileset, the starter made in the browser, and whatever a working copy lists in data/index.json (rebuilt by the tools that write there, or by python scripts/index_data.py)."><option value="">tileset…</option></select>
                     <input type="file" id="file" accept=".splat,.json,.zip" multiple>
 
                     <div class="step"><span class="step-n">2</span><span class="step-t">ground</span>
                         <span class="step-h">the shape they lie on</span></div>
-                    <button type="button" id="terrainopen" class="big" data-tip="Make terrain here in the browser: twelve kinds of ground in four groups, any seed, each previewed in this tileset's own materials before you commit. Stream power erosion solved the FastScape way; the same generator as scripts/terrain_gen.py, bit for bit.">make terrain…</button>
+                    <button type="button" id="terrainopen" class="big" data-tip="Make terrain here in the browser: nineteen kinds of ground in five groups, any seed, each previewed in this tileset's own materials before you commit. Stream power erosion solved the FastScape way; the same generator as scripts/terrain_gen.py, bit for bit.">make terrain…</button>
                     <select id="heightpick" data-tip="The terrain the tiles lie on, chosen separately from the tileset. Any height field with any tileset: the two used to have to share a name, which meant copying a whole .splat to put the same tiles on different ground."><option value="">or a terrain file…</option></select>
                     <div class="out" id="genstatus">—</div>
 
@@ -559,6 +538,7 @@
                         <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
                         <label>first material<b id="classbalancen">50%</b></label>
                     </div>
+                    <label class="c" data-tip="Which material collects where the ground collects: in hollows, channels and low ground. The exporter numbers a tileset's materials in whatever order it found them, so which one is 'first' is an accident of the capture - in the desert set it is the sand. Swapping hands the other material that part; the rule, the share above and the class decision view stay the same.&#10;&#10;With three or more materials it reverses their order."><input type="checkbox" id="classswap"> swap materials</label>
                     <label class="c" data-tip="Where the rule is nearly undecided, draw both materials and dissolve between them splat by splat instead of choosing one for the whole tile.&#10;&#10;A tile boundary is a straight line, so a class boundary made of tile choices is a staircase however good the rule is. Hybrid GSWT avoids that with a priority that varies per Gaussian; this is the same idea.&#10;&#10;Costs a second draw call for the cells near a boundary. Off by default."><input type="checkbox" id="classblend"> blend at boundaries</label>
                     <div class="s" data-tip="How undecided a cell must be before both materials are drawn. Wider blends over more ground and costs more draw calls.">
                         <input type="range" id="blendwidth" min="0.05" max="1" step="0.05" value="0.35">
@@ -568,7 +548,7 @@
                     <label class="c" data-tip="Paints each cell with the class the rule chose - green for the class that collects material, yellow for exposed - washed towards grey where it was nearly undecided.&#10;&#10;This is the decision itself, not the material drawn. If a green-looking summit paints yellow here, the rule called it exposed and what you are seeing is an impure tile or the blend band, not a rule that disagrees with the terrain.">
                         <input type="checkbox" id="classview"> class decision
                     </label>
-                    <label class="c" data-tip="Distant ground drawn as one mesh coloured from an atlas of the tiles seen from above, instead of a draw per cell - what lets the grid reach hundreds of tiles. It takes over as the next level after the coarsest splat level, so the level-of-detail slider moves both together. Needs web/data/&lt;scene&gt;.atlas.png, made by scripts/bake_atlas.py.">
+                    <label class="c" data-tip="Distant ground drawn as one mesh coloured from an atlas of the tiles seen from above, instead of a draw per cell - what lets the grid reach hundreds of tiles. It takes over one level before the coarsest splat level (at the default, 16 tiles out), dithered across the hand-over, so the level-of-detail slider moves both together. Needs web/data/&lt;scene&gt;.atlas.png, made by scripts/bake_atlas.py.">
                         <input type="checkbox" id="farfield" checked> far field
                     </label>
                     <label class="c" data-tip="Keeps the viewer near 30 frames per second, the way games do. First it lowers the render resolution (down to half), in proportion to how far behind it is; only if that is not enough does it pull the level-of-detail distance in. With headroom it gives detail back first, then resolution, more slowly than it took them. A note says when it acts. Save PNG is taken at the current resolution.">

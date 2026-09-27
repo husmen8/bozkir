@@ -1,28 +1,11 @@
-"""Turn a digital surface model into a height field the renderer can use.
+"""Turn a drone DSM (or any PLY) into a height field for the viewer.
 
     python scripts/heightmap.py C:/odm/copr/odm_dem/dsm.tif --name desert
 
-Until now the terrain under the tiles was two sine waves. It is smooth,
-periodic and has no drainage, which is fine for checking that warping works
-and useless for anything that depends on terrain actually being terrain -
-where water would run, which slopes face the sun, where loose material
-would collect.
-
-A DSM from a drone survey is real ground, in metres. Photogrammetry produces
-one as a side effect, so a capture that yields tiles usually yields the
-terrain to lay them on as well.
-
-Two things have to happen on the way:
-
-The survey area is a polygon and the file is a rectangle, so the corners are
-nodata. Those cannot be sampled and interpolating across them invents
-terrain, so the largest rectangle that lies entirely inside the valid region
-is taken instead. On the COPR survey that is about half the pixels and all
-of the real ground.
-
-And the renderer wants a height in tiles, not in metres, because the tiling
-is what the terrain has to stay in proportion with. The metre scale is kept
-in the sidecar so nothing is lost.
+Real ground in metres, a by-product of the same photogrammetry that gives
+the tiles. The survey is a polygon in a rectangular file, so the largest
+rectangle inside the valid region is used (interpolating over nodata would
+invent terrain). Heights are stored 0..1; the metre range goes in the sidecar.
 """
 
 import argparse
@@ -102,9 +85,7 @@ def main(argv=None):
         a = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
              + a * 4) / 8.0
 
-    # Normalised to 0..1 for storage; the renderer scales it by its own
-    # relief control, and the metre range travels in the sidecar so the
-    # terrain can be put back into real units when that matters.
+    # 0..1 for storage; the metre range travels in the sidecar.
     lo, hi = float(a.min()), float(a.max())
     norm = (a - lo) / (hi - lo) if hi > lo else np.zeros_like(a)
 

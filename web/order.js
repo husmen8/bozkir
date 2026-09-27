@@ -1,45 +1,23 @@
-// Tile-level draw order. GSWT Section 3.4, "tile-level topological sorting".
+// Tile-level draw order, GSWT 3.4 "tile-level topological sorting".
 //
-// Cells are composited far to near, so something has to say which of two
-// cells is further. Sorting them by a depth key - distance to the centre, or
-// the nearest footprint corner - is only approximately right, and it fails
-// in a specific, reproducible way.
+// Sorting cells by a depth key fails when the view lines up with a grid
+// axis: every cell in a row gets the same key, the tie-break decides the
+// whole row, and turning through alignment flips it in one frame (the
+// row-wide pop). Instead each pair of neighbours is ordered by which side
+// of their shared boundary plane the eye is on - a sign test, immune to
+// ties - and the pairs are sorted topologically.
 //
-// The key is a projection onto the view direction. When that direction lines
-// up with a grid axis, every cell in a row projects to the *same* value, bit
-// for bit: nine cells, one key. Whatever breaks the tie then decides the
-// order for the whole row at once, and rotating through alignment reverses
-// all nine in a single frame. That is the row-wide repaint the pop meter
-// sees. It is not an interleaving problem and no amount of merging fixes it,
-// because the order being flipped was never determined in the first place.
-//
-// GSWT's answer is to stop ranking cells globally and instead constrain them
-// pairwise. Two neighbours only ever overlap along the boundary they share,
-// so that boundary is what decides them: if the camera is on one cell's side
-// of the shared plane, that cell is nearer and renders last. The constraint
-// is a sign test, so it is immune to the tie - two cells at equal depth still
-// have a well-defined side. Collect one constraint per adjacent pair, then
-// topologically sort the graph.
-//
-// What the sign test cannot do is decide a boundary the camera is standing
-// on, where the sign is passing through zero and neither cell is in front.
-// Those constraints are dropped here rather than enforced at random, and the
-// magnitude that decides whether to drop one is the same |n . (eye - edge)|
-// that merge.js thresholds on. The two halves of Section 3.4 meet here: an
-// order this module declines to fix is exactly an order that wants merging.
+// A boundary the eye is standing on has no sign; those pairs are dropped
+// here and are exactly the ones merge.js merges (same |n . (eye - edge)|).
 //
 // No WebGL, so it runs under node and is tested there.
 
 import { boundarySign, neighbourPairs } from './grid.js';
 export { boundary, boundarySign, neighbourPairs } from './grid.js';
 
-/** The pairwise constraints for one camera position.
- *
- *  Each entry is [before, after]: `before` is drawn first. Pairs whose
- *  boundary plane passes within `epsilon` of the eye are left out, since
- *  their sign is the thing about to change and pinning it would only move
- *  the flip rather than remove it. `weak` returns them so a caller can hand
- *  them to merging. */
+/** Pairwise constraints for one eye position: [before, after], `before`
+ *  drawn first. Pairs within `epsilon` of their boundary plane go to `weak`
+ *  instead (pinning them only moves the flip). */
 export function constraints(cells, eye, { epsilon = 0 } = {}) {
   const edges = [];
   const weak = [];
@@ -53,23 +31,13 @@ export function constraints(cells, eye, { epsilon = 0 } = {}) {
 
 /** Draw order for a set of cells, far to near.
  *
- *  Kahn's algorithm, with the depth key used only to choose among cells that
- *  are simultaneously unblocked. That ordering of the two matters: the
- *  constraints decide wherever they exist, and the key fills in for cells
- *  that share no boundary and therefore cannot overlap - the case where it
- *  is harmless for the key to be degenerate.
+ *  Kahn's algorithm; the depth `key` (larger = further, one per cell) only
+ *  chooses among cells that are unblocked at the same time, i.e. cells that
+ *  share no boundary and cannot overlap.
  *
- *  `key` is one number per cell, larger meaning further, and is what the
- *  viewer already computes. Passing it keeps the result close to today's
- *  order everywhere the constraints are silent, so the change shows up only
- *  where it is supposed to.
- *
- *  A grid on flat ground cannot produce a cycle: the constraints reduce to
- *  "further along x" and "further along y", each a total order. Relief tilts
- *  the boundary planes and three cells can then disagree. Rather than fail,
- *  the stalled cells are released by depth key - which is what the renderer
- *  did for all of them until now, so a cycle is no worse than the status quo
- *  and is reported in `cycles` so it can be measured rather than guessed at. */
+ *  On flat ground there are no cycles. Relief can tilt boundary planes so
+ *  three cells disagree; the stalled cells are then released by depth key
+ *  (the old behaviour) and counted in `cycles`. */
 export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
   const n = cells.length;
   const { edges, weak } = constraints(cells, eye, { epsilon });
@@ -86,9 +54,8 @@ export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
   let cycles = 0;
 
   while (out.length < n) {
-    // Furthest cell with nothing left waiting on it. Linear scan: a heap
-    // would need reordering on every decrement, and the grid is a few
-    // hundred cells at most.
+    // Furthest unblocked cell. A linear scan: the grid is a few hundred
+    // visible cells at most.
     let best = -1;
     for (let k = 0; k < n; k++) {
       if (done[k] || indeg[k] > 0) continue;
@@ -96,8 +63,7 @@ export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
     }
 
     if (best < 0) {
-      // Everything left is inside a cycle. Release the furthest of them and
-      // drop its incoming constraints so the sort can continue.
+      // Only cycles left: release the furthest and drop its incoming edges.
       cycles++;
       for (let k = 0; k < n; k++) {
         if (done[k]) continue;
@@ -108,15 +74,14 @@ export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
 
     done[best] = 1;
     out.push(best);
-    // Clamped, because breaking a cycle zeroes an in-degree while edges
-    // into that cell are still outstanding.
+    // Clamped: breaking a cycle zeroes an in-degree with edges outstanding.
     for (const v of after[best]) if (--indeg[v] < 0) indeg[v] = 0;
   }
 
   return { order: out, weak, cycles, constrained: edges.length };
 }
 
-/** True if `order` satisfies every constraint. For tests and for the panel. */
+/** Number of constraints `order` breaks (0 = all satisfied). For tests. */
 export function violations(cells, eye, order, { epsilon = 0 } = {}) {
   const rank = new Int32Array(cells.length);
   for (let k = 0; k < order.length; k++) rank[order[k]] = k;

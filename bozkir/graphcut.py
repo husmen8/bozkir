@@ -1,48 +1,29 @@
 """Finding the least visible place to cut between two patches.
 
-A tile is assembled from four patches meeting along the two diagonals of the
-square. Cutting on the diagonal itself is arbitrary: it slices straight
-through whatever happens to be there, and where the two patches differ the
-join shows.
-
-The alternative is to let the boundary wander. Between two patches there is
-usually a path along which they already look nearly the same - around a
-stone rather than through it - and a cut placed there is close to invisible.
-Finding that path is a minimum cut on a grid of pixels, which is the method
-in Kwatra et al. 2003 (Graphcut Textures) and Cohen et al. 2003, and what
-GSWT does in Section 3.2 before lifting the result back into 3D.
-
-The cost of separating two neighbouring pixels p and q is
+Four patches meet along a tile's diagonals, and a straight diagonal slices
+through whatever is there (the visible X). Instead the seam wanders to where
+the patches already agree - around a stone, not through it - found as a
+minimum cut on a pixel grid (Kwatra et al. 2003, Cohen et al. 2003, GSWT
+3.2), then lifted back to the Gaussians. The cost of separating neighbours
+p and q is
 
     |A(p) - B(p)| + |A(q) - B(q)|
-
-so the cut is cheap exactly where the two patches agree.
 """
 
 import numpy as np
 
 from .render import project_orthographic, rasterize_rgba
-from .tile import extract_patch  # noqa: F401  (re-exported for convenience)
 
-# Capacities have to be integers for the max-flow solver, so costs are
-# scaled by this before rounding. Large enough that rounding does not
-# change which cut wins.
+# Max-flow wants integer capacities; costs are scaled by this first.
 COST_SCALE = 1000
 
-# Stands in for infinity on edges that must never be cut. Well below the
-# range where summing capacities could overflow.
+# "Infinity" for edges that must never be cut, safely below overflow.
 LOCKED = 1 << 28
 
 
 def render_patch(patch, size, resolution=192, up_axis=2, sh_degree=0):
-    """Render a patch straight down onto a fixed square grid.
-
-    Every patch in a tile set has to land on the same pixel grid or their
-    images cannot be compared, so the framing is given explicitly rather
-    than fitted to the content.
-
-    Returns (rgb, coverage), both resolution x resolution, values in [0, 1].
-    """
+    """Render a patch straight down onto a fixed square grid (the same for
+    every patch, so images compare). Returns (rgb, coverage) in [0, 1]."""
     half = size / 2.0
     p = project_orthographic(
         patch, view_axis=up_axis, up_sign=+1, resolution=resolution,
@@ -60,14 +41,9 @@ def seam_cost(a, b):
 
 
 def two_label_cut(a, b, take_a, take_b, free=None):
-    """Split the image between patch A and patch B along the cheapest path.
-
-    take_a / take_b are boolean masks of pixels that must come from that
-    patch. `free` limits where the boundary is allowed to move; pixels
-    outside it keep whichever side they start on.
-
-    Returns a boolean array, True where patch B should be used.
-    """
+    """Split the image between patches A and B along the cheapest path.
+    take_a / take_b: pixels forced to that patch. `free`: where the
+    boundary may move. Returns True where B is used."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import maximum_flow
 
@@ -96,8 +72,7 @@ def two_label_cut(a, b, take_a, take_b, free=None):
         rows.append(p); cols.append(q); caps.append(c)
         rows.append(q); cols.append(p); caps.append(c)
 
-    # Source and sink. Anything forced to A is tied to the source, anything
-    # forced to B to the sink, with a capacity no cut can afford.
+    # Forced pixels are tied to source (A) or sink (B) with uncuttable edges.
     src, snk = n, n + 1
     fa = idx[take_a].ravel()
     fb = idx[take_b].ravel()
@@ -115,8 +90,7 @@ def two_label_cut(a, b, take_a, take_b, free=None):
     g = coo_matrix((caps, (rows, cols)), shape=(n + 2, n + 2)).tocsr()
     res = maximum_flow(g, src, snk)
 
-    # Everything still reachable from the source after the flow keeps
-    # label A; the rest takes B.
+    # Reachable from the source in the residual graph: A. The rest: B.
     residual = g - res.flow
     reach = np.zeros(n + 2, dtype=bool)
     reach[src] = True
@@ -143,11 +117,8 @@ def cut_cost(a, b, use_b):
 
 
 def tile_uv(resolution):
-    """Tile-local coordinates for each pixel, in [-0.5, 0.5].
-
-    Row 0 is the top of the image, which is the north edge, so v decreases
-    down the rows. Matches the orientation render_patch produces.
-    """
+    """Tile-local coordinates per pixel, in [-0.5, 0.5]. Row 0 is north, so
+    v decreases down the rows (as render_patch renders)."""
     i, j = np.mgrid[0:resolution, 0:resolution]
     u = (j + 0.5) / resolution - 0.5
     v = 0.5 - (i + 0.5) / resolution
@@ -163,22 +134,14 @@ def hard_regions(u, v):
 
 def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
                 centre_hold=0.05, verbose=False):
-    """Decide which patch each pixel of a tile comes from.
+    """Which patch each pixel of a tile comes from.
 
-    Starts from the four hard triangles and lets each diagonal move, one at
-    a time, to wherever the two patches either side of it already agree.
+    From the four hard triangles, each diagonal in turn moves to where its
+    two patches agree. Fixed: a strip along every edge (so edges stay one
+    patch and still match), a disc at the centre (where all four meet), and
+    everything outside a band round the diagonal (so cuts cannot collide).
 
-    Three regions stay fixed, and each for a reason:
-
-    - a strip along every edge, so the edge stays entirely one patch. That
-      is what makes two tiles with the same edge colour identical along
-      their shared boundary, and it is the whole point of the construction.
-    - a small disc at the centre, where all four regions meet and a moving
-      boundary would have three neighbours to argue with.
-    - everything outside a band around the diagonal being relaxed, so the
-      four cuts cannot reach each other.
-
-    `images` is four RGB arrays (north, east, south, west) on a common grid.
+    `images`: four RGB arrays (north, east, south, west) on a common grid.
     """
     imgs = [np.asarray(im, dtype=np.float64) for im in images]
     r = imgs[0].shape[0]
@@ -209,30 +172,18 @@ def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
         use_b = two_label_cut(imgs[la], imgs[lb], take_a, take_b, free=free)
         labels = np.where(free, np.where(use_b, lb, la), labels).astype(np.int8)
         if verbose:
-            moved = int((free & (use_b != (hard_regions(u, v)[free.nonzero()]
-                                           == lb).reshape(-1).any())).sum())
             print(f"    diagonal {la}-{lb}: {free.sum():,} pixels free")
     return labels
 
 
 def label_at(patch, labels, size, up_axis=2):
-    """Which region each Gaussian of a patch falls in, or -1 if it is outside.
+    """Which region each Gaussian falls in: the label image looked up at its
+    projected position (GSWT 3.2's lift from 2D to 3D).
 
-    The cut is found on a 2D image and applied in 3D by looking up where a
-    Gaussian projects to - the same lift GSWT describes in Section 3.2.
-
-    Patches overflow the tile square routinely, because levelling rotates
-    them, and those Gaussians matter: one whose centre sits just outside
-    still covers ground just inside, so dropping them opens a gap along
-    every edge.
-
-    They cannot be clamped to the nearest border pixel either - that pixel's
-    label differs from tile to tile, so the same Gaussian would be kept in
-    one tile and dropped in another, and edge matching would break.
-
-    Instead they take the plain triangle their angle puts them in. That is a
-    function of position alone, so every tile agrees on it, and the cut only
-    ever moves boundaries inside the square anyway.
+    Gaussians just outside the square (levelling rotates patches) still
+    cover ground inside, so they are kept, and take the plain triangle their
+    angle gives. Clamping to the border pixel would not work: that label
+    differs between tiles and would break edge matching.
     """
     plane = [i for i in range(3) if i != up_axis]
     r = labels.shape[0]
@@ -249,11 +200,8 @@ def label_at(patch, labels, size, up_axis=2):
 
 
 def edge_purity(labels, edge_margin=0.06):
-    """Fraction of each edge strip that comes from the right patch.
-
-    Anything below 1.0 means the cut leaked into an edge and two tiles
-    sharing that colour would no longer match.
-    """
+    """Fraction of each edge strip from the right patch; below 1.0 the cut
+    leaked into an edge and matching tiles would no longer match."""
     r = labels.shape[0]
     u, v = tile_uv(r)
     out = {}
@@ -261,8 +209,8 @@ def edge_purity(labels, edge_margin=0.06):
                            ("e", 1, u > 0.5 - edge_margin),
                            ("s", 2, v < -0.5 + edge_margin),
                            ("w", 3, u < -0.5 + edge_margin)):
-        # Corners belong to the neighbouring triangles by construction, so
-        # only the part of the strip inside this region is checked.
+        # Only the part of the strip inside this region (corners belong to
+        # the neighbouring triangles).
         own = sel & (hard_regions(u, v) == lbl)
         out[name] = float((labels[own] == lbl).mean()) if own.any() else 1.0
     return out

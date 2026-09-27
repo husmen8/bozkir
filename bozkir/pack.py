@@ -43,15 +43,12 @@ def pack(s, sort=False):
     return buf.reshape(-1)
 
 def read_splat(splat_path, json_path):
-    """A packed tileset back as (manifest, Splats of every splat).
-
-    The inverse of `pack` for reading: .splat is 32 bytes a splat -
-    position and scale as floats, colour and opacity as bytes, rotation as
-    bytes centred on 128.
-    """
+    """A packed tileset back as (manifest, Splats of every splat); the
+    inverse of `pack`."""
     import json
     from .ply import Splats, SH_C0
-    m = json.loads(open(json_path).read())
+    with open(json_path) as f:
+        m = json.load(f)
     raw = np.fromfile(splat_path, dtype=np.uint8)
     n = len(raw) // STRIDE
     rec = raw[:n * STRIDE].reshape(n, STRIDE)
@@ -67,13 +64,9 @@ def read_splat(splat_path, json_path):
 
 
 def tile_atlas(m, s, res=64):
-    """Every tile rendered straight down, north up, packed into one image.
-
-    What far-away ground is drawn with: past the distance where a tile's
-    splats are smaller than a pixel, sorting and drawing thousands of them
-    buys nothing a texture cannot show, and a texture costs one lookup.
-    Returns (rgba uint8 image, layout dict). Alpha is coverage.
-    """
+    """Every tile rendered straight down, north up, in one image: the far
+    field's texture (past a few dozen tiles a splat is under a pixel).
+    Returns (rgba uint8 image, layout dict); alpha is coverage."""
     from .graphcut import render_patch
     tiles = m["tiles"]
     cols = int(np.ceil(np.sqrt(len(tiles))))

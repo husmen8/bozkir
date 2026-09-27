@@ -1,15 +1,11 @@
-"""Build a Wang tile set from a scene and export it for the browser.
+"""Build a Wang tile set from a capture and export it for the browser.
 
-Cuts exemplar patches from the ground, assembles every tile over the given
-edge colours, and writes one .splat plus a manifest carrying each tile's
-edge codes so the viewer can lay them out aperiodically.
+Finds exemplar patches on the ground, optionally splits them into material
+classes, builds the tiles (graph-cut seams, minimal sets, rotated patches as
+extra colours), and writes one .splat plus a manifest of edge codes, classes
+and LOD ranges for the viewer.
 
-Two colours per axis needs four patches and produces sixteen tiles, which is
-the smallest set guaranteeing a tile always fits.
-
-    python scripts/export_wang.py data/raw/bigsur.ply --clean --flip \
-        --floater-std 0 --size 1.5 --thickness 0.3 --max-tilt 20 \
-        --max-below 0.65 --blend 0.08 --max-per-tile 50000
+    python scripts/export_wang.py data/raw/desert.ply --preset desert3
 """
 
 import argparse
@@ -36,15 +32,10 @@ from bozkir.catalogue import rebuild as reindex  # noqa: E402
 
 
 def overlap_report(chosen, size):
-    """Warn when the patches of one class share ground.
-
-    Two patches that overlap are, in their shared part, the same ground -
-    and an edge colour built from each is a shifted copy of the other. The
-    variety more colours were meant to add is then not there, and a
-    distinctive feature in the shared part turns up in tile after tile. It
-    happens whenever a material covers only a small part of the capture:
-    its patches have nowhere else to come from.
-    """
+    """Warn when the patches of one class share ground: their colours are
+    then shifted copies, and anything distinctive in the shared part repeats
+    in tile after tile. Happens when a material covers little of the capture
+    (the desert scrub is ~4 x 5 m)."""
     pts = [c[1] for c in chosen]
     pairs, worst = 0, 0.0
     for a in range(len(pts)):
@@ -69,13 +60,8 @@ def overlap_report(chosen, size):
 
 
 def scale_report(s, size):
-    """Say so when the tile size and the capture's units disagree.
-
-    --size is in the capture's own units. A drone survey is in metres,
-    where a 1.5 tile holds about fifty splats across; a capture trained at
-    an arbitrary scale can make 1.5 mean a fingernail or a football pitch,
-    and the search then fails in ways that look like the capture's fault.
-    """
+    """Warn when --size (in the capture's own units) looks wrong for the
+    capture's scale, suggesting a size."""
     m = float(np.median(s.scale.max(axis=1)))
     if m <= 0:
         return
@@ -89,12 +75,8 @@ def scale_report(s, size):
 
 
 def prepare_patches(chosen, need, args, up):
-    """Cut, level and centre chosen candidates into tile-ready patches.
-
-    Lifted out of main so it can run once per class. Nothing in it is
-    class-aware - it is the same work every set of four needs, and
-    calling it twice is what makes two tile sets from one capture.
-    """
+    """Cut, level and centre chosen candidates into tile-ready patches
+    (run once per class)."""
     patches = []
     print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "
           f"{'tilt':>7} {'rim':>6} {'mid':>6} {'mean rgb':>18}")
@@ -109,20 +91,14 @@ def prepare_patches(chosen, need, args, up):
         q = p.subset(np.arange(len(p)))
         q.xyz = (q.xyz - off).astype(np.float32)
 
-        # The cap goes here, not before levelling: levelling reads the wide
-        # cut, so anything trimmed off the narrow one is simply picked up
-        # again and the cap does nothing. Spread the survivors rather than
-        # taking the brightest, or the tile ends up dense in one corner.
+        # Cap after levelling (which reads the wide cut), spread evenly.
         if args.max_per_tile and len(q) > args.max_per_tile:
             print(f"    patch {i} at ({x:.2f}, {y:.2f}): {len(q):,} splats "
                   f"capped to {args.max_per_tile:,}")
             q = q.subset(stratified_keep(q, args.max_per_tile,
                                          args.size * (1.0 + args.extract_margin),
                                          up))
-        # The overhang left by levelling is kept: a Gaussian just outside
-        # the square still covers ground just inside, and trimming it opens
-        # a gap along every edge. label_at gives those a well defined
-        # region without needing the pixel grid.
+        # Overhang kept: a Gaussian just outside still covers ground inside.
         plane2 = [j for j in range(3) if j != up]
         over = float((np.abs(q.xyz[:, plane2]).max(axis=1)
                       > args.size / 2).mean())
@@ -308,29 +284,15 @@ def main():
     print(f"  need {tiles_need} patches for {args.colours} colours per axis"
           + (f", {need} real and the rest turned copies"
              if args.rotations > 1 else ""))
-    # Search widely, then narrow on appearance: a patch that scores well but
-    # looks nothing like the others produces a tile with a visible X in it.
-    # Four times what is needed, so appearance has something to choose
-    # among - and that much again per class, because a class can only be
-    # found if its material is in the pool. Searching for sixteen on a
-    # capture whose second material is a tenth of the ground finds sixteen
-    # of the first material and splits it into two halves of itself.
-    # Four times what is needed, so appearance has something to choose
-    # among - and that much again per class, because a class can only be
-    # found if its material is in the pool. Searching for sixteen on a
-    # capture whose second material is a tenth of the ground finds sixteen
-    # of the first material and splits it into two halves of itself.
+    # Search wide (4x what is needed, per class), then narrow on
+    # appearance. Too small a pool on ground that is mostly one material
+    # finds only that material and splits it into two halves of itself.
     want = args.count or max(need * 4 * max(args.classes, 1), 12)
     def gather(want, widen=False):
         common = search_kwargs(args, thickness)
         if widen:
-            # More of what was already found, not a new search. The first
-            # pass keeps every viable position it saw; only the top few were
-            # handed on, and a rarer material is exactly what sits further
-            # down that list. Loosening the filters instead - which is what
-            # asking auto_pick for more would do - re-searches the whole
-            # capture once per setting, minutes each, for candidates that
-            # were never missing.
+            # More from the list already found (a rarer material sits
+            # further down it) rather than a new search per setting.
             common.pop("min_separation", None)
             found, _, _ = cached_search(s, args.size, up, common,
                                         cache=args.search_cache, verbose=False)
@@ -338,11 +300,8 @@ def main():
             print(f"  taking {len(chosen)} of the {len(found)} viable "
                   f"positions already found")
         elif args.auto and not args.patches:
-            # Loosen only when choosing for ourselves. With --patches the
-            # indices came from a preview run, and they only mean anything
-            # against the settings that produced them - so those settings are
-            # used exactly as given, and a short list is an error rather than
-            # something to work around.
+            # With --patches the indices only mean something under the exact
+            # settings of the preview, so nothing is loosened.
             chosen, trail = auto_pick(s, args.size, want, up,
                                       cache=args.search_cache,
                                       progress=_progress_line(), **common)
@@ -368,10 +327,8 @@ def main():
                    "settings, or a preset, to both." if args.patches else
                    "\n  This capture does not yield a tile set at any setting "
                    "tried. preview_patches.py shows what is rejecting."))
-        # Dropped by hand, before anything narrows the list. Scoring sees flat,
-        # dense and uniform; it has no term for "contains one bright thing", and
-        # a survey marker is flat, dense and uniform. Doing this after selection
-        # would be excluding from four, which is not a choice.
+        # Excluded by hand before narrowing (a survey marker scores as good
+        # flat ground).
         if args.exclude.strip():
             drop = {int(x) for x in args.exclude.replace(",", " ").split()}
             before = len(chosen)
@@ -390,11 +347,8 @@ def main():
             chosen = [chosen[i] for i in want]
             print(f"  using candidates {want} as given")
         elif args.classes <= 1:
-            # Narrowing to the four that look most alike is the right move for
-            # one tile set and exactly wrong for several: it would hand the
-            # split four patches already chosen for being indistinguishable.
-            # With classes, split_classes does the same narrowing inside each
-            # group instead.
+            # With classes, split_classes narrows within each group instead
+            # (narrowing first would leave nothing different to split).
             chosen = select_similar(chosen, need, args.similarity)
 
         if args.classes <= 1:
@@ -403,22 +357,16 @@ def main():
             print(f"  appearance spread across the {need} chosen: {spread:.3f} "
                   f"({'similar' if spread < 0.08 else 'diagonals will show'})")
 
-        # One set of four patches per class. With a single class this is the
-        # chosen four and nothing changes; with more, the candidates are split
-        # into groups that look unlike each other and each group becomes its own
-        # tile set.
+        # One set of patches per class.
         if args.classes > 1:
             # A deeper pool per class when purity is to choose among them.
             pool = need * 3 if args.purity else need
             groups = split_classes(chosen, classes=args.classes, per_class=pool)
             sep = class_separation(groups)
             print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
-            # A split of one material into two still finds some gap: noise
-            # divided in half always has two halves. On a uniform capture
-            # that came out at 1.1, with both "classes" the same colour to
-            # two decimals; the desert's real sand and scrub score 7-16.
-            # So the bar is a clear ratio and a colour difference an eye
-            # would call a different material.
+            # Noise split in two still has two halves: a uniform capture
+            # scored 1.1 with identical colours, the desert's sand and scrub
+            # 7-16. So: a clear ratio and a visible colour difference.
             rgb = [np.mean([appearance(c[2])[:3] for c in g], axis=0)
                    for g in groups if g]
             colour_gap = (float(np.abs(rgb[0] - rgb[1]).max())
@@ -433,9 +381,7 @@ def main():
             if short:
                 raise _ShortClass(short)
             if args.purity:
-                # Each class keeps its purest patches: least ground that
-                # looks like another class. Stable, so ties keep the
-                # search's own ranking.
+                # Purest patches first (stable: ties keep the search order).
                 for gi, g in enumerate(groups):
                     others = [rgb[k] for k in range(len(rgb)) if k != gi]
                     pur = [purity(c[2], rgb[gi], others, up) for c in g]
@@ -450,13 +396,9 @@ def main():
 
         return chosen, class_sets
 
-    # A rarer material may not make the first pool at all: search for 48 on
-    # ground that is mostly sand and the scrub class comes back short. When
-    # choosing for ourselves, widen the search and try again rather than
-    # stop and ask the user to guess a bigger --count.
-    # A count, from the command line or a preset, is where the search
-    # starts, not a promise to stop there: a preset saved for two colours
-    # asks for too few candidates for three.
+    # A rarer material may miss the first pool (scrub on mostly-sand ground),
+    # so the search widens and retries. --count is where it starts, not a
+    # limit (a preset saved for two colours asks too few for three).
     auto_widen = args.auto and not args.patches
     for attempt in range(4 if auto_widen else 1):
         try:
@@ -482,25 +424,21 @@ def main():
         overlap_report(picked[:need], args.size)
         patches = prepare_patches(picked, need, args, up)
         if args.rotations > 1:
-            # Real patches first, then each turned a quarter, then a half...
-            # so every colour set mixes sources, and a turned copy is only
-            # used where the capture ran out of distinct ground.
+            # Real patches first, then quarter turns, then half turns: turned
+            # copies only where the capture ran out of distinct ground.
             patches = [rotate_patch(p, r, up) for r in range(args.rotations)
                        for p in patches][:tiles_need]
             print(f"  {need} real patches, {len(patches) - need} turned copies")
 
-        # Which patches supply which axis is not arbitrary: put the odd one
-        # out on one axis and every boundary running that way is made of
-        # different material from the ones running across it.
+        # Balance the axes, or boundaries one way differ from the other.
         (h_patches, v_patches), axis_gap = balanced_split(patches, args.colours)
         naive = float(np.linalg.norm(
             np.mean([appearance(p) for p in patches[:args.colours]], axis=0)
             - np.mean([appearance(p) for p in patches[args.colours:tiles_need]],
                       axis=0)))
         if args.rotations > 1:
-            # Turned copies share their source's mean appearance, so both
-            # axes hold the same sources and the balance reads zero by
-            # construction; it measures nothing here.
+            # With turned copies both axes hold the same sources: nothing
+            # to measure.
             print("\n  axis balance: not meaningful with --rotations "
                   "(both axes share the same sources)")
         else:
@@ -528,20 +466,13 @@ def main():
         all_codes += c
         all_class += [ci] * len(t)
 
-    # Every class is built over the same edge colours, so each code tuple
-    # exists once per class. That is what lets a cell take any class without
-    # consulting its neighbours: the matching constraint is satisfied by the
-    # code, and the class rides along independently. A class boundary is
-    # then a visible change of material with no geometric seam, which is
-    # what it should be.
+    # Every class uses the same edge codes, so a cell can take any class
+    # without breaking matching: the code satisfies the neighbours, the
+    # class is chosen independently by the rule.
     tiles, codes, tile_class = all_tiles, all_codes, all_class
 
-    # The construction is only worth anything if edges really do match.
-    # Grouped by class as well as by colour. Two classes are different
-    # material by construction, so their edges are not meant to be
-    # identical - only tiles of the same class and colour have to match,
-    # and comparing across classes would report a failure that is the
-    # whole point of having classes.
+    # Check that edges really match, within each class (different classes
+    # are different material by design).
     ok = True
     for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
         groups = {}
@@ -556,31 +487,19 @@ def main():
     print(f"  edge check: "
           f"{'matching colours share an identical edge' if ok else 'FAILED'}")
 
-    # Layout is checked on one class's codes: every class carries the same
-    # set, so a layout valid for one is valid for any, and that is exactly
-    # the property that lets the class be chosen per cell afterwards.
+    # Layout checked on one class's codes (every class has the same set).
     first = [c for c, k in zip(codes, tile_class) if k == 0]
     grid = layout(first, 16, 16, seed=0)
     print(f"  layout check: {check_layout(first, grid)} mismatched edges "
           f"in 16x16")
 
-    # Levels of detail. GSWT retrains each level from downsampled images and
-    # caps the count at N0 / 4^i; retraining is not available here, so each
-    # level keeps the most visible splats of the level above instead -
-    # largest area times opacity. Same budget, coarser selection.
-    # The wide cut exists so levelling has material; a finished tile only
-    # needs enough overhang to cover the seam. Keeping all of it means every
-    # boundary strip is drawn by both neighbours, and they swap which is in
-    # front as the camera turns. Cutting it to nothing leaves the strip bare,
-    # because a Gaussian centred just outside still covers ground just in.
+    # Levels of detail. GSWT retrains each level with N0 / 4^i splats; with
+    # no retraining here, each level keeps the most visible splats of the one
+    # above (area times opacity), spread over the tile.
     #
-    # The amount that works is a couple of splat widths - a distance set by
-    # the material, not by how big the tile happens to be.
-    # Whether a Gaussian outside the square is worth keeping depends on how
-    # far it reaches, and that varies: sizes have a long tail, and the big
-    # ones cover the most ground. A single distance keeps the small ones
-    # that barely matter and drops the large ones that do, so each Gaussian
-    # is allowed its own reach instead.
+    # Overhang: kept whole, boundary strips are drawn by both neighbours and
+    # swap as the camera turns. Optionally each Gaussian gets its own reach
+    # (--overhang-splats) or a flat margin (--tile-overhang).
     plane2 = [j for j in range(3) if j != up]
     trimmed = []
     for t in tiles:
@@ -588,17 +507,9 @@ def main():
             reach = args.size * (0.5 + args.tile_overhang)
             keep = np.all(np.abs(t.xyz[:, plane2]) <= reach, axis=1)
         else:
-            # Any Gaussian of one tile sitting inside its neighbour's half is
-            # a strip both tiles draw. One of them wins, and which one flips
-            # when their depths cross - for a whole row at once when the view
-            # runs down it.
-            #
-            # Reaching over on two sides only does not help: the tile that
-            # reaches still lands on ground its neighbour also covers.
-            # Cutting at the square is the only arrangement where nothing
-            # overlaps, and it costs almost nothing, because a Gaussian
-            # centred just inside still spreads across the join from its own
-            # side.
+            # Default: cut at the square, the only arrangement where no strip
+            # is drawn by both tiles (whose winner flips for a whole row when
+            # depths cross). Gaussians just inside still spread over the join.
             allow = args.overhang_splats * t.scale.max(axis=1)
             out = np.abs(t.xyz[:, plane2]).max(axis=1) - args.size / 2.0
             keep = out <= allow
@@ -609,8 +520,6 @@ def main():
     if args.tile_overhang is not None:
         how = f"a flat {args.tile_overhang:.1%} of the tile"
     else:
-        out = np.concatenate([np.abs(t.xyz[:, plane2]).max(axis=1)
-                              - args.size / 2.0 for t in trimmed])
         how = ("cut at the square, so no two tiles cover the same ground"
                if args.overhang_splats <= 0 else
                f"{args.overhang_splats:g} of each Gaussian's own width")
@@ -630,11 +539,8 @@ def main():
                 ink = part_ink(t)
                 keep = stratified_keep(t, budget, args.size, up)
                 part = t.subset(keep)
-                # Dropping three splats in four leaves holes. GSWT avoids
-                # this by retraining each level, so its coarse Gaussians are
-                # genuinely larger; retraining is not available here, so the
-                # survivors are grown instead until they cover the same
-                # total area. Area goes as size squared, hence the sqrt.
+                # Grow the survivors to cover the same total area (GSWT
+                # retrains instead); area goes as size squared, hence sqrt.
                 if args.lod_compensate:
                     grow = float(np.sqrt(ink.sum() / max(ink[keep].sum(), 1e-12)))
                     grow = min(grow, 4.0)      # a cap, or level 4 turns to soup

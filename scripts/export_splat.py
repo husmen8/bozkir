@@ -8,11 +8,8 @@ web renderer does not use. This packs each splat into 32 bytes:
     bytes 24..27   colour     4 x uint8     r, g, b, opacity
     bytes 28..31   rotation   4 x uint8     w, x, y, z as round(q*128 + 128)
 
-That is antimatter15's .splat layout, so files written here should also
-open in other .splat viewers - useful for sanity checking, and for handing
-someone a file without handing them this repo.
-
-Garden at 730,850 splats comes out around 23 MB instead of 181.
+antimatter15's .splat layout, so the files open in other .splat viewers.
+Garden (730,850 splats) goes from 181 MB to about 23 MB.
 
     python scripts/export_splat.py data/aligned/garden.ply --clean
     python scripts/export_splat.py data/raw/garden.ply --clean --sort
@@ -28,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 
-from bozkir.pack import pack, STRIDE  # noqa: E402,F401
+from bozkir.pack import pack, STRIDE  # noqa: E402
 
 
 def main():

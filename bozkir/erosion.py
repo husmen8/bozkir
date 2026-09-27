@@ -1,42 +1,29 @@
 """Generating terrain that has been rained on.
 
-The surface under the tiles has been two sine waves, or a borrowed survey.
-Neither is satisfactory for long. Sine waves have no drainage at all, and a
-survey covers the few dozen metres somebody flew over - a game map is
-kilometres, and there is no capture of it.
+A survey covers a few dozen metres and a game map is kilometres, so the
+terrain is generated - by the process that made the real one. Noise alone
+gives hills with no channels; water run over it gives drainage.
 
-So: generate the terrain, and generate it by the process that made the real
-one. Fractal noise alone gives hills, but hills of a particular wrong kind -
-every slope the same, no channels, ridges that wander without joining.
-Running water over it fixes that, and fixes it for the right reason.
-
-The model is the stream power law of geomorphology,
+The stream power law of geomorphology,
 
     dh/dt  =  U  -  K * A^m * S  +  D * laplacian(h)
 
-uplift, minus fluvial incision (drainage area A times slope S), plus
-hillslope diffusion. It is solved the way FastScape solves it (Braun and
-Willett, Geomorphology 2013): each step, every cell drains to its steepest
-neighbour, the incision term is made implicit, and the heights are updated
-in drainage order - receivers before donors - so the step is stable however
-large it is and the cost is linear in the number of cells. The same
-equation drives the graphics work this descends from (Cordonnier et al.,
-Eurographics 2016; Schott et al., ACM TOG 2023). docs/terrain.md maps each
-function here to its source.
+(uplift, fluvial incision by drainage area A and slope S, hillslope
+diffusion), solved the FastScape way (Braun and Willett 2013): steepest-
+descent receivers, implicit incision, updates receivers-first, so any step
+is stable and the cost is linear. The same equation as Cordonnier et al.
+2016 and Schott et al. 2023. docs/terrain.md maps each function to its
+source.
 
-Two simplifications, stated so nobody has to discover them:
-
+Simplifications:
   - Pits are filled at the start and the end (Priority-Flood, Barnes et
-    al. 2014), not routed through at every step. Depression routing during
-    the run (Cordonnier, Bovy and Braun 2019) is the thorough version.
-  - The sediment map is a proxy, not a deposition model. Eroded material is
-    passed downstream and settles in proportion to how flat the ground is.
-    Yuan et al. (JGR Earth Surface 2019) is the principled version.
+    al. 2014), not routed every step (Cordonnier, Bovy and Braun 2019).
+  - Sediment is a proxy: eroded material passed downstream, settling where
+    the ground flattens. Yuan et al. 2019 is the real deposition model.
 
-Everything here is written so web/terrain.js can do exactly the same
-arithmetic in the same order - integer hashing for noise instead of a
-random number generator, explicit evaluation order everywhere - and
-tests/test_pipeline.py holds the two to the same output.
+web/terrain.js does the same arithmetic in the same order (integer hashing
+instead of an RNG, fixed evaluation order); tests/test_pipeline.py holds the
+two bit-identical.
 """
 
 import numpy as np
@@ -52,11 +39,9 @@ CROP_MARGIN = 0.15
 
 # --------------------------------------------------------------- profiles
 
-# Named terrains. Each is a noise recipe, an optional terracing, and the
-# erosion that is run on it. `uplift` above zero grows relief from the noise
-# as an uplift map, the way the graphics papers above do it - valleys then
-# emerge rather than being carved into a surface that was already there.
-# At zero, the noise is the starting surface and erosion only cuts into it.
+# Named terrains: a noise recipe, optional terraces, and the erosion run on
+# it. With `uplift` the noise is an uplift map and relief grows (valleys
+# emerge); without, erosion only cuts into the noise.
 PROFILES = {
     # Low relief, wide valleys: open country.
     "plains":    dict(dome=0.5, octaves=5, freq=2, ridge=0.0, relief=0.35,
@@ -91,10 +76,8 @@ PROFILES = {
     "alpine":    dict(octaves=7, freq=2, ridge=0.75, relief=0.4,
                       iterations=180, incision=0.55, diffusion=0.04,
                       uplift=0.03),
-    # Rugged ground: almost no hillslope creep, so the ridges and steps
-    # erosion cuts stay sharp instead of being rounded into mounds.
-    # Diffusion is what rounds a landscape; these keep just enough of it
-    # for the numerics.
+    # Rugged ground: almost no creep (diffusion is what rounds a landscape),
+    # so cut ridges and steps stay sharp.
     "crags":     dict(dome=0.3, octaves=7, freq=5, ridge=0.95, relief=1.1,
                       iterations=60, incision=0.6, diffusion=0.01),
     "buttes":    dict(dome=0.35, octaves=6, freq=4, ridge=0.6, relief=1.0,
@@ -102,21 +85,19 @@ PROFILES = {
                       terraces=4),
     "gorge":     dict(dome=0.2, octaves=7, freq=3, ridge=0.9, relief=1.3,
                       iterations=100, incision=1.2, diffusion=0.02),
-    # Ground falling away from a range to one side: parallel valleys all
-    # running the same way, the way an apron below mountains drains.
+    # Ground falling away from a range: parallel valleys draining one way.
     "piedmont":  dict(octaves=6, freq=3, ridge=0.4, relief=1.0,
                       iterations=70, incision=0.45, diffusion=0.08,
                       tilt=0.55),
-    # Bozkir: the steppe the project is named for - wide, nearly level
-    # ground with long shallow draws, little to break the horizon.
+    # Bozkir, the steppe the project is named for: wide, nearly level
+    # ground with long shallow draws.
     "steppe":    dict(dome=0.5, octaves=5, freq=2, ridge=0.1, relief=0.25,
                       iterations=45, incision=0.3, diffusion=0.12),
     # Hills cut into steps: resistant beds left standing as benches.
     "terraced":  dict(dome=0.45, octaves=6, freq=3, ridge=0.3, relief=0.9,
                       iterations=50, incision=0.35, diffusion=0.05,
                       terraces=7),
-    # Long parallel ridges: the noise is stretched along one axis, so
-    # crests run far in one direction and repeat across the other.
+    # Long parallel crests: noise stretched along one axis.
     "dunes":     dict(dome=0.3, octaves=5, freq=5, ridge=0.9, relief=0.5,
                       iterations=20, incision=0.1, diffusion=0.02,
                       stretch=0.3),
@@ -134,12 +115,9 @@ def _imul(a, b):
 
 
 def _hash_u32(x, y, s):
-    """A 32-bit integer hash of lattice point (x, y) under seed s.
-
-    Written out in 32-bit steps rather than drawn from a random number
-    generator so that web/terrain.js produces the same lattice bit for bit:
-    numpy's generator cannot be reproduced in a browser.
-    """
+    """A 32-bit integer hash of lattice point (x, y) under seed s, in 32-bit
+    steps so web/terrain.js gets the same bits (numpy's RNG cannot be
+    reproduced in a browser)."""
     x = np.asarray(x, dtype=np.uint64) & _M32
     y = np.asarray(y, dtype=np.uint64) & _M32
     h = _imul(x, 0x27D4EB2D) ^ _imul(y, 0x165667B1) \
@@ -149,22 +127,17 @@ def _hash_u32(x, y, s):
     return h ^ (h >> np.uint64(16))
 
 
-# Eight gradient directions, picked by the hash. Fixed vectors rather than
-# an angle so no trigonometry is involved: sin and cos are not required to
-# round the same way in every language, and these are.
+# Eight fixed gradient directions: no sin/cos, whose rounding can differ
+# between languages.
 _GX = np.array([1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0, 0.0])
 _GY = np.array([1.0, 1.0, -1.0, -1.0, 0.0, 0.0, 1.0, -1.0])
 
 
 def _gradient_noise(h, w, f, s, stretch=1.0):
     """One octave of gradient (Perlin) noise, f lattice cells across, 0..1.
-
-    Gradient rather than value noise: value noise interpolates random
-    heights on a square lattice and the lattice shows, as flat-topped
-    blocks aligned with the axes - which a terrain then erodes into
-    rectangular valleys. Gradient noise has its extremes between lattice
-    points instead of on them. Quintic fade, as in Perlin's improved noise.
-    """
+    Not value noise, whose axis-aligned blocks eroded into rectangular
+    valleys. Quintic fade, as in Perlin's improved noise. `stretch` scales
+    the lattice along x (anisotropic noise, for dunes)."""
     i = np.arange(w, dtype=np.float64)
     j = np.arange(h, dtype=np.float64)
     x = (i * (f * stretch)) / w
@@ -194,11 +167,7 @@ def _gradient_noise(h, w, f, s, stretch=1.0):
 
 def fbm(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0,
         stretch=1.0):
-    """Fractal noise: octaves at doubling frequency and halving amplitude.
-
-    On its own it makes lumpy ground - fine for a distant hillside, wrong
-    anywhere the eye can see that water has never run across it.
-    """
+    """Fractal noise: octaves at doubling frequency and halving amplitude."""
     h, w = int(shape[0]), int(shape[1])
     out = np.zeros((h, w))
     amp, f, norm = 1.0, float(freq), 0.0
@@ -212,12 +181,9 @@ def fbm(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0,
 
 def ridged(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0,
            stretch=1.0):
-    """Ridged fractal noise: sharp crests instead of round lumps.
-
-    Each octave is folded about its midpoint and inverted, which turns the
-    smooth maxima into creases (Musgrave's ridged multifractal, simplified).
-    Mountains read as ranges rather than as a field of mounds.
-    """
+    """Ridged fractal noise: each octave folded about its midpoint and
+    inverted, so maxima become creases (Musgrave's ridged multifractal,
+    simplified). Mountains read as ranges, not mounds."""
     h, w = int(shape[0]), int(shape[1])
     out = np.zeros((h, w))
     amp, f, norm = 1.0, float(freq), 0.0
@@ -237,14 +203,10 @@ def _unit(a):
 
 
 def terrace(z, steps, sharpness=0.5):
-    """Pull heights towards `steps` evenly spaced levels.
-
-    Flats separated by steep risers, which is what a stack of resistant beds
-    erodes into. `sharpness` 0 leaves the surface alone and 1 makes every
-    level flat; in between the riser keeps some slope for erosion to cut.
-    Rounds half up, explicitly, because Python and JavaScript disagree about
-    rounding 0.5 and this has to come out the same in both.
-    """
+    """Pull heights towards `steps` levels: flats with risers between, as
+    resistant beds erode. `sharpness` 0 leaves the surface, 1 makes every
+    level flat. Rounds half up explicitly (Python and JS round 0.5
+    differently)."""
     steps = max(1, int(steps))
     k = np.asarray(z, dtype=np.float64) * steps
     base = np.floor(k)
@@ -257,17 +219,11 @@ def terrace(z, steps, sharpness=0.5):
 
 def base_surface(size, seed=0, octaves=6, freq=4, ridge=0.5, terraces=0,
                  dome=0.0, tilt=0.0, stretch=1.0):
-    """The noise a profile starts from, 0..1, before any erosion.
+    """The noise a profile starts from, 0..1, before erosion.
 
-    `dome` raises the middle against the border. The border is base level -
-    where water leaves the map - and noise knows nothing about that, so its
-    broad low patches sit in the interior as closed basins. Filled, they
-    become lakes of dead flat ground. A gentle rise towards the middle
-    gives them somewhere to drain instead.
-
-    `tilt` lowers the field towards one edge, so every valley drains the
-    same way - parallel drainage, which reads nothing like the branching
-    networks the other profiles make.
+    `dome` raises the middle against the border (base level), so low
+    patches drain out instead of filling into dead-flat lakes. `tilt` lowers
+    the field towards one edge, for parallel drainage.
     """
     n = int(size)
     shape = (n, n)
@@ -277,9 +233,8 @@ def base_surface(size, seed=0, octaves=6, freq=4, ridge=0.5, terraces=0,
         z = z * (1.0 - ridge) + r * ridge
     z = _unit(z)
     if dome > 0:
-        # The rise sits in the outer band that generate() crops away, so
-        # the drainage it gives reaches the border without tilting the
-        # ground anyone sees towards its own middle.
+        # The rise sits in the band generate() crops away, so the visible
+        # ground is not tilted towards its middle.
         band = CROP_MARGIN / (1.0 + 2.0 * CROP_MARGIN)
         z = _unit(z * (1.0 - dome) + _edge_taper(n, n, frac=band) * dome)
     if tilt > 0:
@@ -298,26 +253,20 @@ _NEIGHBOURS = [(b, a) for b in (-1, 0, 1) for a in (-1, 0, 1)
 
 
 def fill_depressions(h, eps=None):
-    """Raise every pit until it can drain to the border (Priority-Flood).
+    """Raise every pit until it drains to the border (Priority-Flood,
+    Barnes, Lehman and Mulla 2014).
 
-    Noise is full of small closed hollows. Water that runs into one has
-    nowhere to go, so without this the drainage network is a few hundred
-    disconnected puddles and erosion has nothing to cut along. Flooding
-    inwards from the border in order of height (Barnes, Lehman and Mulla,
-    Computers & Geosciences 2014), and lifting each cell to a hair above
-    the one it was reached from, gives every cell a downhill path out.
-
-    Run on the starting surface and again on the result. Incision keeps a
-    cell above its receiver, so it cannot make new pits; creep can make
-    shallow ones, which the second pass removes. Ties are broken by index so
-    JavaScript floods in the same order.
+    Without it, noise drains into hundreds of puddles and erosion has
+    nothing to cut along. Flooded inwards from the border by height, each
+    cell lifted a hair above the one it was reached from. Run before and
+    after erosion (creep can leave shallow pits). Ties break by index so JS
+    floods in the same order.
     """
     import heapq
     g = np.array(h, dtype=np.float64, copy=True)
     if eps is None:
-        # Enough tilt across a filled floor for incision to find a line
-        # across it, too little to see: a ten-thousandth of the relief per
-        # cell, scaled to the field so it means the same at every size.
+        # Enough tilt across a filled floor for incision to find a path,
+        # too little to see; scaled so it means the same at every size.
         eps = 1e-4 * max(float(g.max() - g.min()), 1e-9) * 256.0 / max(g.shape)
     n0, n1 = g.shape
     flat = g.ravel()
@@ -349,13 +298,10 @@ def fill_depressions(h, eps=None):
 
 
 def _receivers(h):
-    """Steepest-descent receiver and distance for every cell.
-
-    Border cells are base level and receive nothing; a cell with no lower
-    neighbour is its own receiver (a pit). Neighbours are tried in a fixed
-    order and only a strictly steeper one replaces the best so far, so ties
-    resolve identically in both languages.
-    """
+    """Steepest-descent receiver and distance for every cell. Border cells
+    are base level; a cell with no lower neighbour is its own receiver.
+    Fixed neighbour order and strict comparison, so ties resolve the same
+    in both languages."""
     n0, n1 = h.shape
     N = n0 * n1
     idx = np.arange(N).reshape(n0, n1)
@@ -387,13 +333,9 @@ def _edge_taper(n0, n1, frac=0.12):
 
 
 def _levels(rec):
-    """Order cells receivers-first: by distance from their outlet, then index.
-
-    Distance to the outlet by pointer jumping, which needs log(depth) array
-    passes instead of a walk per cell. Any order with receivers first gives
-    the same implicit update; this one is also cheap to build in JavaScript
-    and fixes the order floating-point sums happen in.
-    """
+    """Order cells receivers-first: by distance to the outlet (pointer
+    jumping, log(depth) passes), then index. Cheap in JS too, and it fixes
+    the order floating-point sums happen in."""
     N = rec.size
     ar = np.arange(N)
     d = (rec != ar).astype(np.int64)
@@ -413,13 +355,12 @@ def _levels(rec):
 
 def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
           uplift_map=None, area_exp=0.5, dt=1.0, track=True):
-    """Run the stream power law over a height field. See the module docstring.
+    """Run the stream power law (see the module docstring).
 
-    `incision` is K, `diffusion` D, `uplift` U (per step, times the uplift
-    map, which defaults to the starting surface itself). Drainage area is a
-    fraction of the whole field so the same K means the same thing at 256
-    and at 1024. Returns `(height, sediment)`, or height alone without
-    `track`.
+    `incision` is K, `diffusion` D, `uplift` U (times the uplift map, by
+    default the starting surface). Drainage area is a fraction of the field,
+    so K means the same at any size. Returns (height, sediment), or height
+    alone without `track`.
     """
     h = fill_depressions(np.array(z, dtype=np.float64, copy=True))
     n0, n1 = h.shape
@@ -427,9 +368,8 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
     flat = h.ravel()
     umap = (np.asarray(uplift_map, dtype=np.float64).ravel()
             if uplift_map is not None else _unit(flat.copy()))
-    # Uplift fades to nothing at the border, which is base level. Without
-    # the fade the interior rises past a border that cannot move and the
-    # field ends in a cliff on all four sides.
+    # Uplift fades out at the border (base level), or the field ends in a
+    # cliff on all four sides.
     umap = umap * _edge_taper(n0, n1).ravel()
     border = np.zeros((n0, n1), bool)
     border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
@@ -443,8 +383,8 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
         depth, order, starts = _levels(rec)
         levels = len(starts) - 1
 
-        # Drainage area in cells, deepest level first. Whole numbers, so the
-        # order of the additions cannot change the result.
+        # Drainage area in cells, deepest level first (whole numbers, so
+        # addition order does not matter).
         area = np.ones(N)
         for L in range(levels - 1, 0, -1):
             idx = order[starts[L]:starts[L + 1]]
@@ -467,8 +407,7 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
         eroded = np.maximum(before - flat, 0.0)
         slope = np.maximum(flat - flat[rec], 0.0) / dist
 
-        # Hillslope creep, explicit, interior only. Terms summed in a fixed
-        # order so JavaScript can repeat it exactly.
+        # Hillslope creep, explicit, interior only, terms in a fixed order.
         if diffusion:
             g = flat.reshape(n0, n1)
             lap = np.zeros((n0, n1))
@@ -477,8 +416,7 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
             flat = flat + (diffusion * dt) * lap.ravel()
 
         if track:
-            # Material passed downstream, settling where the ground flattens.
-            # A proxy for deposition, not a model of it.
+            # Sediment proxy: passed downstream, settling where it flattens.
             qs = eroded.copy()
             settle = 0.5 * (0.02 / (0.02 + slope))
             for L in range(levels - 1, 0, -1):
@@ -489,10 +427,8 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
             roots = order[starts[0]:starts[1]]
             sediment[roots] = sediment[roots] + qs[roots]
 
-    # Once more at the end. Creep smooths channel floors and can leave
-    # shallow closed hollows in them; anything that reads drainage off the
-    # result - the material rule does - would see a network broken into
-    # puddles. Hydrological conditioning, as surveys get before analysis.
+    # Filled once more: creep can leave shallow hollows in channel floors,
+    # which would break the drainage the material rule reads.
     h = fill_depressions(flat.reshape(n0, n1))
     return (h, sediment.reshape(n0, n1)) if track else h
 
@@ -500,12 +436,10 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
 def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
              relief=1.0, iterations=40, incision=0.3, diffusion=0.1,
              uplift=0.0, terraces=0, dome=0.0, tilt=0.0, stretch=1.0):
-    """A height field, eroded, and where its sediment settled; both 0..1.
+    """An eroded height field and its sediment map, both 0..1.
 
-    `profile` names one of PROFILES and fills in the rest. An argument
-    passed explicitly still wins, so a profile can be nudged without
-    copying it - which is why the defaults here are only used when there is
-    no profile at all.
+    `profile` names one of PROFILES; any argument passed explicitly still
+    wins, so a profile can be nudged without copying it.
     """
     given = dict(octaves=octaves, freq=freq, ridge=ridge, relief=relief,
                  iterations=iterations, incision=incision,
@@ -526,15 +460,11 @@ def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
                 p[k] = v
         given = {**{k: dflt[k] for k in given}, **p}
     s = given
-    # Simulated on a larger field and cropped to its middle. The border of
-    # the simulation is base level - where water leaves - so everything
-    # drains towards it, and a rule that places material in low, collected
-    # ground would draw a frame round every map. Keeping the outer
-    # CROP_MARGIN of each side out of the result puts that border outside
-    # what anyone sees.
+    # Simulated larger and cropped to the middle: everything drains to the
+    # simulation border, so the rule would draw a frame of collected
+    # material round every map.
     n = int(size)
-    # Rounded half up by hand: Python rounds halves to even, JavaScript
-    # up, and at n = 30 the two would crop different fields.
+    # Rounded half up by hand (Python rounds halves to even, JS up).
     big = n + 2 * int(np.floor(n * CROP_MARGIN + 0.5))
     k = (big - n) // 2
     z0 = base_surface(big, seed, s["octaves"], s["freq"], s["ridge"],

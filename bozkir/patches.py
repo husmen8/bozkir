@@ -1,12 +1,9 @@
 """Choosing which squares of a scene become tiles.
 
-Everything here decides what goes into a tile set: where to cut, how thick a
-slab to keep, whether a square is ground or a wall, whether four patches
-look enough alike to sit next to each other, and which splats survive into a
-coarser level of detail.
-
-It used to live inside scripts/export_tileset.py, which made it library code
-in a command-line tool - awkward to import and invisible to an editor.
+Where to cut, how thick a slab to keep, whether a square is ground or a
+wall, which patches look alike enough to sit side by side, which splats
+survive into coarser levels of detail, and splitting a capture into
+material classes.
 """
 
 import hashlib
@@ -20,13 +17,9 @@ from .transform import rotate, quat_between
 
 
 def ground_level(h, thickness):
-    """Height of the ground within a patch.
-
-    Not a low percentile: reconstructions leave junk below the surface, and
-    a percentile follows it down. The ground is the densest thin horizontal
-    layer, so take the tallest bin of a histogram instead. Foliage above is
-    diffuse and never out-votes it.
-    """
+    """Height of the ground within a patch: the tallest bin of a height
+    histogram (the densest thin layer). A low percentile would follow the
+    junk reconstructions leave below the surface."""
     lo, hi = np.percentile(h, [1, 99])
     if hi - lo < 1e-6:
         return float(lo)
@@ -36,35 +29,23 @@ def ground_level(h, thickness):
     return float((edges[k] + edges[k + 1]) / 2.0)
 
 def mass_below(p, up_axis, g, thickness, below=0.25):
-    """Fraction of a column that sits under the layer called 'ground'.
-
-    The histogram vote picks the densest horizontal layer, which under a
-    thick tree is the canopy rather than the dirt. Nothing should be beneath
-    the ground, so a large fraction here means the wrong layer won. This is
-    a local test: unlike comparing against a global height it works on
-    terrain with real relief, where the ground is not near zero.
-    """
+    """Fraction of a column below the layer taken as ground. Large means the
+    wrong layer won the vote (under a tree, the canopy). Local, so it works
+    on sloping terrain."""
     h = p.xyz[:, up_axis]
     return float((h < g - thickness * below).mean())
 
 def clip_slab(p, up_axis, thickness, below=0.25):
-    """Keep a slab around the ground, discarding whatever stands on it.
-
-    GSWT cuts a full column and keeps every Gaussian regardless of height,
-    which suits a flat exemplar. On a captured outdoor scene the column runs
-    from the dirt up through a whole tree, and a tree does not tile.
-    """
+    """Keep a slab around the ground. GSWT keeps the whole column, fine for
+    a flat exemplar; outdoors the column runs up through trees."""
     h = p.xyz[:, up_axis]
     g = ground_level(h, thickness)
     keep = (h >= g - thickness * below) & (h <= g + thickness)
     return p.subset(keep), g
 
 def level_patch(p, up_axis):
-    """Rotate a patch so its own ground is horizontal, then drop it to zero.
-
-    Tiles are laid on a common plane, so each has to agree about which way
-    is flat. Without this, patches cut from a sloping scene meet at a step.
-    """
+    """Rotate a patch so its ground is horizontal, then drop it to zero, so
+    patches cut from a slope do not meet at a step."""
     if len(p) < 50:
         return p, 0.0
     d = p.xyz - p.xyz.mean(axis=0)
@@ -95,13 +76,11 @@ def patch_tilt(p, up_axis):
     return float(np.degrees(np.arccos(np.clip(abs(n[up_axis]), 0, 1))))
 
 def band_stats(p, up_axis, size, margin=0.22):
-    """Relief and tilt measured separately for the edge band and the middle.
+    """Relief and tilt of the edge band, and relief of the middle.
 
-    A tile can carry a boulder or a bush and still tile, as long as its
-    edges stay flat: the edge strips are what two neighbouring tiles have to
-    agree on, and the graph cut only ever moves boundaries in the interior.
-    Judging the whole patch at once throws away every interesting square,
-    which is why the terrain ends up as the same flat ground repeated.
+    A tile can carry a bush and still tile if its edges are flat - edges are
+    what neighbours must agree on, and the graph cut only moves the interior.
+    Judging the whole patch rejects every interesting square.
 
     Returns (edge_relief, edge_tilt, interior_relief).
     """
@@ -117,11 +96,8 @@ def band_stats(p, up_axis, size, margin=0.22):
         lo, hi = np.percentile(h[sel], [5, 95])
         return float(hi - lo)
 
-    # Tilt is about whether the ground at the rim is level, so the plane is
-    # fitted to the lower part of the band only. Fitting the whole band
-    # measures the shape of a shell as tall as the slab, which says nothing
-    # about the ground and reports a near-random angle once the slab is
-    # thick enough to hold anything standing up.
+    # Tilt from the lower 40% of the band only: fitted to the whole band it
+    # measures a shell as tall as the slab and reports a near-random angle.
     tilt = 90.0
     if edge.sum() >= 50:
         eh = h[edge]
@@ -136,27 +112,16 @@ def band_stats(p, up_axis, size, margin=0.22):
     return relief(edge), tilt, relief(mid)
 
 def part_ink(p):
-    """How much screen a splat can cover: its area times its opacity.
-
-    Used to decide which splats survive into a coarser level. Keeping the
-    largest and most opaque preserves the overall look while dropping the
-    fine detail that a distant tile could not resolve anyway.
-    """
+    """Screen a splat can cover: area times opacity. Coarser LOD levels keep
+    the largest, most opaque splats."""
     sc = np.sort(p.scale, axis=1)
     return sc[:, 2] * sc[:, 1] * p.opacity
 
 def stratified_keep(p, budget, size, up_axis=2):
-    """Pick `budget` splats spread evenly over the tile.
-
-    Taking the highest-ink splats globally concentrates them wherever the
-    tile happens to be brightest, leaves holes elsewhere, and - because
-    every tile is built from the same few source patches - keeps nearly the
-    same set in every tile, so the tiling looks repetitive at distance.
-
-    Binning the tile into a grid and keeping the best from each bin fixes
-    both: coverage stays even, and each tile keeps what is locally
-    distinctive about it rather than what is globally brightest.
-    """
+    """Pick `budget` splats spread evenly over the tile: the best per grid
+    bin. Taking the highest-ink splats globally left holes, and kept the
+    same splats in every tile built from the same patches (repetitive at
+    distance)."""
     if budget >= len(p):
         return np.arange(len(p))
 
@@ -181,19 +146,13 @@ def stratified_keep(p, budget, size, up_axis=2):
     return np.sort(keep)
 
 def rendered_coverage(p, size, up_axis=2, resolution=80, cap=12_000):
-    """What fraction of the tile a top-down render actually fills.
+    """Fraction of the tile a top-down render fills.
 
-    The bin estimate below is cheap and roughly right, but it and a render
-    can disagree by 0.14 - it reported over 80% for patches a render showed
-    as half empty, so patches with a hole in them passed the filter.
-
-    The rasterizer loops per splat in Python, so a dense patch costs
-    seconds. Rendering a random subset instead is proportionally faster,
-    and the density it loses can be put back: a pixel covered with
-    probability 1 - exp(-d) at full density reads 1 - exp(-f*d) with a
-    fraction f of the splats, so raising (1 - alpha) to the power 1/f
-    recovers it. Per pixel, not overall - correcting the average instead
-    pushes empty regions toward one and reports a half-empty patch as full.
+    The cheap estimate (coverage) can be off by 0.14 and let holed patches
+    through. The render loops per splat in Python, so dense patches render a
+    random subset of `cap` splats and the density is restored per pixel:
+    1 - (1 - alpha)^(1/f) for a fraction f. Per pixel, not on the average,
+    which would push empty regions towards full.
     """
     from .graphcut import render_patch
     n = len(p)
@@ -209,18 +168,12 @@ def rendered_coverage(p, size, up_axis=2, resolution=80, cap=12_000):
 
 
 def coverage(p, size, up_axis=2, grid=16):
-    """Roughly what fraction of the tile square a render would fill.
+    """Fast estimate of the fraction of the tile a render would fill.
 
-    Two wrong ways to do this. Counting how many bins hold at least one
-    splat says a bin with three is as good as one with three thousand.
-    Summing all the splat area and dividing by the tile area never looks at
-    where the splats are, so a patch with everything crammed into half the
-    square scores the same as an even one - which is the case that matters,
-    because that is what a half-reconstructed patch looks like.
-
-    So: bin the area, and ask per bin how likely a point in it is covered,
-    treating the splats inside as scattered at random. Averaging those gives
-    a number that tracks a render.
+    Splat area (opacity-weighted) binned on a grid, and per bin the chance a
+    point is covered if the splats inside were scattered at random:
+    1 - exp(-area / cell). Counting occupied bins, or total area over tile
+    area, both miss a patch with everything crammed into one half.
     """
     if not len(p):
         return 0.0
@@ -242,15 +195,10 @@ def coverage(p, size, up_axis=2, grid=16):
     return float(np.mean(1.0 - np.exp(-binned / cell)))
 
 def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
-    """How much a patch looks like tileable ground. Higher is better.
-
-    Three things are wanted: enough splats to render, a surface that is
-    flat rather than a wall or an object, and coverage spread across the
-    whole square rather than clustered in one corner.
-    """
+    """How much a patch looks like tileable ground; higher is better.
+    Wants enough splats, a flat surface, and even coverage."""
     if len(p) < 2000:
-        # Same keys as a real result: callers read these before checking
-        # the score, and a bare dict turns a sparse patch into a crash.
+        # Same keys as a real result, so callers can read them safely.
         return -1.0, {"splats": len(p), "relief": 0.0, "filled": 0.0,
                       "planarity": 1.0, "edge_relief": 0.0,
                       "edge_tilt": 90.0, "interior_relief": 0.0, "cover": 0.0,
@@ -261,9 +209,8 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
     lo, hi = np.percentile(h, [5, 95])
     relief = float(hi - lo)
 
-    # How flat the surface actually is, independent of how thick the slab
-    # was cut. A patch that is mostly a tree trunk fails this even if the
-    # slab clipped it to the right thickness.
+    # Flatness of the surface itself, independent of the slab thickness
+    # (a patch that is mostly a trunk fails this).
     d = p.xyz - p.xyz.mean(axis=0)
     ev = np.linalg.eigvalsh((d.T @ d) / len(d))
     planarity = float(ev[0] / max(ev[2], 1e-30))
@@ -286,17 +233,14 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
             "cover": cover, "salience": sal}
 
     if features:
-        # Reward what stands in the middle, punish anything at the rim.
-        # The scoring above does the opposite, which is correct for a plain
-        # ground tile and wrong for one meant to carry something.
+        # Feature tiles: reward what stands in the middle, punish the rim.
         interest = 1.0 + 3.0 * mid_rel / max(size, 1e-9)
         rim = 1.0 + 12.0 * edge_rel / max(size, 1e-9)
         return float(cover * filled * np.log1p(density) * interest / rim), info
 
-    # Landmarks repeat recognisably; texture does not. Plain texture reads
-    # 2-3 on salience and is untouched here; a patch with one isolated spot
-    # reads tens and is pushed well down the ranking, so the automatic
-    # pick stops choosing the patches that were being excluded by hand.
+    # Landmarks repeat recognisably, texture does not. Texture reads 2-3 on
+    # salience and is untouched; one isolated spot reads tens and is pushed
+    # well down, so auto-pick stops choosing patches I was excluding by hand.
     landmark = 1.0 + max(0.0, sal - 4.0) / 4.0
     return float(cover * filled * flatness * np.log1p(density)
                  / (1.0 + 20.0 * planarity) / landmark), info
@@ -308,37 +252,25 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                  verbose=True, stats=None, progress=None, screen_cap=4_000):
     """Search the ground plane for the k best non-overlapping patches.
 
-    Each candidate is cut larger than the tile it will become, by
-    `extract_margin`. Levelling rotates a patch to sit flat, and rotating a
-    square leaves empty wedges along its edges - so the extra ring is the
-    material those wedges are filled from. Scoring still looks only at the
-    tile-sized middle, since that is what ends up on screen.
+    Candidates are cut larger by `extract_margin`, since levelling a square
+    leaves empty wedges at the edges that the extra ring fills; scoring looks
+    only at the tile-sized middle.
 
-    `stats`, if given, is filled with the rejection tally and the grid size.
-    The tally is not diagnostics for a human to read and forget: it says
-    which filter is doing the rejecting, which is exactly what a caller
-    needs to know to loosen the right one. `auto_pick` below reads it.
+    `stats` receives the rejection tally (which filter rejects most - what
+    auto_pick reads to loosen the right one). `progress(done, total,
+    viable)` reports, since a search can run for minutes.
 
-    `progress` is called as progress(done, total, viable) every so often.
-    A search of a few thousand positions runs for minutes with nothing on
-    screen, which is indistinguishable from a hang.
-
-    `screen_cap` is how many splats the coverage render uses while
-    searching. The render loops per splat in Python, so it dominates the
-    search; a coarser sample is enough to sort the hopeless from the
-    plausible, and the survivors are measured again properly at the end.
-    Measured on a 891k-splat scene, about 25k splats to a tile:
+    `screen_cap`: splats used by the coverage render while searching (the
+    render dominates the search). Survivors are re-measured exactly. On a
+    891k-splat scene (~25k splats per tile):
 
         screen_cap    search      patches
           2,000       19.2 s        22
           4,000       24.7 s        22      <- default
-         12,000       49.8 s        22      <- the previous behaviour
+         12,000       49.8 s        22
           exact       91.0 s        22
 
-    Same patches, same coverage to three decimals, half the time. 2,000 is
-    faster still and was as accurate here, but a sparser capture has fewer
-    splats to spare and the margin for the estimate to be wrong is
-    correspondingly thinner, so the default keeps some room.
+    Same patches and coverage; 4,000 leaves margin for sparser captures.
     """
     plane = [i for i in range(3) if i != up_axis]
     lo = np.percentile(s.xyz[:, plane], 2, axis=0)
@@ -375,8 +307,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                                                         thickness), thickness)
             g_level = ground_level(p.xyz[:, up_axis], thickness)
             p, g = clip_slab(p, up_axis, thickness)
-            # The wide version gets the same slab, using the middle's ground
-            # level so both keep the same band.
+            # Same slab for the wide cut, from the middle's ground level.
             h_wide = wide.xyz[:, up_axis]
             wide = wide.subset((h_wide >= g_level - thickness * 0.25)
                                & (h_wide <= g_level + thickness))
@@ -392,10 +323,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
             if sc <= 0:
                 rejected["score"] += 1
                 continue
-            # The bin estimate is far faster but can be off by 0.14, which
-            # is enough to let a holed patch through. It is only used to
-            # throw out the hopeless cases; anything that might pass gets
-            # measured properly.
+            # Estimate first to throw out hopeless cases; anything that
+            # might pass is rendered.
             est = coverage(p, size, up_axis)
             if est < min_cover - cover_margin:
                 rejected["holes"] += 1
@@ -414,8 +343,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
             info["below"] = below
             info["wide"] = wide
             cands.append((sc, (float(x), float(y)), p, info))
-            # The same thing without the splats, so it can be written out
-            # and the patch cut again later instead of searched for again.
+            # Without the splats, for the search cache.
             records.append({"score": float(sc), "x": float(x), "y": float(y),
                             "info": {k: float(v) for k, v in info.items()
                                      if isinstance(v, (int, float))}})
@@ -425,9 +353,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         stats["viable"] = len(cands)
         stats["rendered"] = rendered
         stats["records"] = records
-    # Printed only when asked. A sweep calls this repeatedly and reports
-    # its own trail; the failure diagnostic below still travels with the
-    # exception, so a direct caller loses nothing.
+    # Quiet unless asked (a sweep reports its own trail); the failure
+    # message below travels with the exception either way.
     if verbose:
         print(f"  searched {len(xs)}x{len(ys)} positions, "
               f"{len(cands)} viable")
@@ -454,9 +381,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
     chosen = []
     gap = size * max(min_separation, 0.0)
     for sc, (x, y), p, info in cands:
-        # Keep patches apart so the set has genuinely different content.
-        # A full tile apart is the safe default, but on a small scene it
-        # prunes away most of what passed the filters, so it is adjustable.
+        # Keep patches apart so they are different ground (adjustable: a
+        # full tile apart prunes most of a small scene).
         if any(abs(x - cx) < gap and abs(y - cy) < gap
                for _, (cx, cy), _, _ in chosen):
             continue
@@ -464,9 +390,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         if len(chosen) >= k:
             break
 
-    # The search screened with a coarse render; the handful that survived
-    # are cheap to measure properly, and it is their numbers that get shown
-    # and acted on.
+    # Re-measure the survivors exactly.
     for _, _, p, info in chosen:
         info["cover"] = rendered_coverage(p, size, up_axis)
 
@@ -478,18 +402,9 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
     return chosen
 
 
-# What to loosen when a filter is doing all the rejecting.
-#
-# Each entry is the filter's tally key, the setting that governs it, and the
-# values to try in order. The order matters: the first value is the default,
-# and each step after it trades a little quality for a few more candidates.
-#
-# The numbers are not arbitrary. min_cover starts at 0.80 because a tile with
-# a fifth of it missing tiles with holes; but a capture of open ground is
-# never solid, and 0.55 is about where a patch stops reading as ground and
-# starts reading as lace. min_separation exists so the four patches are
-# genuinely different places rather than four views of one spot, and half a
-# tile is the least that still means anything.
+# What to loosen when one filter does most of the rejecting: tally key,
+# setting, values to try (first is the default). min_cover stops at 0.55,
+# about where a patch starts reading as lace rather than ground.
 RELAXATIONS = [
     ("holes", "min_cover", [0.80, 0.70, 0.60, 0.55]),
     ("sparse", "size", None),          # handled separately: size changes the grid
@@ -508,43 +423,22 @@ SETTING_NOTE = {
 
 # --- remembering a search ------------------------------------------------
 #
-# The search itself is the slow part: a few thousand candidate positions,
-# most of them settled by a top-down render that loops per splat in Python.
-# Ten minutes is normal on a two-million-splat scene.
-#
-# It is also run twice for no reason. preview_patches searches so a person
-# can look at the thumbnails and choose four; export_wang then searches
-# again, with the same settings from the same preset, to turn those four
-# indices back into patches. The second search cannot find anything the
-# first did not - that is precisely why the indices mean anything - so it is
-# ten minutes spent reproducing a list that was on screen a moment ago.
-#
-# What is stored is the outcome of each accepted position: its score, its
-# centre, and the measurements already made there. Not the splats, which are
-# large and trivially recovered by cutting the scene at a centre again. So a
-# hit still does the extraction, and skips the searching and the rendering.
-#
-# The key covers the scene and every setting that moves a candidate. Getting
-# that wrong would be worse than the slowness it fixes: a stale list would
-# hand back patches from another scene, and `--patches 2` would quietly mean
-# something else. Hence the fingerprint below rather than a filename.
+# The search is the slow part (ten minutes on a two-million-splat scene),
+# and preview_patches and export_wang used to run the same one twice. The
+# accepted positions are stored - score, centre, measurements, not splats -
+# and patches are simply cut again. The key covers the scene and every
+# setting that moves a candidate: a stale list would make `--patches 2`
+# silently mean another patch.
 
-# 2: scores divide by a landmark penalty (salience), so every cached score
-# from version 1 ranks patches differently from a fresh search.
-# 3: salience stops counting texture and material mixes as landmarks. The
-# version 2 scores pushed every scrub patch down; recalling them would bring
-# back the starved class the change was made to fix.
+# 2: scores divided by the landmark penalty (salience).
+# 3: salience stopped counting texture and material mixes as landmarks
+#    (version 2 starved the scrub class).
 SEARCH_CACHE_VERSION = 3
 
 
 def scene_fingerprint(s, sample=4096):
-    """A short hash of what a prepared scene contains.
-
-    Sampled rather than complete: hashing two million positions to decide
-    whether to avoid a ten-minute search is affordable, but the sample is
-    spread across the whole array and includes the count, so two scenes
-    that collide differ in neither length nor shape.
-    """
+    """A short hash of a prepared scene: the count plus positions sampled
+    across the whole array."""
     n = len(s)
     if not n:
         return "empty"
@@ -556,13 +450,8 @@ def scene_fingerprint(s, sample=4096):
 
 
 def search_key(s, size, up_axis, settings):
-    """Cache key for one search: the scene, the tile, and the settings.
-
-    `min_separation` is deliberately left out. It decides which of the
-    accepted candidates get kept, not which are accepted, so a run that
-    only changes it can reuse the list and re-select from it - which is
-    most of what the sweep does.
-    """
+    """Cache key for one search. `min_separation` is left out: it chooses
+    among accepted candidates, so changing it reuses the list."""
     parts = [f"v={SEARCH_CACHE_VERSION}", f"scene={scene_fingerprint(s)}",
              f"size={size}", f"up={up_axis}"]
     parts += sorted(f"{k}={v}" for k, v in settings.items()
@@ -598,12 +487,8 @@ def save_search(key, cands, stats, cache_dir="data/cache"):
         pass
 
 
-# The settings that define a search. Every script that looks for patches has
-# to pass the same ones, because a candidate list is only meaningful
-# alongside the settings that produced it: `--patches 0,1,2,4` chosen from a
-# preview indexes a list that a stricter export would never build, and the
-# four tiles that come out are then simply the wrong four, with nothing to
-# say so.
+# The settings that define a search. Every script must pass the same ones:
+# `--patches 0,1,2,4` indexes a list only those settings produce.
 SEARCH_KEYS = ("stride", "thickness", "max_tilt", "max_below", "features",
                "edge_flat", "edge_margin", "min_separation", "min_cover",
                "cover_margin", "extract_margin")
@@ -618,11 +503,8 @@ def search_kwargs(args, thickness=None):
 
 
 def apply_settings(args, settings):
-    """Write a search's resolved settings back onto the namespace.
-
-    So that --save-preset records what actually worked rather than what was
-    asked for, and a later --preset run reproduces it without the sweep.
-    """
+    """Write a search's resolved settings back onto the namespace, so
+    --save-preset records what worked, not what was asked for."""
     for key, value in settings.items():
         if hasattr(args, key):
             setattr(args, key, value)
@@ -631,13 +513,8 @@ def apply_settings(args, settings):
 
 def rebuild_candidates(s, records, size, up_axis, thickness,
                        extract_margin=0.35):
-    """Cut the scene again at stored centres, in stored order.
-
-    The cheap half of a search. What was expensive was deciding which
-    centres were worth keeping - thousands of positions, each settled by a
-    render. Cutting a patch at a centre already known to be good is a mask
-    over the splat array and nothing more.
-    """
+    """Cut the scene again at stored centres, in stored order (the cheap
+    half of a search)."""
     out = []
     index = PlaneIndex(s, up_axis, cell=size / 2.0) if len(records) > 4 else None
     for rec in records:
@@ -659,13 +536,8 @@ def rebuild_candidates(s, records, size, up_axis, thickness,
 
 
 def choose(cands, k, size, min_separation=1.0):
-    """Take k candidates that are not on top of each other.
-
-    Separated out from the search because it is the part worth re-running:
-    the sweep changes the separation several times, and doing that against
-    a list already in hand costs nothing, while searching again costs
-    minutes.
-    """
+    """Take k candidates whose centres are at least `min_separation` tiles
+    apart. Separate from the search so it can be re-run for free."""
     ordered = sorted(cands, key=lambda c: -c[0])
     chosen = []
     gap = size * max(min_separation, 0.0)
@@ -682,11 +554,8 @@ def choose(cands, k, size, min_separation=1.0):
 
 def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
                   cache=True, progress=None, verbose=False):
-    """The candidate list for these settings, searched for or recalled.
-
-    Returns (cands, stats, hit). `hit` says which it was, because a run
-    that took two seconds instead of ten minutes should say why.
-    """
+    """The candidate list for these settings, searched or recalled.
+    Returns (cands, stats, hit)."""
     key = search_key(s, size, up_axis, settings)
     if cache:
         blob = load_search(key, cache_dir)
@@ -700,8 +569,8 @@ def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
             return cands, stats, True
 
     stats = {}
-    # k is irrelevant to the search itself; ask for everything and let
-    # choose() narrow it, so one stored list serves every caller.
+    # Ask for everything and let choose() narrow it, so one stored list
+    # serves every caller.
     pick_patches(s, size, 10 ** 9, up_axis, verbose=verbose, stats=stats,
                  progress=progress, **settings)
     cands = rebuild_candidates(
@@ -718,20 +587,13 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
               cache=True, cache_dir="data/cache", **kw):
     """Find k patches, loosening whichever filter is doing the rejecting.
 
-    The defaults are tuned for a clean capture of solid ground. A capture
-    that is sparser, or steeper, or has holes in it fails them - and fails
-    them silently, in the sense that it returns two patches and a tally
-    nobody reads. Somebody who knows the tool then tries `--min-cover 0.6`
-    and gets five hundred.
+    The defaults suit a clean capture of solid ground; a sparser or steeper
+    one fails them quietly. The tally says which filter rejected most, and
+    each filter has one setting, so the loosening is done here and every
+    step is printed with what it produced.
 
-    That step is a decision procedure, not a judgement: the tally says which
-    filter rejected the most positions, and each filter has one setting that
-    governs it. So it is done here, and reported, rather than left as
-    folklore. Every relaxation is printed with the number it produced, so
-    the run can be repeated by hand and the cost of each step is visible.
-
-    Returns (chosen, trail) where trail is the list of (setting, value,
-    viable, chosen) actually tried, first to last.
+    Returns (chosen, trail): trail is (label, settings, stats, chosen)
+    per attempt, first to last.
     """
     trail = []
     settings = dict(kw)
@@ -741,10 +603,8 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
     settings.setdefault("min_separation", 1.0)
 
     def attempt(label):
-        # Separation only decides which of the accepted candidates are
-        # kept, so changing it re-selects from a list already in hand.
-        # Everything else changes what is accepted and searches again -
-        # from cache when the same settings have been seen before.
+        # Separation only re-selects from the list in hand; everything else
+        # searches again (from cache when seen before).
         sep = settings.get("min_separation", 1.0)
         search = {kk: vv for kk, vv in settings.items()
                   if kk != "min_separation"}
@@ -771,9 +631,7 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
     if len(chosen) >= k:
         return chosen, trail
 
-    # Separation first. It throws away candidates that already passed every
-    # quality filter, so loosening it costs nothing but variety, while
-    # every other relaxation costs quality.
+    # Separation first: it costs only variety, every other step costs quality.
     if stats.get("viable", 0) > len(chosen):
         for sep in (0.75, 0.5):
             settings["min_separation"] = sep
@@ -781,13 +639,8 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
             if len(chosen) >= k:
                 return chosen, trail
 
-    # Then whichever filter is rejecting the most, in the order the tally
-    # ranks them rather than a fixed order - a sparse capture and a holed
-    # one need different things loosened first.
-    #
-    # A local copy: filters get retired from it as they run out of room, and
-    # RELAXATIONS is module state that the next call is entitled to find
-    # intact.
+    # Then whichever filter rejects most, as ranked by the tally. A local
+    # copy, since exhausted filters are retired from it.
     remaining = [r for r in RELAXATIONS if r[2]]
     while remaining:
         tally = {key: stats.get(key, 0) for key, _, _ in remaining}
@@ -801,9 +654,7 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
         later = [v for v in steps
                  if (v < cur if setting == "min_cover" else v > cur)]
         if not later:
-            # This filter is as loose as it goes. Retire it and look at the
-            # next worst rather than stopping, since a second filter may be
-            # the one actually binding now.
+            # As loose as it goes: retire it and try the next worst.
             remaining = [r for r in remaining if r[0] != worst]
             continue
         settings[setting] = later[0]
@@ -815,11 +666,8 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
 
 
 def describe_trail(trail, k, size):
-    """One paragraph saying what was tried and what it cost.
-
-    Written for somebody who did not watch it run and has to decide whether
-    to trust the result.
-    """
+    """One paragraph on what was tried and what it cost, with the flags to
+    repeat it by hand."""
     if not trail:
         return "nothing was searched"
     label, settings, stats, got = trail[-1]
@@ -845,18 +693,12 @@ def describe_trail(trail, k, size):
 
 
 def balanced_split(patches, colours):
-    """Split the chosen patches into the two axes so both look alike.
+    """Split patches between the two axes so both halves look alike.
 
-    One set supplies the north and south edge colours, the other east and
-    west. Taking them in score order puts the best two on one axis and the
-    rest on the other, so if any patch is darker or rougher than its
-    fellows, every boundary running one way is made of different material
-    from every boundary running the other. The grid then has a grain, and
-    the scene changes character each quarter turn of the camera.
-
-    Every way of dealing the patches into two sets is tried, and the one
-    whose halves match closest is kept. With four patches that is three
-    splits; it stays small for the sizes a tile set is ever built at.
+    In score order the best land on one axis, and if they differ every
+    boundary one way is a different material from every boundary the other
+    way: the grid gets a grain. Every split is tried and the closest-matched
+    kept (three splits for four patches).
     """
     import itertools
 
@@ -882,22 +724,14 @@ def balanced_split(patches, colours):
 def salience(p, size, up_axis=2, grid=16, min_count=6):
     """How much a patch contains something the eye will find again.
 
-    Repetition in a tiling is not noticed through texture - grains of sand
-    or blades of grass are interchangeable, and the eye does not track
-    them. It is noticed through landmarks: a pale bare patch in scrub, a
-    dark stone, a survey marker. A landmark in a patch appears in every
-    tile that uses that patch, at the same place in the tile, so across a
-    grid it becomes a lattice (see wang.minimal_codes for why the place is
-    always the same).
+    Repetition is noticed through landmarks (a pale opening in scrub, a
+    stone, a marker), not texture. A landmark sits at the same place in
+    every tile built from its patch, so across a grid it forms a lattice.
 
-    Measured as how far the brightest or darkest few cells of a coarse
-    top-down grid stand from the patch's typical cell, in units of how much
-    cells normally vary - and only while those cells are few. Uniform
-    texture scores near 1-3; one isolated spot scores tens; a patch where
-    many cells stand out (scrub, or two materials meeting) is texture or a
-    mixture and scores low again. Robust statistics
-    (median and MAD) so the landmark cannot hide itself by inflating the
-    spread it is measured against.
+    Measured on a coarse top-down luminance grid: how far the most extreme
+    3% of cells stand from the median, in robust units (MAD), faded out when
+    many cells stand out. Texture scores ~1-3, one isolated spot tens, and a
+    busy or mixed patch low again.
     """
     plane = [i for i in range(3) if i != up_axis]
     xy = p.xyz[:, plane]
@@ -920,30 +754,20 @@ def salience(p, size, up_axis=2, grid=16, min_count=6):
     # The worst 3% of cells: one small spot, not a single noisy cell.
     k = max(2, int(round(0.03 * len(z))))
     top = float(np.sort(z)[-k:].mean())
-    # A landmark is rare as well as different. Scrub is dark bushes on pale
-    # sand; a third of its cells sit far from the median, and so does half
-    # of any patch that straddles two materials. That is texture, or a
-    # mixture - not a spot the eye will find again - and measuring only how
-    # far the outliers stand would flag every patch of the rarer material
-    # and starve its class. So the score fades out as the share of
-    # outlying cells grows past what one compact spot can occupy.
+    # A landmark is rare as well as different. In scrub (dark bushes on
+    # sand) a third of cells are outliers; that is texture, and scoring it
+    # starved the scrub class. Fade out past what one spot can occupy.
     share = float((z > 4.0).mean())
     return top * min(1.0, max(0.0, (0.12 - share) / 0.08))
 
 
 def purity(p, own, others, up_axis=2, grid=12, min_count=4):
-    """Share of a patch's ground that looks like its own material.
+    """Share of a patch's ground that looks like its own material, 0..1.
 
-    The desert's scrub patches each held a pale opening of bare sand, and
-    once rotated copies made colours cheap, that opening became what
-    repeated - pointing four ways. A patch sorted into a class by its
-    average colour can still carry a large piece of the other class; this
-    says how much, so a class can prefer its purest patches.
-
-    Top-down cells of the patch, each assigned to whichever class mean
-    colour it is nearest. `own` is this class's mean RGB, `others` a list
-    of the other classes' means. Returns the share of occupied cells
-    nearest `own`, 0..1.
+    The desert's scrub patches each held a pale opening of bare sand, which
+    became what repeated once rotations made colours cheap. Top-down cells
+    are assigned to the nearest class mean colour (`own` vs `others`); the
+    share nearest `own` lets a class prefer its purest patches.
     """
     plane = [i for i in range(3) if i != up_axis]
     xy = p.xyz[:, plane]
@@ -970,68 +794,37 @@ def purity(p, own, others, up_axis=2, grid=12, min_count=4):
 
 
 def appearance(p):
-    """A patch's colour signature: per-channel mean and spread.
-
-    Two patches with similar signatures blend where they meet. Two that do
-    not - pale cobbles against dark wet rock - show the diagonal seam no
-    matter how wide the feather, because the change is in the material
-    rather than in the cut.
-    """
+    """Colour signature: per-channel mean and spread. Patches that differ
+    here show a seam however wide the feather."""
     rgb = p.base_rgb
     return np.concatenate([rgb.mean(axis=0), rgb.std(axis=0)])
 
 def split_classes(cands, classes=2, per_class=4, weight=1.0, seed=0):
-    """Split candidates into groups that look unlike each other.
+    """Split candidates into groups that look unlike each other (material
+    classes), the opposite of select_similar.
 
-    The opposite of what `select_similar` does, and for the opposite reason.
-    A tile set needs four patches that look alike, because anything else
-    tiles into patchwork. A *class-aware* tile set needs several such sets
-    that look unlike each other, because that difference is the whole point
-    - sand against scrub, cobble against moss - and the material rule then
-    decides where each belongs.
+    The capture usually holds both: the desert's candidates spread 0.129 in
+    appearance, the four chosen 0.043 - the similarity filter had discarded
+    the scrub. k-means on the colour signature, seeded on the two furthest
+    apart, so it is deterministic and `--patches` indices stay valid.
 
-    The capture usually already contains them. The desert survey's own
-    preview reported an appearance spread of 0.129 across its candidates
-    and 0.043 across the four finally chosen: the pale sand and the dark
-    scrub were both found, and then the similarity filter deliberately
-    discarded one of them. This recovers what that threw away.
-
-    k-means on the colour signature, seeded by the two candidates furthest
-    apart rather than at random. With two classes that is the whole
-    algorithm and it is deterministic, which matters because the tile set
-    has to come out the same on every run for `--patches` indices to mean
-    anything.
-
-    Returns a list of `classes` lists of candidates, largest group first,
-    each already narrowed to the `per_class` members that look most alike.
-    A group too small to fill a tile set is returned anyway and reported,
-    because a capture with only one material should say so rather than
-    invent a second from noise.
+    Returns `classes` lists, largest first, each narrowed to its
+    `per_class` most alike. Small groups are returned anyway so a
+    one-material capture can say so.
     """
     if classes < 2 or len(cands) < classes:
         return [cands[:per_class]]
 
     feats = np.array([appearance(c[2]) for c in cands], dtype=np.float64)
-    # Standardised per dimension, because the signature is three colour
-    # means and three colour spreads and the means would otherwise dominate
-    # simply by being larger numbers.
-    #
-    # Floored, though, and that matters more than it looks. The spread
-    # components barely vary between patches of the same scene, so dividing
-    # by their own tiny deviation multiplies what is left - which is noise -
-    # up to the same size as the real colour difference. In a scene of ten
-    # pale patches and two dark ones that was enough to put one of the dark
-    # ones in with the pale: the signal said "obviously different" and the
-    # amplified noise outvoted it. A floor at a tenth of the largest
-    # deviation keeps every dimension comparable without letting a constant
-    # one shout.
+    # Standardised so the means do not dominate the spreads - with a floor
+    # at a tenth of the largest deviation: the spreads barely vary, and
+    # dividing by their tiny deviation amplified noise until it put a dark
+    # patch in with the pale ones.
     sd = feats.std(axis=0)
     sd = np.maximum(sd, 0.1 * max(sd.max(), 1e-9))
     z = (feats - feats.mean(axis=0)) / sd
 
-    # Seed on the pair furthest apart, then on whatever is furthest from
-    # everything already seeded. Deterministic, and it starts from the
-    # genuine extremes rather than from wherever a random draw landed.
+    # Seed on the pair furthest apart, then furthest from all seeds.
     d2 = ((z[:, None, :] - z[None, :, :]) ** 2).sum(-1)
     a, b = np.unravel_index(int(np.argmax(d2)), d2.shape)
     centres = [z[a], z[b]]
@@ -1063,13 +856,8 @@ def split_classes(cands, classes=2, per_class=4, weight=1.0, seed=0):
 
 
 def class_separation(groups):
-    """How far apart two groups look, against how varied each one is.
-
-    A ratio, not a distance: two classes are only worth having if the gap
-    between them is larger than the spread inside them, and that comparison
-    is what says whether a capture really holds two materials or one
-    material and some noise. Below about 1 the split is not meaningful.
-    """
+    """Gap between two groups' mean appearance over the spread within them.
+    Below ~1 the split is noise, not two materials."""
     means = []
     spreads = []
     for g in groups:
@@ -1087,15 +875,11 @@ def class_separation(groups):
 
 
 def select_similar(cands, k, weight=1.0):
-    """Choose k patches that score well and look like each other.
+    """Choose k patches that score well and look like each other. `weight`
+    trades appearance against score (0 = top k by score).
 
-    `weight` trades appearance against score: 0 ignores appearance and takes
-    the top k by score alone.
-
-    The seed is not simply the best-scoring patch. On a beach the highest
-    score can easily be sea foam, and seeding on an outlier drags the whole
-    set toward it. The seed is the candidate that is both good and typical -
-    closest to the middle of what the scene actually looks like.
+    The seed is good and typical, not simply the best: on a beach the top
+    score can be sea foam, and an outlier seed drags the set towards it.
     """
     if weight <= 0 or len(cands) <= k:
         return cands[:k]

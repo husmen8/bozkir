@@ -1,10 +1,8 @@
-// Tests for the two browser modules that hold no WebGL: order.js and
-// merge.js. Both are pure functions over cell lists, so node runs them.
+// Tests for the browser modules that need no WebGL (ordering, merging, the
+// material rule, terrain, height fields, tilesets, starter, presets), run
+// under node:
 //
 //   node tests/test_web.mjs
-//
-// merge.js shipped in a previous session with no tests at all, which is the
-// failure mode this project keeps hitting. Half of what is below is arrears.
 
 import { starterTileset } from '../web/starter.js';
 import { readFileSync } from 'node:fs';
@@ -736,12 +734,8 @@ test('sampling is bilinear, not nearest', () => {
 });
 
 test('beyond the field the surface is continuous, not cliffed', () => {
-  // A field smaller than the grid has to repeat somehow, and the choice
-  // shows at the join. Wrapping puts the far edge against the near one and
-  // they rarely meet at the same height, so every repeat boundary is a
-  // cliff - which then reads as a ridge and collects the wrong material.
-  // Mirroring joins each edge to itself, so it is continuous by
-  // construction.
+  // Wrapping a small field puts a cliff (read as a ridge) at every repeat;
+  // mirroring is continuous by construction.
   const f = ridge(32, 32).fitTo(10);
   const e = 5.0;                       // the field's own edge
   for (const d of [0.02, 0.1, 0.4]) {
@@ -907,11 +901,8 @@ test('classify returns one class per cell, all in range', () => {
 });
 
 test('decisiveness narrows the undecided band without moving the boundary', () => {
-  // The control used to change 2 cells in 576 across its whole range,
-  // because a quantile threshold ignores any power applied to the field.
-  // It now sets how many cells count as undecided, which is the band
-  // blending dissolves across - so this test is what stops it going back
-  // to doing nothing.
+  // Regression: decisiveness once changed 2 cells in 576 (a quantile
+  // ignores powers). It must set the width of the undecided band.
   const n = 24, z = vGrid(n);
   const soft = classify(z, n, 2, { sharpness: 0.5, balance: 0.4 });
   const hard = classify(z, n, 2, { sharpness: 6, balance: 0.4 });
@@ -984,26 +975,18 @@ test('balance moves how much, not where', () => {
 });
 
 test('flat terrain reports no confidence rather than false confidence', () => {
-  // Every map is constant, so the rule has nothing to go on. It used to
-  // read zero everywhere, which handed the whole grid to one class and
-  // looked like a decision; half way is the honest reading, and the
-  // confidence figure then says so.
+  // Constant maps: 0.5, not 0 (which handed one class the whole grid).
   const n = 16;
   const { strength } = classify(new Float64Array(n * n), n, 2, {});
   const mean = Array.from(strength).reduce((a, b) => a + b, 0) / (n * n);
-  // Zero margin everywhere: nothing separates the classes, so nothing is
-  // decided. With blending on, a field like this dissolves evenly rather
-  // than picking a winner, which is the honest picture of a rule with no
-  // information.
+  // Zero margin everywhere: nothing is decided.
   ok(mean < 0.05,
      `confidence on flat ground read ${(mean * 100).toFixed(0)}%, expected 0%`);
 });
 
 test('a hair of relief does not swing the rule to full strength', () => {
-  // The jump that showed in the viewer: at exactly zero relief one class
-  // took everything, and a hundredth of relief later the rule was at full
-  // strength, because each map is stretched to its own range whatever that
-  // range is. With balance set the share is stable across both.
+  // Regression: at zero relief one class took everything, a hundredth of
+  // relief later the rule was at full strength. The share must hold.
   const n = 24;
   const flat = new Float64Array(n * n);
   const barely = new Float64Array(n * n);
@@ -1041,10 +1024,8 @@ test('patch size makes material regions contiguous', () => {
     return e;
   };
 
-  // Counted as isolated cells rather than as boundary length: the filter
-  // is meant to remove specks without moving the boundary, so boundary
-  // length is the wrong thing to measure and would penalise it for doing
-  // its job well.
+  // Isolated cells, not boundary length: the filter removes specks
+  // without moving the boundary.
   const islands = (coherence) => {
     const { cls } = classify(z, n, 2, { spacing: tile, balance: 0.3, coherence });
     let lone = 0;
@@ -1082,10 +1063,8 @@ test('patch size does not change how much, only how clumped', () => {
 });
 
 test('over-sampling resolves channels a single sample per cell steps over', () => {
-  // The aliasing that made the classes look scattered. A channel narrower
-  // than a cell cannot be traced at one sample per cell, so no channels
-  // appear and the map meant to place material by drainage places it by
-  // noise.
+  // Regression: at one sample per cell, channels narrower than a cell
+  // vanished and classes looked scattered.
   const n = 16, tile = 1;
   // A narrow valley running down the middle, half a tile wide.
   const h = (x) => Math.min(1, Math.abs(x) * 4) + 0;
@@ -1136,10 +1115,8 @@ test('altitude puts material on the low ground and the high ground', () => {
 });
 
 test('confidence is continuous, so a blend width can act on it', () => {
-  // It used to come out as exactly two values once a balance was set,
-  // because the weights were collapsed to a difference and a zero. Widening
-  // the blend then switched every second-class cell on at once instead of
-  // reaching further from the boundary.
+  // Regression: with a balance set, strength was only ever two values, so
+  // widening the blend switched every cell on at once.
   const n = 24, tile = 1;
   const h = (x, y) => Math.sin(x * 0.25) + Math.cos(y * 0.18) * 0.8;
   const z = sampleGrid(n, tile, h, 0, 4);
@@ -1162,10 +1139,8 @@ test('widening the blend reaches further from the boundary', () => {
 
 
 test('the requested share survives the majority filter', () => {
-  // Removing specks is not share-neutral: a minority class is made of
-  // smaller regions by definition, so more of it falls inside the filter's
-  // window and gets absorbed. Asking for 30% and being handed 13% is the
-  // filter quietly overruling the one control that is meant to be exact.
+  // Regression: a majority filter shrank a 30% minority to 13%. The share
+  // asked for must be the share given.
   const n = 28, tile = 1;
   const h = (x, y) => Math.sin(x * 0.22) * 1.2 + Math.cos(y * 0.17) * 0.9;
   const z = sampleGrid(n, tile, h, 0, 4);

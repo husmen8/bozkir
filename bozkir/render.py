@@ -3,9 +3,10 @@
 Slow and correct. The point is to have an image we trust, so that when a
 fast GPU renderer disagrees with it we know which one is wrong.
 
-Orthographic only, for now. Orthographic projection is linear, so the 2D
-covariance is an exact submatrix of the 3D one - no Jacobian, no affine
-approximation. Every error here is a real error, not a projection artifact.
+Orthographic here: the projection is linear, so the 2D covariance is an
+exact submatrix of the 3D one - no Jacobian, no affine approximation, and
+every error is a real error rather than a projection artifact. Perspective
+(with the EWA affine approximation) is in bozkir/camera.py.
 """
 
 import numpy as np
@@ -128,9 +129,8 @@ def rasterize(p, background=(1.0, 1.0, 1.0), max_splats=None, progress=None):
         if x1 <= x0 or y1 <= y0:
             continue
 
-        # Pixel i covers [i, i+1), so its centre is at i + 0.5. Sampling at
-        # the corner instead shifts every splat half a pixel, which is
-        # invisible in one image and very visible where two tiles meet.
+        # Pixel centres at i + 0.5; corners shift everything half a pixel,
+        # which shows where two tiles meet.
         dx = np.arange(x0, x1, dtype=np.float32) + 0.5 - mean[i, 0]
         dy = np.arange(y0, y1, dtype=np.float32) + 0.5 - mean[i, 1]
         DX = dx[None, :]
@@ -162,16 +162,8 @@ def render_orthographic(s, **kw):
 
 
 def rasterize_rgba(p, max_splats=None):
-    """Blend into a premultiplied RGBA buffer over transparency.
-
-    Same maths as `rasterize`, but the result can be composited with other
-    buffers afterwards. That is what makes tile-by-tile rendering possible:
-    each tile becomes a layer, and the layers are combined in tile order
-    rather than every splat being sorted together.
-
-    Premultiplied means the stored colour is already scaled by alpha, so
-    'over' is a plain lerp with no division anywhere.
-    """
+    """Blend into a premultiplied RGBA buffer, so the result can be
+    composited afterwards (each tile a layer, layers in tile order)."""
     W, H = p["W"], p["H"]
     rgba = np.zeros((H, W, 4), dtype=np.float32)
     if len(p["depth"]) == 0:

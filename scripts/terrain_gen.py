@@ -1,25 +1,13 @@
-"""Generate terrain for the tiles to lie on.
+"""Generate eroded terrain for the tiles to lie on.
 
-    python scripts/terrain_gen.py --name bigsur --size 512
-    python scripts/terrain_gen.py --name desert --ridge 0.8 --iterations 80
+    python scripts/terrain_gen.py --name desert --profile desert --size 512
+    python scripts/terrain_gen.py --name canyon --profile canyon --seed 3
 
-Writes the same pair scripts/heightmap.py does - a 16-bit height PNG and a
-sidecar - so the viewer loads it with no change at all. A generated field
-and a drone survey are interchangeable from the renderer's side, which is
-the point of going through a file.
-
-Why generate rather than capture: a survey covers the few dozen metres
-somebody flew over. The desert DTM is sixteen metres across. A grid of 64
-tiles at 1.5 m is ninety-six, so the survey is already being stretched six
-times past its real scale, and a game map is kilometres. There is no
-capture of the terrain a game needs, and there does not need to be - the
-capture supplies the *material*, which cannot be generated, and the terrain
-supplies the *shape*, which can.
-
-It also writes a sediment map. The rule that places material currently
-infers where loose ground would collect from the shape of the surface.
-Here that is not an inference: the erosion moved material and recorded
-where it settled.
+Writes the same height PNG and sidecar as scripts/heightmap.py, plus a
+sediment map (where the erosion actually left material, which the rule
+reads instead of inferring it). The capture supplies the material, which
+cannot be generated; the terrain supplies the shape, which can - the desert
+survey is 16 m across and a game map is kilometres.
 """
 
 import argparse

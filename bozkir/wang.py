@@ -1,31 +1,19 @@
 """Building Wang tiles out of exemplar patches, and laying them out.
 
-The construction is Cohen et al. 2003, "Wang Tiles for Image and Texture
-Generation", applied to Gaussians instead of pixels. GSWT builds on the
-same idea.
+Cohen et al. 2003 ("Wang Tiles for Image and Texture Generation") applied
+to Gaussians, as in GSWT. A square tile is cut along both diagonals into
+four triangles, each filled from the patch of its edge's colour. The whole
+north edge lies in the north triangle, so every tile with the same north
+colour has an identical north edge - the same Gaussians in the same places -
+and matching neighbours agree exactly by construction.
 
-The trick is worth stating plainly. Take a square tile and cut it along
-both diagonals into four triangles, one touching each edge. Fill the
-triangle touching the north edge from the patch assigned to that edge's
-colour, the east triangle from the east colour's patch, and so on.
-
-Because the whole north edge lies inside the north triangle, every tile
-sharing a north colour has an identical north edge - not similar, identical,
-the same Gaussians in the same places. Two tiles laid side by side with
-matching colours therefore agree exactly along their shared boundary. The
-match is a property of the construction, not something optimised for
-afterwards.
-
-What the construction does not fix is the diagonals, where two different
-patches meet inside the tile. Cohen finds a least-visible path there with
-graph cut; GSWT (Section 3.2) does the same on orthographic renders and
-lifts the cut back into 3D. Here the diagonals are feathered instead, which
-is cruder and much simpler, and leaves the graph cut as an obvious upgrade.
+Inside the tile two patches meet along the diagonals. By default the seam
+is placed by graph cut on top-down renders (bozkir/graphcut.py, as in
+Cohen and GSWT 3.2); feathered straight diagonals are the fallback.
 """
 
 import numpy as np
 
-from .ply import Splats
 from .tile import merge
 
 # Corners are where all four triangles meet, so a feathered tile is not
@@ -34,16 +22,10 @@ CORNER_NOTE = "edges match exactly except within `blend` of each corner"
 
 
 def region_weights(xy, size, blend=0.0):
-    """Membership of each of the four triangles, as weights summing to one.
-
-    `xy` is (N, 2) in tile-local coordinates, the tile spanning
-    [-size/2, size/2] on both axes. Columns of the result are north, east,
-    south, west.
-
-    With `blend` at zero this is a hard assignment: exactly one weight is 1.
-    Above zero the diagonals become a band of width `blend` where two
-    patches mix, which hides the cut at the cost of blurring it.
-    """
+    """Membership of each of the four triangles (columns N, E, S, W),
+    summing to one. `xy` is tile-local, spanning [-size/2, size/2].
+    `blend` 0 is a hard assignment; above 0 the diagonals become a mixing
+    band of that width."""
     u = xy[:, 0] / size
     v = xy[:, 1] / size
     au, av = np.abs(u), np.abs(v)
@@ -65,19 +47,13 @@ def region_weights(xy, size, blend=0.0):
 
 def build_tile(patches, size, blend=0.0, up_axis=2, min_weight=0.02,
                labels=None):
-    """Assemble one tile from four patches, one per edge.
+    """Assemble one tile from four patches (north, east, south, west), each
+    centred on the origin, each contributing the Gaussians in its region.
 
-    `patches` is (north, east, south, west). Each is a Splats already
-    centred on the origin in the ground plane, and each contributes the
-    Gaussians falling in its own region.
-
-    Without `labels` the regions are the four triangles, feathered across
-    the diagonals by `blend`. Feathering blurs the join; it cannot hide a
-    change of material.
-
-    With `labels` - a region image from bozkir.graphcut - the boundary has
-    already been placed where the patches agree, so the assignment is a
-    hard lookup and needs no feathering.
+    Without `labels` the regions are the four triangles, feathered by
+    `blend` (which blurs a join but cannot hide a change of material). With
+    `labels`, a region image from bozkir.graphcut, the assignment is a hard
+    lookup along a seam already placed where the patches agree.
     """
     plane = [i for i in range(3) if i != up_axis]
     parts = []
@@ -108,27 +84,15 @@ def build_tile(patches, size, blend=0.0, up_axis=2, min_weight=0.02,
 
 
 def minimal_codes(kh, kv):
-    """Two tiles for every (west, south) pair, instead of every tile there is.
+    """Two tiles for every (west, south) pair: 2 k^2 instead of k^4.
 
-    The complete set over k colours per axis is k^4 tiles: 16 at two
-    colours, 81 at three. Cohen, Shade, Hiller and Deussen (SIGGRAPH 2003)
-    point out that a stochastic tiling only needs every pair the layout
-    constrains to have two tiles - two choices at every step is already a
-    coin flip, and a coin flip is enough to never repeat. That is 2 k^2.
+    Cohen et al. 2003: a stochastic tiling only needs two choices at every
+    step. The repetition the eye catches is inside the tiles (each south
+    triangle is always part of one of k patches), so more colours is the
+    fix, and this makes three colours cost 18 tiles instead of 81.
 
-    Which matters because the repetition the eye catches is not in the
-    layout, it is inside the tiles: each tile's south triangle is always the
-    same part of one of k patches, so with two colours half the grid shows
-    the same south triangle in the same place. More colours is the direct
-    fix - Cohen et al. show three colours substantially reduce it - and the
-    minimal set makes three colours cost 18 tiles instead of 81.
-
-    The free north and east colours are spread so each colour appears
-    equally often on every side; a set that favoured one would tile with a
-    bias the eye picks up as a grain. Layout here and in the viewer fixes
-    west and south, so those are the pairs covered.
-
-    Returns a list of (n, e, s, w) codes.
+    The free north and east colours are spread evenly over every side, or
+    the tiling gets a grain. Returns a list of (n, e, s, w) codes.
     """
     if kh < 2 or kv < 2:
         raise ValueError("the minimal set needs at least two colours per axis")
@@ -147,21 +111,12 @@ def minimal_codes(kh, kv):
 def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
                    cut=False, resolution=160, band=0.14, verbose=False,
                    codes=None):
-    """Every tile over the given edge colours.
+    """Build tiles over the given edge colours: `h_patches` for north and
+    south, `v_patches` for east and west. All k^4 by default, or only
+    `codes` (see minimal_codes). With `cut`, seams by graph cut; each patch
+    is rendered once and reused.
 
-    `h_patches` supplies the colours available on north and south edges,
-    `v_patches` those on east and west. With two of each that is sixteen
-    tiles, which is the smallest set guaranteeing a tile exists for any
-    pair of already-placed neighbours.
-
-    With `cut`, each tile's diagonals are placed by graph cut rather than
-    left straight. Every patch is rendered once and the images reused, so
-    the cost is one minimum cut per diagonal per tile.
-
-    With `codes`, only those tiles are built - `minimal_codes` gives the
-    smallest set that still tiles stochastically.
-
-    Returns (tiles, codes) where codes[i] is (n, e, s, w) for tiles[i].
+    Returns (tiles, codes), codes[i] being (n, e, s, w) for tiles[i].
     """
     if len(h_patches) < 1 or len(v_patches) < 1:
         raise ValueError("need at least one patch per axis")
@@ -199,12 +154,9 @@ def build_tile_set(h_patches, v_patches, size, blend=0.0, up_axis=2,
 
 
 def layout(codes, nx, ny, seed=0):
-    """An aperiodic arrangement respecting the edge-matching rule.
-
-    Scanline order. At each cell the west colour is fixed by the cell to the
-    left and the south colour by the cell below; north and east stay free.
-    With a complete tile set some tile always fits, so this never has to
-    backtrack, and the free choices are what stop the result repeating.
+    """An aperiodic, edge-matched arrangement, in scanline order: west is
+    fixed by the left cell, south by the one below, north and east are
+    free. A complete set never needs backtracking.
 
     Returns an (ny, nx) array of tile indices.
     """
@@ -243,19 +195,13 @@ def check_layout(codes, grid):
 
 
 def edge_gaussians(t, size, up_axis=2, edge="n", band=0.02, margin=0.03):
-    """Gaussians along one edge, excluding the corners.
+    """Gaussians along one edge, sorted, for checking that tiles sharing an
+    edge colour really share the edge.
 
-    Two tiles sharing an edge colour must return the same set here. That is
-    the property the whole construction exists to provide, so it is worth
-    being able to check directly.
-
-    The corners are excluded deliberately. The diagonals reach the edge at
-    each corner, so the last sliver before a corner belongs to the
-    neighbouring triangle and is drawn from a different patch. Corners are
-    shared by four tiles rather than two, and Cohen's original construction
-    has the same gap; the known fix is corner tiles (Lagae and Dutre 2006).
-    `margin` is how far back from each corner to stop looking, as a
-    fraction of the tile.
+    Corners are excluded (`margin`, a fraction of the tile): there the
+    diagonals meet the edge and four tiles share the point. Cohen's
+    construction has the same gap; corner tiles (Lagae and Dutre 2006)
+    are the fix.
     """
     plane = [i for i in range(3) if i != up_axis]
     x = t.xyz[:, plane[0]] / size

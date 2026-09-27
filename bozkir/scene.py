@@ -1,12 +1,7 @@
-"""One path from a file on disk to a scene ready to use.
+"""One path from a PLY on disk to a prepared scene: load, align, clean.
 
-Every script was repeating load -> align -> clean with slightly different
-defaults, which meant results from one script could not be compared with
-results from another. This is that sequence, once.
-
-Results are cached, keyed by the settings that produced them. Alignment is
-fast but floater removal builds a KD-tree over every splat, which is slow
-enough to be worth not repeating.
+Once here, so every script prepares scenes the same way. Results are
+cached by the settings that produced them (floater removal is slow).
 """
 
 import hashlib
@@ -45,14 +40,8 @@ class SceneConfig:
     def key(self, source=None):
         """Short stable hash of the settings, for cache filenames.
 
-        `source`, when given, folds the input file's size and modification
-        time into the hash. Without it the key describes only how a scene
-        was processed, so retraining a capture and writing the result over
-        the same filename produces the same key - and the cache then hands
-        back the previous model, with nothing on screen to say so except a
-        splat count that nobody reads twice. Size and mtime are enough:
-        hashing the file itself would mean reading hundreds of megabytes to
-        decide whether to avoid reading them.
+        `source` adds the input file's size and mtime, so a retrained
+        capture saved over the same name does not get the old cached scene.
         """
         parts = sorted(f"{k}={v}" for k, v in asdict(self).items())
         if source is not None:
@@ -75,27 +64,19 @@ class SceneConfig:
         return " + ".join(bits) if bits else "raw"
 
 
-# How much longer the upper tail of heights must be than the lower one before
-# a scene counts as the right way up. Real ground carries material above it
-# - grass, stones, bushes - and nothing below except noise, so the heights
-# above the median reach further than those below. A ground plane whose
-# normal was detected with the wrong sign turns that around: bigsur came out
-# of alignment upside down and needed --flip found by hand.
+# Upside-down check: ground carries material above it, so heights above the
+# median reach further than those below. bigsur came out upside down and
+# needed --flip found by hand.
 UPSIDE_DOWN_BELOW = 0.7
 
 
 def upness(s, up_axis):
-    """Upper tail of heights over lower tail, around the median.
-
-    Above 1 when material stands on the ground, below 1 when it hangs
-    under it. Percentiles rather than skewness, so a few floaters cannot
+    """Upper tail of heights over lower tail, around the median: above 1
+    when material stands on the ground. Percentiles, so floaters cannot
     decide it.
 
-    A one-way check. Ground with bushes, stones or grass on it reads well
-    above 1 and flipped well below; bare flat sand reads near 1 either way
-    (the desert's tiles: 0.95, and 1.06 upside down). So a warning means
-    something, and silence proves nothing - the threshold is set where flat
-    ground cannot trip it.
+    One-way: bare flat sand reads ~1 either way (desert 0.95, and 1.06
+    flipped), so a warning means something and silence proves nothing.
     """
     z = np.asarray(s.xyz[:, up_axis], dtype=np.float64)
     if len(z) > 400_000:
@@ -155,10 +136,8 @@ def prepare(path, cfg=None, cache=True, cache_dir=CACHE_DIR, verbose=True):
                              up_axis=cfg.up_axis)
         s, _ = remove_large(
             s, float(np.percentile(s.scale.max(axis=1), cfg.max_extent_pct)))
-        # Floater removal builds a KD-tree over every splat, which costs
-        # minutes and gigabytes on a 10M-splat scene. Patch-level slab
-        # clipping already discards anything away from the ground, so on
-        # large scenes it is often not worth paying for.
+        # Floater removal builds a KD-tree over every splat (minutes on a
+        # 10M-splat scene); slab clipping already drops most floaters.
         if cfg.floater_std > 0:
             s, _ = remove_floaters(s, std_ratio=cfg.floater_std)
         if verbose:

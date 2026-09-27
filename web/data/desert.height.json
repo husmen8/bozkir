@@ -1,0 +1,25 @@
+{
+  "width": 512,
+  "height": 512,
+  "metres_low": 0.0,
+  "metres_high": null,
+  "metres_range": null,
+  "sample_metres": null,
+  "source": "generated desert seed 0",
+  "sediment": "desert.sediment.png",
+  "encoding": "rg16",
+  "settings": {
+    "size": 512,
+    "seed": 0,
+    "profile": "desert",
+    "dome": 0.25,
+    "octaves": 6,
+    "freq": 4,
+    "ridge": 0.6,
+    "relief": 1.0,
+    "iterations": 60,
+    "incision": 0.4,
+    "diffusion": 0.1,
+    "uplift": 0.0
+  }
+}

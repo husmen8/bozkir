@@ -1,21 +1,11 @@
-"""What is in web/data, written down so the viewer can offer it.
+"""Writes web/data/index.json: the tilesets and height fields in the
+folder, with what the viewer's menus show. A static server cannot list a
+folder, so the folder lists itself, and tileset and terrain can be chosen
+independently.
 
-A static server cannot be asked what files a folder holds, so until now the
-viewer could only show what somebody typed into the URL, and a tileset
-could only find a height field that happened to share its name. That is why
-putting the desert tiles on mesa terrain meant copying a 17 MB .splat under
-a second name.
-
-This writes `web/data/index.json`: the tilesets and the height fields that
-are actually there, each with the few facts a menu needs. The viewer reads
-it at startup, lists both, and lets one be chosen independently of the
-other - so a terrain is something you pick, not something a filename
-forces on you.
-
-Rebuilt by the tools that write into the folder (`terrain_gen.py`,
-`export_wang.py`), and by `scripts/index_data.py` by hand. It describes
-files rather than replacing them: delete the index and everything still
-works, minus the menus.
+Rebuilt by export_wang.py and terrain_gen.py, or by hand with
+scripts/index_data.py. It stays in the working copy (not committed); the
+public viewer finds the desert tileset without it.
 """
 
 import json

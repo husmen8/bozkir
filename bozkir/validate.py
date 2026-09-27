@@ -1,32 +1,20 @@
 """Does the rule put material where it really is?
 
-The viewer places two materials by the shape of the ground. That is a claim
-about the world, and a drone survey can test it: the DTM gives the shape,
-the orthophoto shows where each material actually lies. This module lines
-the two up on the viewer's cell grid, runs the same rule the viewer runs
-(`bozkir/landform.py`), and scores the agreement.
+A drone survey tests it: the DTM gives the shape, the orthophoto where each
+material lies. Both are put on the viewer's cell grid, the viewer's own
+rule (bozkir/landform.py) runs on the DTM, and the agreement is scored.
 
-Three things keep the number honest.
+Kept honest three ways:
+* The share is fixed to the truth (the rule's `balance`), so it is judged
+  only on where material goes, not how much.
+* Chance is measured: clumpy maps overlap by chance, so the truth is
+  shifted around a torus at every offset and p is how often a shifted
+  truth scores as well as the real one.
+* The mapping is stated first: in arid ground scrub follows water, so
+  scrub = collected (class 0). The flipped mapping is reported beside it;
+  a result only under the flip means the rule is wrong here.
 
-* The share is fixed to the truth. The rule is given the real fraction of
-  scrub (its `balance`), so it is only judged on *where* material goes, not
-  on how much - otherwise a rule that happened to guess the right amount
-  would look good for the wrong reason.
-
-* The chance level is measured, not assumed. Material in a landscape is
-  clumped, and two clumpy maps overlap by chance far more than two random
-  ones. So the truth map is shifted around a torus - every offset, keeping
-  its clumping intact - and the rule is scored against each shifted copy.
-  The p-value is how often a shifted, meaningless truth scores as well as
-  the real one.
-
-* The mapping is stated before looking. In arid ground, vegetation follows
-  water, so the hypothesis is *scrub = collected* (class 0). Both mappings
-  are reported, and a result that only appears under the flipped one should
-  be read as the rule being wrong for this landscape, not as a success.
-
-Reads GeoTIFFs with rasterio when available and with Pillow's TIFF tags
-otherwise, so it runs on a machine with numpy and Pillow alone.
+GeoTIFFs via rasterio when installed, else Pillow's TIFF tags.
 """
 
 from dataclasses import dataclass
@@ -299,3 +287,58 @@ def evaluate(z, truth_frac, n, spacing, altitude=0.4, coherence=2,
     out["_maps"] = r["maps"]
     out["_cls"] = r["cls"]
     return out
+
+def plane_fit_r2(z, m):
+    """Share of the height variance one tilted plane explains (`z` is m*m,
+    row-major). Near 1: the ground is one slope, with nothing for a
+    landform rule to tell apart."""
+    z = np.asarray(z, dtype=np.float64).reshape(m, m)
+    j, i = np.mgrid[0:m, 0:m]
+    A = np.c_[i.ravel(), j.ravel(), np.ones(m * m)]
+    ok = np.isfinite(z.ravel())
+    coef, *_ = np.linalg.lstsq(A[ok], z.ravel()[ok], rcond=None)
+    resid = z.ravel()[ok] - A[ok] @ coef
+    total = np.var(z.ravel()[ok])
+    return float(1 - np.var(resid) / total) if total > 0 else 1.0
+
+
+def caveats(grids, plane_r2=None, alpha=0.05):
+    """Caveats to read before trusting the table, as sentences. `grids` is
+    the report's {grid: {truth: {name: score}}}. The checks I first made by
+    hand on the desert survey: one slope, disagreeing truths, and one
+    small p among many comparisons."""
+    notes = []
+    # 0.8 is a judgement, not a test: past it, most of the relief is the
+    # tilt, and what remains is too little to hold distinct landforms.
+    if plane_r2 is not None and plane_r2 > 0.8:
+        notes.append(
+            f"the ground is nearly one plane (a tilted plane explains "
+            f"{plane_r2:.0%} of its height): few hollows or ridges for the "
+            f"rule to tell apart, so neither a hit nor a miss says much")
+    shares = {}
+    for by_truth in grids.values():
+        for truth, rows in by_truth.items():
+            if "rule" in rows:
+                shares[truth] = rows["rule"]["share"]
+    if len(shares) > 1:
+        lo, hi = min(shares.values()), max(shares.values())
+        if lo > 0 and hi / lo > 2:
+            said = ", ".join(f"{k} {v:.0%}" for k, v in shares.items())
+            notes.append(
+                f"the truths disagree on how much scrub there is ({said}): "
+                f"at least one of them is measuring something else "
+                f"(shadows for colour, the ground filter for height)")
+    ps = [(r["p"], name, g, truth)
+          for g, by_truth in grids.items()
+          for truth, rows in by_truth.items()
+          for name, r in rows.items()]
+    if ps:
+        p, name, g, truth = min(ps)
+        bonferroni = alpha / len(ps)
+        if bonferroni <= p < alpha:
+            notes.append(
+                f"the smallest p ({p:.3f}, '{name}', grid {g}, {truth}) is "
+                f"one of {len(ps)} comparisons; below {alpha} by itself, but "
+                f"not below {bonferroni:.4f}, the level that many tests need: "
+                f"it is what chance produces")
+    return notes

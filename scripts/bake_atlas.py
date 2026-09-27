@@ -3,10 +3,9 @@
     python scripts/bake_atlas.py desert
     python scripts/bake_atlas.py desert --res 96
 
-Writes web/data/<name>.atlas.png and <name>.atlas.json. The viewer draws
-distant ground with these instead of splats - past the distance where a
-tile's splats are smaller than a pixel, a texture shows the same thing for
-one lookup, which is what lets a tiled world reach kilometres.
+Writes web/data/<name>.atlas.png and .atlas.json, which the viewer's far
+field draws distant ground with. Re-bake after every export: an atlas with
+a different tile count is ignored.
 """
 
 import argparse
@@ -14,7 +13,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]

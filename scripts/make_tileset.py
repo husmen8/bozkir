@@ -3,23 +3,16 @@
     python scripts/make_tileset.py my_ground.ply
     python scripts/make_tileset.py my_ground.ply --name meadow --colours 3
 
-For somebody who has a Gaussian splat capture of some ground and has never
-seen this project. It runs the exporter with the defaults meant for an
-untuned capture, decides for itself whether the capture holds one material
-or two, and finishes with a verdict in plain words and the address to open.
-
-The steps it runs are the same `export_wang.py` a tuned workflow uses, with
-everything it prints passed straight through - nothing here is hidden from
-somebody who later wants the full controls. What it adds is the order, the
-retry, and the reading of the result:
+For a first capture: runs export_wang.py with untuned defaults, tries two
+materials then one, passes its output through, and ends with a verdict and
+the address to open:
 
   good       the exporter raised no warnings
   marginal   it built a tileset but said something is off, and what
   no         it could not build one, and why - usually that the capture is
              not flat ground, or holds too little clean ground to tile
 
-Anything this script does not know about goes through to the exporter
-unchanged, so `--size 2.0 --flip` work here as they do there.
+Other flags go straight to the exporter (`--size 2.0 --flip` work here).
 """
 
 import argparse

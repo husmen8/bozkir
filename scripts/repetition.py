@@ -3,25 +3,21 @@
     python scripts/repetition.py desert
     python scripts/repetition.py desert --dir other/data --label before
 
-Repetition in a Wang tiling is not periodic in the layout - the layout never
-repeats - but it is in the tiles: each tile's triangles are always the same
-parts of a few patches, in the same place within the cell (Cohen et al.
-2003). So a large area correlates with itself when shifted by a whole
-number of tiles, and hardly at all when shifted by half a tile. That
-difference is the measure:
+The layout never repeats, but the tiles do: each triangle is always the
+same part of a few patches, at the same place in the cell. So the ground
+correlates with itself at whole-tile shifts and hardly at half-tile shifts:
 
     lattice   = mean autocorrelation at shifts of 1, 2, 3 tiles (x and y)
     off       = the same at 1.5, 2.5, 3.5 tiles
     excess    = lattice - off
 
-Reported twice: on brightness ("texture"), and on a landmark map that keeps
-only what stands out strongly from its surroundings ("landmarks"). The
-first counts every repeat; the second only those a viewer can recognise,
-and it is the one that agreed with the eye on the desert tilesets.
+Measured on brightness ("texture") and on a map of what stands out
+("landmarks"). Near zero: no grid to find. Each material separately, laid
+out by Wang edge matching (not the viewer's exact sequence), over seeds.
 
-Near zero means the eye has no grid to find; the larger the excess, the
-stronger the grid it will find. Each material is measured on its own, laid
-out by the same Wang rules as the viewer, over several seeds.
+Plus busyness: how different a tile's four triangles are (busyness()).
+Neither repetition number matched my eye on the desert tilesets; busyness
+did, on the two runs left to measure.
 """
 
 import argparse
@@ -75,16 +71,9 @@ def _box(a, r):
 
 
 def landmarks(img, res, radius=None, floor=2.0):
-    """What stands out, and by how much: the eye's version of the ground.
-
-    Each pixel's distance from its neighbourhood's mean, in units of that
-    neighbourhood's spread. Uniform texture - grain, grass, small bushes -
-    sits within a couple of units and is zeroed; a pale opening in scrub or
-    a dark stone stands several units out and is kept. Repetition measured
-    on this map counts only what a viewer can recognise, which is what the
-    plain brightness measure could not tell apart: in the desert runs it
-    rated the calmest tileset as the most repetitive.
-    """
+    """What stands out: each pixel's distance from its neighbourhood mean in
+    units of the local spread, minus `floor`. Grain and small bushes zero
+    out; a pale opening or a dark stone stays."""
     r = radius or max(2, res // 3)
     m = _box(img, r)
     sd = np.sqrt(np.maximum(_box(img * img, r) - m * m, 1e-8))
@@ -104,15 +93,32 @@ def lattice_excess(img, res):
     return lat, off, lat - off
 
 
-def interior_variants(cells, tiles, k, rng, radius=0.32):
-    """Predict what interior variants would do, before building them.
+def busyness(cell):
+    """How much a tile reads as four pieces rather than one ground (an X of
+    different grounds shows the construction even without repetition).
 
-    Each tile gets k extra versions whose middle - a disc touching no edge,
-    feathered - comes from another tile of the same material. The edges are
-    untouched, so every version still tiles with its neighbours; only the
-    part of the tile the eye finds repeating at the same place changes.
-    Returns new cell images and a tile list with the variants appended.
+    Share of the tile's brightness variance explained by which triangle a
+    pixel is in (eta squared): 0 = four alike, 1 = four flat blocks. Grain
+    inside a triangle counts against it, so texture alone is not busy.
     """
+    res = cell.shape[0]
+    y, x = (np.mgrid[0:res, 0:res] + 0.5) / res      # row 0 is north
+    a, b = y < x, y < 1 - x
+    parts = (a & b, a & ~b, ~a & ~b, ~a & b)          # N, E, S, W
+    total = cell.var()
+    if total < 1e-12:
+        return 0.0
+    mu = cell.mean()
+    between = sum(p.mean() * (cell[p].mean() - mu) ** 2 for p in parts)
+    return float(between / total)
+
+
+def interior_variants(cells, tiles, k, rng, radius=0.32):
+    """Predict interior variants before building them: k extra versions of
+    each tile whose middle (a feathered disc touching no edge) comes from
+    another tile of the same material, so edges still match. (Predicted
+    useless: they recycle the same patches.) Returns cells and tiles with
+    the variants appended."""
     res = cells[0].shape[0]
     y, x = np.mgrid[0:res, 0:res] + 0.5
     d = np.hypot(x - res / 2, y - res / 2) / res
@@ -149,9 +155,13 @@ def measure(splat_dir, name, n=32, res=48, seeds=5, variants=0):
             vals.append(lattice_excess(img, res)
                         + lattice_excess(landmarks(img, res), res))
         v = np.array(vals)
+        busy = [busyness(cells[k]) for k, t in enumerate(tiles)
+                if t["class"] == cls]
         out[cls] = {"lattice": v[:, 0].mean(), "off": v[:, 1].mean(),
                     "excess": v[:, 2].mean(), "sd": v[:, 2].std(),
                     "landmark": v[:, 5].mean(), "landmark_sd": v[:, 5].std(),
+                    "busyness": float(np.mean(busy)),
+                    "busyness_sd": float(np.std(busy)),
                     "tiles": sum(t["class"] == cls for t in tiles)}
     return out
 
@@ -176,7 +186,8 @@ def main(argv=None):
     for cls, r in res.items():
         print(f"    class {cls} ({r['tiles']} tiles): texture {r['excess']:.3f}"
               f" ± {r['sd']:.3f}   landmarks {r['landmark']:.3f}"
-              f" ± {r['landmark_sd']:.3f}")
+              f" ± {r['landmark_sd']:.3f}   busyness {r['busyness']:.3f}"
+              f" ± {r['busyness_sd']:.3f}")
     return 0
 
 

@@ -1,52 +1,25 @@
 // Capturing a camera sweep, so popping can be measured instead of watched.
 //
-// scripts/pop_metric.py compares two sequences of frames and reports the
-// part of the change that camera motion cannot account for. That comparison
-// is only meaningful if both sequences travel the *same* path, which a hand
-// flown camera cannot do twice. So the path is scripted: the sweep starts
-// from wherever the camera is, holds elevation and distance, and turns
-// through a fixed arc in equal steps.
+// scripts/pop_metric.py compares two frame sequences, which only works if
+// both travel the same path, so the path is scripted: from the current
+// camera, same elevation and distance, a fixed arc in equal steps.
 //
-// Anchoring on the current camera rather than on any scene constant is what
-// makes this work for a capture nobody has seen before. load() already
-// frames the scene - target and distance are chosen from the splat spread -
-// so whatever the person dropped in, pointing the camera at what interests
-// them and pressing capture gives a path scaled to that scene.
-//
-// Two things are waited for before each frame is kept, and both matter more
-// than they look:
-//
-//   - the sort worker going idle, because the order arrives a frame or more
-//     after the camera moves. Capturing without waiting would measure sort
-//     latency, which is a real artifact but not the one being compared, and
-//     it would contaminate both orderings equally and hide the difference.
-//   - a couple of settle frames afterwards, since LOD cross-fades and the
-//     merged-group request both take a frame to catch up.
-//
-// The result is a zip of PNGs, one file rather than sixty downloads.
+// Before each frame is kept it waits for the sort worker to go idle (or it
+// would measure sort latency, in both runs, hiding the difference) and for
+// a settle frame (LOD fades and merge requests lag a frame). Output is one
+// zip of PNGs.
 
 import { writeZip } from './tileset.js';
 
-/** Read the canvas back into a 2D canvas, synchronously.
- *
- *  The context is created without preserveDrawingBuffer, so the colour
- *  buffer is undefined once the frame ends. This has to run inside the same
- *  animation frame as the draw, which is why capture is stepped from the
- *  render loop rather than driven by a timer.
- *
- *  Only the pixel read happens here. Turning them into a PNG is much the
- *  slower half and does not need the frame, so it is left to the caller to
- *  start and not wait for.
- */
+/** Read the canvas into a 2D canvas. Must run in the frame that drew it (no
+ *  preserveDrawingBuffer), which is why capture is stepped from the render
+ *  loop. PNG encoding is slower and left to the caller. */
 function readFrame(gl, canvas, maxEdge) {
   const w = canvas.width, h = canvas.height;
   const px = new Uint8Array(w * h * 4);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
 
-  // GL's origin is bottom left and the 2D canvas's is top left, so the rows
-  // come back upside down. An unflipped capture still measures correctly -
-  // the metric only ever compares frames with each other - but every figure
-  // made from it would be upside down.
+  // GL rows come back bottom-up; flip so the frames are usable as figures.
   const flipped = new Uint8ClampedArray(w * h * 4);
   const row = w * 4;
   for (let y = 0; y < h; y++) {
@@ -57,12 +30,8 @@ function readFrame(gl, canvas, maxEdge) {
   full.width = w; full.height = h;
   full.getContext('2d').putImageData(new ImageData(flipped, w, h), 0, 0);
 
-  // Captured frames are measured, not looked at, and the cost of measuring
-  // them grows with pixel count twice over: the PNG encode here, and the
-  // block-matched motion search in pop_metric.py afterwards, which is the
-  // slower of the two by a wide margin. Capping the long edge cuts both by
-  // the square of the ratio while leaving blocks far larger than the
-  // artifacts being counted. Pass 0 for full resolution.
+  // Long edge capped (default 1024): encoding and pop_metric's block
+  // matching both grow with pixel count. 0 keeps full resolution.
   if (!maxEdge || Math.max(w, h) <= maxEdge) return full;
   const k = maxEdge / Math.max(w, h);
   const small = document.createElement('canvas');
@@ -75,8 +44,8 @@ function readFrame(gl, canvas, maxEdge) {
   return small;
 }
 
-/** PNG bytes from a canvas. Slow, and deliberately not awaited by the
- *  capture loop: encoding one frame overlaps with the next pose's wait. */
+/** PNG bytes from a canvas. Not awaited by the loop, so each encode
+ *  overlaps the next pose's wait. */
 function encode(cv) {
   return new Promise((res) => cv.toBlob(
     (b) => b.arrayBuffer().then((a) => res(new Uint8Array(a))), 'image/png'));
@@ -90,12 +59,8 @@ export class Capture {
     this.active = false;
   }
 
-  /** Begin a sweep. Returns false if one is already running.
-   *
-   *  `arc` defaults to a full turn: popping depends on the angle between
-   *  the view and the tile grid, so a partial sweep can miss the very
-   *  alignments the comparison is about.
-   */
+  /** Begin a sweep; false if one is running. `arc` defaults to a full
+   *  turn, since popping depends on the angle to the grid. */
   start({ frames = 72, arc = 360, settle = 1, name = 'sweep',
           maxEdge = 1024, target = null } = {}) {
     if (this.active || !frames) return false;
@@ -115,11 +80,8 @@ export class Capture {
       step: arc / frames,
       elevation: c.elevation,
       distance: c.distance,
-      // Whatever the sweep orbits, it orbits for every frame of both runs.
-      // Freezing it here is what makes the two sequences comparable; the
-      // caller passing a scene centre instead of the live target is what
-      // makes them useful, since WASD moves the target and a target that
-      // has drifted off the terrain orbits a point in mid air.
+      // Frozen for the whole sweep so both runs orbit the same point. The
+      // viewer passes the scene centre (WASD moves the live target).
       target: (target || c.target).slice(),
       fly: c.fly,
     };
@@ -141,18 +103,15 @@ export class Capture {
     this.held = 0;
   }
 
-  /** Called once per rendered frame, after the draw. Returns nothing; the
-   *  sweep advances itself and calls `onDone` with a zip when finished. */
+  /** Called once per rendered frame, after the draw; calls `onDone` with a
+   *  zip at the end. */
   async step() {
     if (!this.active || this.pending) return;
 
     this.waited++;
     if (this.isBusy && this.isBusy()) {
-      // A sort is still in flight. Waiting is normal for a frame or two;
-      // waiting for ever is a bug somewhere upstream, and silently hanging
-      // is the worst way to report one. Go on without the wait and say so,
-      // so a capture always finishes and always tells you if it is
-      // measuring something it should not be.
+      // Waiting a frame or two is normal; for ever is a bug upstream. Carry
+      // on after `patience` frames and warn, rather than hang.
       if (this.waited < this.plan.patience) return;
       if (!this.warned) {
         this.warned = true;
@@ -163,11 +122,7 @@ export class Capture {
     }
     if (this.held < this.plan.settle) { this.held++; return; }
 
-    // Read now, encode later. The pixel read has to happen in this frame;
-    // the PNG does not, and encoding it here would idle the renderer for
-    // longer than the sort it just waited on. Posing the next frame first
-    // means every encode overlaps with the next pose's wait, which is dead
-    // time otherwise.
+    // Read now, encode later, pose the next frame meanwhile.
     const cv = readFrame(this.gl, this.canvas, this.maxEdge);
     const name = `f${String(this.i).padStart(4, '0')}.png`;
     const slot = this.jobs.length;
@@ -192,8 +147,7 @@ export class Capture {
     a.href = url;
     a.download = `${p.name}.zip`;
     a.click();
-    // Revoking immediately can cancel the download on some builds; a tick
-    // later is enough and leaks nothing worth worrying about.
+    // Revoking at once can cancel the download on some builds.
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
     this.cam.fly = p.fly;
