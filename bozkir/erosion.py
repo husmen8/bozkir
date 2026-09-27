@@ -91,11 +91,38 @@ PROFILES = {
     "alpine":    dict(octaves=7, freq=2, ridge=0.75, relief=0.4,
                       iterations=180, incision=0.55, diffusion=0.04,
                       uplift=0.03),
+    # Rugged ground: almost no hillslope creep, so the ridges and steps
+    # erosion cuts stay sharp instead of being rounded into mounds.
+    # Diffusion is what rounds a landscape; these keep just enough of it
+    # for the numerics.
+    "crags":     dict(dome=0.3, octaves=7, freq=5, ridge=0.95, relief=1.1,
+                      iterations=60, incision=0.6, diffusion=0.01),
+    "buttes":    dict(dome=0.35, octaves=6, freq=4, ridge=0.6, relief=1.0,
+                      iterations=55, incision=0.7, diffusion=0.02,
+                      terraces=4),
+    "gorge":     dict(dome=0.2, octaves=7, freq=3, ridge=0.9, relief=1.3,
+                      iterations=100, incision=1.2, diffusion=0.02),
     # Ground falling away from a range to one side: parallel valleys all
     # running the same way, the way an apron below mountains drains.
     "piedmont":  dict(octaves=6, freq=3, ridge=0.4, relief=1.0,
                       iterations=70, incision=0.45, diffusion=0.08,
                       tilt=0.55),
+    # Bozkir: the steppe the project is named for - wide, nearly level
+    # ground with long shallow draws, little to break the horizon.
+    "steppe":    dict(dome=0.5, octaves=5, freq=2, ridge=0.1, relief=0.25,
+                      iterations=45, incision=0.3, diffusion=0.12),
+    # Hills cut into steps: resistant beds left standing as benches.
+    "terraced":  dict(dome=0.45, octaves=6, freq=3, ridge=0.3, relief=0.9,
+                      iterations=50, incision=0.35, diffusion=0.05,
+                      terraces=7),
+    # Long parallel ridges: the noise is stretched along one axis, so
+    # crests run far in one direction and repeat across the other.
+    "dunes":     dict(dome=0.3, octaves=5, freq=5, ridge=0.9, relief=0.5,
+                      iterations=20, incision=0.1, diffusion=0.02,
+                      stretch=0.3),
+    # Steep slopes of loose rock: fine, dense ridges and little softening.
+    "scree":     dict(dome=0.35, octaves=7, freq=7, ridge=0.7, relief=1.0,
+                      iterations=70, incision=0.9, diffusion=0.01),
 }
 
 
@@ -129,7 +156,7 @@ _GX = np.array([1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0, 0.0])
 _GY = np.array([1.0, 1.0, -1.0, -1.0, 0.0, 0.0, 1.0, -1.0])
 
 
-def _gradient_noise(h, w, f, s):
+def _gradient_noise(h, w, f, s, stretch=1.0):
     """One octave of gradient (Perlin) noise, f lattice cells across, 0..1.
 
     Gradient rather than value noise: value noise interpolates random
@@ -140,7 +167,7 @@ def _gradient_noise(h, w, f, s):
     """
     i = np.arange(w, dtype=np.float64)
     j = np.arange(h, dtype=np.float64)
-    x = (i * f) / w
+    x = (i * (f * stretch)) / w
     y = (j * f) / h
     x0 = np.floor(x)
     y0 = np.floor(y)
@@ -165,7 +192,8 @@ def _gradient_noise(h, w, f, s):
     return (top + (bot - top) * uy) * 0.5 + 0.5
 
 
-def fbm(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0):
+def fbm(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0,
+        stretch=1.0):
     """Fractal noise: octaves at doubling frequency and halving amplitude.
 
     On its own it makes lumpy ground - fine for a distant hillside, wrong
@@ -175,14 +203,15 @@ def fbm(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0):
     out = np.zeros((h, w))
     amp, f, norm = 1.0, float(freq), 0.0
     for k in range(max(1, int(octaves))):
-        out = out + amp * _gradient_noise(h, w, f, int(seed) * 1013 + k)
+        out = out + amp * _gradient_noise(h, w, f, int(seed) * 1013 + k, stretch)
         norm = norm + amp
         amp = amp * gain
         f = f * lacunarity
     return out / max(norm, 1e-9)
 
 
-def ridged(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0):
+def ridged(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0,
+           stretch=1.0):
     """Ridged fractal noise: sharp crests instead of round lumps.
 
     Each octave is folded about its midpoint and inverted, which turns the
@@ -193,7 +222,7 @@ def ridged(shape, octaves=6, freq=4, gain=0.5, lacunarity=2.0, seed=0):
     out = np.zeros((h, w))
     amp, f, norm = 1.0, float(freq), 0.0
     for k in range(max(1, int(octaves))):
-        v = _gradient_noise(h, w, f, int(seed) * 1013 + 7919 + k)
+        v = _gradient_noise(h, w, f, int(seed) * 1013 + 7919 + k, stretch)
         n = 1.0 - np.abs(2.0 * v - 1.0)
         out = out + amp * (n * n)
         norm = norm + amp
@@ -227,7 +256,7 @@ def terrace(z, steps, sharpness=0.5):
 
 
 def base_surface(size, seed=0, octaves=6, freq=4, ridge=0.5, terraces=0,
-                 dome=0.0, tilt=0.0):
+                 dome=0.0, tilt=0.0, stretch=1.0):
     """The noise a profile starts from, 0..1, before any erosion.
 
     `dome` raises the middle against the border. The border is base level -
@@ -242,9 +271,9 @@ def base_surface(size, seed=0, octaves=6, freq=4, ridge=0.5, terraces=0,
     """
     n = int(size)
     shape = (n, n)
-    z = fbm(shape, octaves=octaves, freq=freq, seed=seed)
+    z = fbm(shape, octaves=octaves, freq=freq, seed=seed, stretch=stretch)
     if ridge > 0:
-        r = ridged(shape, octaves=octaves, freq=freq, seed=seed)
+        r = ridged(shape, octaves=octaves, freq=freq, seed=seed, stretch=stretch)
         z = z * (1.0 - ridge) + r * ridge
     z = _unit(z)
     if dome > 0:
@@ -470,7 +499,7 @@ def erode(z, iterations=40, incision=0.3, diffusion=0.1, uplift=0.0,
 
 def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
              relief=1.0, iterations=40, incision=0.3, diffusion=0.1,
-             uplift=0.0, terraces=0, dome=0.0, tilt=0.0):
+             uplift=0.0, terraces=0, dome=0.0, tilt=0.0, stretch=1.0):
     """A height field, eroded, and where its sediment settled; both 0..1.
 
     `profile` names one of PROFILES and fills in the rest. An argument
@@ -481,7 +510,7 @@ def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
     given = dict(octaves=octaves, freq=freq, ridge=ridge, relief=relief,
                  iterations=iterations, incision=incision,
                  diffusion=diffusion, uplift=uplift, terraces=terraces,
-                 dome=dome, tilt=tilt)
+                 dome=dome, tilt=tilt, stretch=stretch)
     if profile is not None:
         if profile not in PROFILES:
             raise ValueError(f"unknown profile {profile!r}; "
@@ -490,7 +519,7 @@ def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
         defaults = generate.__defaults__
         names = ("size", "seed", "profile", "octaves", "freq", "ridge",
                  "relief", "iterations", "incision", "diffusion", "uplift",
-                 "terraces", "dome", "tilt")
+                 "terraces", "dome", "tilt", "stretch")
         dflt = dict(zip(names, defaults))
         for k, v in given.items():
             if v != dflt[k]:
@@ -509,7 +538,7 @@ def generate(size=256, seed=0, profile=None, octaves=6, freq=4, ridge=0.5,
     big = n + 2 * int(np.floor(n * CROP_MARGIN + 0.5))
     k = (big - n) // 2
     z0 = base_surface(big, seed, s["octaves"], s["freq"], s["ridge"],
-                      s["terraces"], s["dome"], s["tilt"])
+                      s["terraces"], s["dome"], s["tilt"], s["stretch"])
     z, sed = erode(z0 * s["relief"], iterations=s["iterations"],
                    incision=s["incision"], diffusion=s["diffusion"],
                    uplift=s["uplift"] * s["relief"], uplift_map=z0)

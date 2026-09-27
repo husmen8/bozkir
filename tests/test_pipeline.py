@@ -2090,6 +2090,86 @@ def _():
     assert word == 'no' and any('only 0 patches' in w for w in why)
 
 
+@test('the landmark metric ignores repeating texture but not repeating landmarks')
+def _():
+    # Brightness repetition rated the calmest desert tileset the most
+    # repetitive; the eye reacts to landmarks, not grain.
+    rep = _script('repetition')
+    r = np.random.default_rng(0)
+    res = 16
+    texture = np.tile(r.random((res, res)) * 0.2 + 0.4, (12, 12))
+    marked = np.full((12 * res, 12 * res), 0.5) + r.random((12 * res, 12 * res)) * 0.05
+    for j in range(12):
+        for i in range(12):
+            marked[j * res + 5:j * res + 8, i * res + 9:i * res + 12] = 0.95
+    t = rep.lattice_excess(rep.landmarks(texture, res), res)[2]
+    m = rep.lattice_excess(rep.landmarks(marked, res), res)[2]
+    assert t < 0.1, f'repeating texture read as landmarks: {t:.2f}'
+    assert m > 0.8, f'a repeating landmark was missed: {m:.2f}'
+
+
+@test('the repetition metric finds a grid, and finds none in noise')
+def _():
+    rep = _script('repetition')
+    r = np.random.default_rng(0)
+    res = 16
+    tile = r.random((res, res))
+    periodic = np.tile(tile, (12, 12))              # one tile, repeated
+    noise = r.random((12 * res, 12 * res))           # nothing repeats
+    _, _, grid = rep.lattice_excess(periodic, res)
+    _, _, none = rep.lattice_excess(noise, res)
+    assert grid > 0.9, f'a perfectly repeating tile read {grid:.2f}'
+    assert abs(none) < 0.05, f'noise read {none:.2f}'
+
+
+@test('a turned patch turns its splats and their orientations together')
+def _():
+    # Rotated patches become new edge colours, so a wrong turn would show as
+    # splats lying across the grain of the ground around them.
+    from bozkir.ply import Splats, quat_to_matrix
+    from bozkir.tile import rotate_patch
+    r = np.random.default_rng(0)
+    n = 300
+    q = r.normal(size=(n, 4))
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    s = Splats(xyz=r.normal(size=(n, 3)), opacity=np.full(n, 0.9),
+               scale=np.full((n, 3), 0.02), rot=q, sh_dc=np.zeros((n, 3)),
+               sh_rest=np.zeros((n, 0, 3)), sh_degree=0)
+    for up in (0, 1, 2):
+        a, b = [i for i in range(3) if i != up]
+        T = np.eye(3)
+        T[a, a] = T[b, b] = 0.0
+        T[a, b], T[b, a] = -1.0, 1.0
+        t = rotate_patch(s, 1, up)
+        assert np.allclose(t.xyz, s.xyz @ T.T), f'up {up}: positions'
+        err = np.abs(quat_to_matrix(t.rot) - T @ quat_to_matrix(s.rot)).max()
+        assert err < 1e-5, f'up {up}: orientations off by {err:.1e}'
+        four = s
+        for _ in range(4):
+            four = rotate_patch(four, 1, up)
+        assert np.allclose(four.xyz, s.xyz), f'up {up}: four turns'
+
+
+@test('purity tells a clean patch from one carrying the other material')
+def _():
+    from bozkir.patches import purity
+    sand, scrub = [0.52, 0.47, 0.42], [0.20, 0.21, 0.16]
+    clean = _flat_patch(False, 2)                 # uniform ~0.30 grey
+    # Recolour: all scrub, then the same with a large pale opening.
+    from bozkir.ply import SH_C0
+    clean.sh_dc = (np.tile(scrub, (len(clean), 1)) - 0.5) / SH_C0
+    holed = clean.subset(np.arange(len(clean)))
+    xy = holed.xyz[:, :2]
+    opening = np.hypot(xy[:, 0] - 0.5, xy[:, 1] - 0.3) < 0.3
+    rgb = np.tile(scrub, (len(holed), 1))
+    rgb[opening] = sand
+    holed.sh_dc = (rgb - 0.5) / SH_C0
+    a = purity(clean, scrub, [sand])
+    b = purity(holed, scrub, [sand])
+    assert a > 0.99, f'a clean patch read {a:.2f}'
+    assert 0.6 < b < 0.85, f'a patch with a sand opening read {b:.2f}'
+
+
 # ======================================================================
 # the scripts, end to end
 # ======================================================================
@@ -2143,6 +2223,17 @@ def _():
         assert m['wang'] and len(m['tiles']) == 16, \
             f"expected 16 Wang tiles, got {len(m['tiles'])}"
         assert (d / 'flat.splat').stat().st_size == 32 * m['total']
+        # And the far-field atlas bakes from what the exporter wrote.
+        p = subprocess.run([sys.executable, 'scripts/bake_atlas.py', 'flat',
+                            '--dir', str(d), '--res', '16'], cwd=root,
+                           env=env, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-400:] + p.stderr[-400:]
+        a = json.loads((d / 'flat.atlas.json').read_text())
+        assert a['count'] == 16 and a['cols'] * a['rows'] >= 16
+        from PIL import Image as _I
+        img = np.asarray(_I.open(d / 'flat.atlas.png'))
+        assert img.shape == (a['rows'] * 16, a['cols'] * 16, 4)
+        assert img[..., 3].mean() > 100, 'atlas tiles came out empty'
 
 
 # ====================================================================== run

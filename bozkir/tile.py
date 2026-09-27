@@ -216,3 +216,46 @@ def seam_camera(seam_point, distance, elevation_deg, azimuth_deg,
     up = np.zeros(3, dtype=np.float32)
     up[up_axis] = 1.0
     return Camera(seam_point + offset * distance, seam_point, up=up, **kw)
+
+def rotate_patch(p, quarter_turns, up_axis=2):
+    """A patch turned about the vertical by a multiple of 90 degrees.
+
+    Used to make new edge colours out of old ground: a patch turned a
+    quarter is, to the eye, a different piece of ground - its features lie
+    elsewhere - while its splats are all real. Rotation cannot be applied to
+    a finished tile, because that would carry its edge codes round with it
+    and break the matching; applied to a patch *before* tiles are built, it
+    is just one more patch.
+
+    Positions and orientations are turned; colour is not. Lighting baked
+    into a capture turns with it, so shadows in a sunny capture point a new
+    way - the reason this is an option rather than a default. Higher-order
+    SH (view-dependent colour) is not rotated; .splat keeps only the
+    constant term, so nothing exported depends on it.
+    """
+    k = int(quarter_turns) % 4
+    if k == 0:
+        return p
+    a, b = [i for i in range(3) if i != up_axis]
+    out = p.subset(np.arange(len(p)))
+    xyz = np.array(p.xyz, dtype=np.float64, copy=True)
+    x, y = xyz[:, a].copy(), xyz[:, b].copy()
+    for _ in range(k):
+        x, y = -y, x
+    xyz[:, a], xyz[:, b] = x, y
+    out.xyz = xyz.astype(p.xyz.dtype)
+    # Pre-multiply every orientation by the turn about the up axis.
+    half = 0.5 * k * np.pi / 2.0
+    axis = np.zeros(3)
+    axis[up_axis] = 1.0
+    # Right-handed turn from axis a towards axis b is about +up when
+    # (a, b, up) is a cyclic order, and about -up otherwise.
+    if (a, b, up_axis) not in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+        axis = -axis
+    w0, v0 = np.cos(half), axis * np.sin(half)
+    q = np.asarray(p.rot, dtype=np.float64)
+    w1, v1 = q[:, 0], q[:, 1:4]
+    w = w0 * w1 - v1 @ v0
+    v = w0 * v1 + w1[:, None] * v0 + np.cross(np.broadcast_to(v0, v1.shape), v1)
+    out.rot = np.c_[w, v].astype(np.asarray(p.rot).dtype)
+    return out

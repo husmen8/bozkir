@@ -138,10 +138,10 @@
         .chips { display: flex; flex-wrap: wrap; gap: 3px; margin: 2px 0 6px; }
         .chips button { width: auto; flex: 1 1 auto; padding: 0 7px; }
         .chips button.on { border-color: #c9a227; color: #fff; }
-        .tw-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+        .tw-cards { display: grid; grid-template-columns: 1fr; gap: 10px; }
         .tw-group-head { color: var(--dim); font-size: 10px; letter-spacing: .12em;
                          text-transform: uppercase; margin: 0 0 5px 2px; }
-        .tw-group-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .tw-group-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
         #terrainwin {
             width: min(720px, 92vw); padding: 0; border: 1px solid var(--line);
             border-radius: 4px; background: var(--panel); color: var(--text);
@@ -182,6 +182,12 @@
                           letter-spacing: .1em; text-transform: uppercase; }
         .tw-recent { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 12px; }
         .tw-recent button { width: auto; padding: 0 8px; }
+        #busy {
+            position: absolute; left: 12px; bottom: 12px; z-index: 40;
+            display: none; padding: 6px 10px; border-radius: 3px;
+            background: rgba(11, 13, 14, .78); color: #e8e2d4;
+            border: 1px solid rgba(255, 255, 255, .15); font-size: 11px;
+        }
         .adv { display: none; }
         /* The way out of figure mode. An HTML element over the canvas, not
            part of it, so a saved PNG never contains it. Fades once it has
@@ -377,6 +383,7 @@
                 <div class="tw-recent-head">made before</div>
                 <div id="genrecent" class="tw-recent"></div>
             </dialog>
+            <div id="busy"></div>
             <button id="figexit" type="button">exit figure mode · F or Esc · P saves</button>
             <svg id="gizmo" viewBox="0 0 92 92">
                 <g id="gz"></g>
@@ -427,6 +434,7 @@
                     <div class="r"><span>splats</span><span class="v" id="n">—</span></div>
                     <div class="r"><span>drawn</span><span class="v" id="drawn">—</span></div>
                     <div class="r"><span>fps</span><span class="v" id="fps">—</span></div>
+                    <div class="r" data-tip="The graphics chip the browser is drawing with. Amber means an integrated or software renderer: on a laptop with a dedicated card, set the browser to High performance in Windows Settings > System > Display > Graphics."><span>gpu</span><span class="v" id="gpuname" style="font-size:9px">—</span></div>
                     <div class="r"><span>sort</span><span class="v" id="sortms">—</span></div>
                 </div>
             </details>
@@ -521,7 +529,7 @@
                 <summary>terrain</summary>
                 <div class="body">
                     <div class="s">
-                        <input type="range" id="grid" min="1" max="64" step="1" value="1" disabled>
+                        <input type="range" id="grid" min="1" max="256" step="1" value="1" disabled>
                         <label>grid<b id="gridn">1 x 1</b></label>
                     </div>
                     <div class="s adv" data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
@@ -560,6 +568,12 @@
                     <label class="c" data-tip="Paints each cell with the class the rule chose - green for the class that collects material, yellow for exposed - washed towards grey where it was nearly undecided.&#10;&#10;This is the decision itself, not the material drawn. If a green-looking summit paints yellow here, the rule called it exposed and what you are seeing is an impure tile or the blend band, not a rule that disagrees with the terrain.">
                         <input type="checkbox" id="classview"> class decision
                     </label>
+                    <label class="c" data-tip="Distant ground drawn as one mesh coloured from an atlas of the tiles seen from above, instead of a draw per cell - what lets the grid reach hundreds of tiles. It takes over as the next level after the coarsest splat level, so the level-of-detail slider moves both together. Needs web/data/&lt;scene&gt;.atlas.png, made by scripts/bake_atlas.py.">
+                        <input type="checkbox" id="farfield" checked> far field
+                    </label>
+                    <label class="c" data-tip="Keeps the viewer near 30 frames per second, the way games do. First it lowers the render resolution (down to half), in proportion to how far behind it is; only if that is not enough does it pull the level-of-detail distance in. With headroom it gives detail back first, then resolution, more slowly than it took them. A note says when it acts. Save PNG is taken at the current resolution.">
+                        <input type="checkbox" id="autoquality" checked> auto quality
+                    </label>
                     <div class="r" data-tip="A measured height field loaded beside the tileset, written by scripts/heightmap.py from a drone survey's DSM or any other height raster.&#10;&#10;Without one the surface is two sine waves: smooth, periodic, and with no channels or ridges for a material rule to read."><span>height field</span></div>
                     <div class="out" id="fieldnote">none — analytic surface</div>
                     <div class="s">
@@ -567,11 +581,21 @@
                         <label>relief<b id="reliefn">0.00</b></label>
                     </div>
                     <div class="s" data-tip="How many tiles a landform spans. With a measured height field this is how much ground the field covers, so a small survey can be read at any size; beyond its edge the field mirrors, so it repeats without a seam.&#10;&#10;Without a field it is the wavelength of the analytic surface.">
-                        <input type="range" id="reliefscale" min="2" max="64" step="1" value="6">
+                        <input type="range" id="reliefscale" min="2" max="256" step="1" value="6">
                         <label>relief scale<b id="reliefscalen">6</b> tiles</label>
                     </div>
-                    <div class="s adv" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
-                        <input type="range" id="subdiv" min="1" max="17" step="1" value="1">
+                    <label class="c" data-tip="How splats follow the terrain. On: every splat bends with the ground under it, so tiles meet without gaps however steep the terrain - the look you usually want. Off: each tile is bent by a few frames only, as GSWT does; faster to set up, and the gaps it leaves on slopes show what the smoothing is for.">
+                        <input type="checkbox" id="smoothframes" checked> smooth tiles on terrain
+                    </label>
+                    <label class="c" data-tip="Fine creases added to the ground at the scale of a tile, so terrain close up is not perfectly smooth. The height field has only a couple of samples per tile on a big world and erosion rounds every crest; this puts the small-scale roughness back. The same in the splats, the far field and the camera.">
+                        <input type="checkbox" id="detailon" checked> detail relief
+                    </label>
+                    <div class="s" data-tip="How strong the detail relief is.">
+                        <input type="range" id="detailamt" min="0.25" max="3" step="0.05" value="1">
+                        <label>detail<b id="detailamtn">1.00</b></label>
+                    </div>
+                    <div class="s" id="subdivrow" style="display:none" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
+                        <input type="range" id="subdiv" min="1" max="17" step="1" value="17">
                         <label>frames / tile<b id="subdivn">1</b></label>
                     </div>
                 </div>
@@ -630,7 +654,7 @@
                         <input type="range" id="saturation" min="0" max="2" step="0.05" value="1">
                         <label>saturation<b id="saturationn">1.00</b></label>
                     </div>
-                    <div class="s adv">
+                    <div data-tip="Scales every splat drawn up close. The far field is a picture baked at the normal size, so it does not change with this slider." class="s adv">
                         <input type="range" id="gain" min="0.2" max="2" step="0.05" value="1">
                         <label>splat size</label>
                     </div>

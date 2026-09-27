@@ -10,10 +10,11 @@ import { drawOrder } from './order.js';
 import { mergeGroups, MAX_GROUP } from './merge.js';
 import { openDrop, describe } from './tileset.js';
 import { Capture } from './capture.js';
-import { generatedField, listCached, loadHeightField, openness } from './heightfield.js';
+import { generatedField, listCached, loadHeightField, openness, roughnessMask } from './heightfield.js';
 import { Benchmark, report } from './benchmark.js';
 import { classify, sampleGrid } from './landform.js';
 import { GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from './terrain.js';
+import { starterTileset } from './starter.js';
 
 const BUILD = 'bozkir viewer 4.1 (16-bit heights, sediment)';
 console.log('%c' + BUILD, 'color:#c8a05a');
@@ -83,6 +84,10 @@ in uint aIndex;
 
 out vec2 vCorner;
 out vec4 vColour;
+out float vFar;                // 0 before the far field, 1 past its start
+uniform float uFarOn;
+uniform float uFarStart;
+uniform float uFarBand;
 
 // The height field, duplicated from height() in the JavaScript. The two
 // must agree exactly: the overlay lines and the material rule are computed
@@ -159,16 +164,58 @@ float openAt(vec2 world) {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// Detail relief: creases at the scale of a tile, added to the terrain so
+// close-up ground is not perfectly smooth. The height field has two or so
+// samples per tile on a big world and erosion rounds every crest, so
+// between samples everything was a curve. Ridged value noise on an integer
+// hash - the same hash, bit for bit, as detailAt() in viewer.js, so the
+// camera, the cells, the splats and the far field all agree on the ground.
+uniform float uDetail;       // amplitude in world units; 0 is off
+uniform float uDetailFreq;   // lattice cells per world unit
+float dHash(ivec2 c) {
+  uint h = uint(c.x) * 0x27D4EB2Du ^ uint(c.y) * 0x165667B1u;
+  h = (h ^ (h >> 15u)) * 0x85EBCA6Bu;
+  h ^= h >> 13u;
+  return float(h & 0xFFFFFFu) / 16777215.0;
+}
+float dValue(vec2 q) {
+  vec2 i = floor(q), f = q - i;
+  vec2 s = f * f * (3.0 - 2.0 * f);
+  ivec2 c = ivec2(i);
+  float a = dHash(c), b = dHash(c + ivec2(1, 0));
+  float d = dHash(c + ivec2(0, 1)), e = dHash(c + ivec2(1, 1));
+  return mix(mix(a, b, s.x), mix(d, e, s.x), s.y);
+}
+float maskAt(vec2 world) {
+  if (uHasOpen < 0.5) return 1.0;
+  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+  float scale = longEdge / max(uFieldExtent, 1e-6);
+  float u = mirrorCoord(world.x * scale + (uFieldSize.x - 1.0) * 0.5, uFieldSize.x - 1.0);
+  float v = mirrorCoord((uFieldSize.y - 1.0) * 0.5 - world.y * scale, uFieldSize.y - 1.0);
+  ivec2 p0 = ivec2(floor(u), floor(v));
+  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
+  vec2 f = vec2(u, v) - vec2(p0);
+  float a = texelFetch(uOpen, p0, 0).g, b = texelFetch(uOpen, ivec2(p1.x, p0.y), 0).g;
+  float c = texelFetch(uOpen, ivec2(p0.x, p1.y), 0).g, d = texelFetch(uOpen, p1, 0).g;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float detailAt(vec2 p) {
+  if (uDetail <= 0.0) return 0.0;
+  vec2 q = p * uDetailFreq;
+  float r1 = 1.0 - abs(2.0 * dValue(q) - 1.0);
+  float r2 = 1.0 - abs(2.0 * dValue(q * 2.03 + vec2(17.3, 5.1)) - 1.0);
+  return uDetail * maskAt(p) * ((r1 * r1 + 0.5 * r2 * r2) / 1.5 - 0.5);
+}
 float terrainHeight(vec2 p) {
   if (uRelief <= 0.0) return 0.0;
   if (uHasField > 0.5) {
     // Centred on zero so raising relief lifts and lowers about the middle
     // rather than pushing the whole terrain upwards.
-    return uRelief * (fieldAt(p) - 0.5) * 2.0;
+    return uRelief * (fieldAt(p) - 0.5) * 2.0 + detailAt(p);
   }
   float f = 1.0 / max(uWave, 0.01);
   return uRelief * (sin(f * p.x) * cos(f * p.y)
-    + 0.5 * sin(2.3 * f * p.x + 1.7) * cos(1.9 * f * p.y + 0.4));
+    + 0.5 * sin(2.3 * f * p.x + 1.7) * cos(1.9 * f * p.y + 0.4)) + detailAt(p);
 }
 
 // The surface gradient at a point, by central differences.
@@ -181,6 +228,8 @@ vec2 terrainGrad(vec2 p) {
   float e = uHasField > 0.5
     ? max(uFieldExtent, 1e-6) / max(max(uFieldSize.x, uFieldSize.y), 2.0)
     : max(uWave, 0.01) * 0.01;
+  // With detail on, the step must be finer than the detail's own creases.
+  if (uDetail > 0.0) e = min(e, 0.15 / max(uDetailFreq, 1e-6));
   return vec2(
     (terrainHeight(p + vec2(e, 0.0)) - terrainHeight(p - vec2(e, 0.0))),
     (terrainHeight(p + vec2(0.0, e)) - terrainHeight(p - vec2(0.0, e)))
@@ -286,6 +335,7 @@ void main() {
   vec3 world = origin + warp * (local - vec3(anchorLocal, 0.0));
 
   vec3 cam = uView * (world - uEye);
+  vFar = uFarOn > 0.5 ? smoothstep(uFarStart - uFarBand, uFarStart, cam.z) : 0.0;
   if (cam.z < uNear) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
 
   float w = q.x, x = q.y, y = q.z, z = q.w;
@@ -396,13 +446,252 @@ const SPLAT_FRAG = `#version 300 es
 precision highp float;
 in vec2 vCorner;
 in vec4 vColour;
+in float vFar;
 out vec4 oColour;
+// Screen-door threshold: a fixed per-pixel value in 0..1. The splats and
+// the far field compare their hand-over weight against the same value, so
+// each pixel in the band shows one or the other, never a mix of both - the
+// dithered cross-fade games use to swap levels without a moving edge.
+float doorway(vec2 p) {
+  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
 void main() {
+  if (vFar > 0.0 && vFar >= doorway(gl_FragCoord.xy)) discard;
   float p = -dot(vCorner, vCorner);
   if (p < -4.0) discard;
   float alpha = exp(p) * vColour.a;
   if (alpha < 0.004) discard;
   oColour = vec4(vColour.rgb * alpha, alpha);   // premultiplied
+}
+`;
+
+// The far field: distant ground as one mesh instead of thousands of cells.
+//
+// Past a few dozen tiles a splat is smaller than a pixel, and what the
+// viewer was paying for there - a sort and a draw call per cell - bought
+// nothing a texture could not show. So beyond uFarStart the ground is a
+// height-field mesh, displaced by the same terrainHeight the splats use,
+// and coloured per cell from an atlas of every tile seen from above
+// (scripts/bake_atlas.py), chosen by the same Wang layout and class rule.
+// It is the standard way games draw distant terrain; hierarchical splat
+// LOD (Kerbl et al. 2024) answers too many splats, and the ceiling here is
+// draw calls.
+//
+// Unlike the splats this pass writes depth, so near hills hide far ground
+// correctly, and it uses a real perspective w so the atlas does not swim.
+const FAR_VERT = `#version 300 es
+precision highp float;
+uniform mat3 uView;
+uniform vec3 uEye;
+uniform vec2 uFocal;
+uniform vec2 uViewport;
+uniform float uRelief;
+uniform float uWave;
+uniform float uHasField;
+uniform sampler2D uField;
+uniform vec2 uFieldSize;
+uniform float uFieldExtent;
+in vec2 aXY;
+out vec2 vXY;
+out float vDepth;
+out float vOpen;
+uniform sampler2D uOpen;
+uniform float uHasOpen;
+float mirrorCoord(float t, float m) {
+  if (m <= 0.0) return 0.0;
+  float p = 2.0 * m;
+  float v = mod(t, p);
+  if (v < 0.0) v += p;
+  return v <= m ? v : p - v;
+}
+float fieldAt(vec2 world) {
+  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+  float scale = longEdge / max(uFieldExtent, 1e-6);
+  float u = world.x * scale + (uFieldSize.x - 1.0) * 0.5;
+  float v = (uFieldSize.y - 1.0) * 0.5 - world.y * scale;
+  u = mirrorCoord(u, uFieldSize.x - 1.0);
+  v = mirrorCoord(v, uFieldSize.y - 1.0);
+  ivec2 p0 = ivec2(floor(u), floor(v));
+  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
+  vec2 f = vec2(u, v) - vec2(p0);
+  float a = texelFetch(uField, ivec2(p0.x, p0.y), 0).r;
+  float b = texelFetch(uField, ivec2(p1.x, p0.y), 0).r;
+  float c = texelFetch(uField, ivec2(p0.x, p1.y), 0).r;
+  float d = texelFetch(uField, ivec2(p1.x, p1.y), 0).r;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+// Detail relief: creases at the scale of a tile, added to the terrain so
+// close-up ground is not perfectly smooth. The height field has two or so
+// samples per tile on a big world and erosion rounds every crest, so
+// between samples everything was a curve. Ridged value noise on an integer
+// hash - the same hash, bit for bit, as detailAt() in viewer.js, so the
+// camera, the cells, the splats and the far field all agree on the ground.
+uniform float uDetail;       // amplitude in world units; 0 is off
+uniform float uDetailFreq;   // lattice cells per world unit
+float dHash(ivec2 c) {
+  uint h = uint(c.x) * 0x27D4EB2Du ^ uint(c.y) * 0x165667B1u;
+  h = (h ^ (h >> 15u)) * 0x85EBCA6Bu;
+  h ^= h >> 13u;
+  return float(h & 0xFFFFFFu) / 16777215.0;
+}
+float dValue(vec2 q) {
+  vec2 i = floor(q), f = q - i;
+  vec2 s = f * f * (3.0 - 2.0 * f);
+  ivec2 c = ivec2(i);
+  float a = dHash(c), b = dHash(c + ivec2(1, 0));
+  float d = dHash(c + ivec2(0, 1)), e = dHash(c + ivec2(1, 1));
+  return mix(mix(a, b, s.x), mix(d, e, s.x), s.y);
+}
+float maskAt(vec2 world) {
+  if (uHasOpen < 0.5) return 1.0;
+  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+  float scale = longEdge / max(uFieldExtent, 1e-6);
+  float u = mirrorCoord(world.x * scale + (uFieldSize.x - 1.0) * 0.5, uFieldSize.x - 1.0);
+  float v = mirrorCoord((uFieldSize.y - 1.0) * 0.5 - world.y * scale, uFieldSize.y - 1.0);
+  ivec2 p0 = ivec2(floor(u), floor(v));
+  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
+  vec2 f = vec2(u, v) - vec2(p0);
+  float a = texelFetch(uOpen, p0, 0).g, b = texelFetch(uOpen, ivec2(p1.x, p0.y), 0).g;
+  float c = texelFetch(uOpen, ivec2(p0.x, p1.y), 0).g, d = texelFetch(uOpen, p1, 0).g;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float detailAt(vec2 p) {
+  if (uDetail <= 0.0) return 0.0;
+  vec2 q = p * uDetailFreq;
+  float r1 = 1.0 - abs(2.0 * dValue(q) - 1.0);
+  float r2 = 1.0 - abs(2.0 * dValue(q * 2.03 + vec2(17.3, 5.1)) - 1.0);
+  return uDetail * maskAt(p) * ((r1 * r1 + 0.5 * r2 * r2) / 1.5 - 0.5);
+}
+float terrainHeight(vec2 p) {
+  if (uRelief <= 0.0) return 0.0;
+  if (uHasField > 0.5) return uRelief * (fieldAt(p) - 0.5) * 2.0 + detailAt(p);
+  float f = 1.0 / max(uWave, 0.01);
+  return uRelief * (sin(f * p.x) * cos(f * p.y)
+    + 0.5 * sin(2.3 * f * p.x + 1.7) * cos(1.9 * f * p.y + 0.4)) + detailAt(p);
+}
+void main() {
+  vec3 world = vec3(aXY, terrainHeight(aXY));
+  vec3 cam = uView * (world - uEye);
+  vXY = aXY;
+  vDepth = cam.z;
+  // Openness, read from the same texture and the same way as fieldAt, so
+  // distant ground is shaded like the splats nearer in.
+  vOpen = 1.0;
+  if (uHasOpen > 0.5) {
+    float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
+    float scale = longEdge / max(uFieldExtent, 1e-6);
+    float u = mirrorCoord(aXY.x * scale + (uFieldSize.x - 1.0) * 0.5, uFieldSize.x - 1.0);
+    float v = mirrorCoord((uFieldSize.y - 1.0) * 0.5 - aXY.y * scale, uFieldSize.y - 1.0);
+    vOpen = texelFetch(uOpen, ivec2(floor(u + 0.5), floor(v + 0.5)), 0).r;
+  }
+  const float n = 0.05, f = 50000.0;
+  gl_Position = vec4(2.0 * uFocal.x * cam.x / uViewport.x,
+                     -2.0 * uFocal.y * cam.y / uViewport.y,
+                     (f + n) / (f - n) * cam.z - 2.0 * f * n / (f - n),
+                     cam.z);
+}
+`;
+
+const FAR_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D uAtlas;
+uniform sampler2D uCells;       // per cell: tile index in r + 256 g
+uniform vec2 uAtlasGrid;        // columns, rows
+uniform float uTileSize;
+uniform float uGridN;
+uniform vec2 uRot;              // cos, sin of the grid angle
+uniform float uFarStart;
+uniform float uFarBand;
+uniform vec3 uFogColour;
+uniform float uFogDensity;
+uniform float uExposure;
+uniform float uShade;
+uniform float uSaturation;
+uniform int uDebug;            // 0 none, 1 tile identity, 2 class, 3 level
+uniform sampler2D uTileInfo;   // row 0 gain, row 1 mean colour, per tile
+uniform float uHasTileInfo;
+uniform vec3 uClassRGB[4];
+in vec2 vXY;
+in float vDepth;
+in float vOpen;
+out vec4 oColour;
+// Screen-door threshold: a fixed per-pixel value in 0..1. The splats and
+// the far field compare their hand-over weight against the same value, so
+// each pixel in the band shows one or the other, never a mix of both - the
+// dithered cross-fade games use to swap levels without a moving edge.
+float doorway(vec2 p) {
+  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+// Same palette as tileRGB() in viewer.js, so a tile keeps its colour when
+// it crosses from splats into the far field.
+vec3 tileRGB(float i) {
+  float h = mod(i * 137.508, 360.0) / 360.0;
+  vec3 n = vec3(5.0, 3.0, 1.0);
+  vec3 v = mod(n + h * 6.0, 6.0);
+  vec3 k = clamp(min(min(v, 4.0 - v), vec3(1.0)), 0.0, 1.0);
+  return 0.30 + 0.70 * k;
+}
+void main() {
+  // Fades in across the band, so the splats handing over and the atlas
+  // taking over overlap instead of meeting at a seam.
+  float a = smoothstep(uFarStart - uFarBand, uFarStart, vDepth);
+  if (a < doorway(gl_FragCoord.xy)) discard;
+  a = 1.0;
+  vec2 l = vec2(uRot.x * vXY.x + uRot.y * vXY.y,
+                -uRot.y * vXY.x + uRot.x * vXY.y);
+  vec2 g = l / uTileSize + (uGridN - 1.0) * 0.5 + 0.5;
+  vec2 ij = floor(g);
+  if (ij.x < 0.0 || ij.y < 0.0 || ij.x >= uGridN || ij.y >= uGridN) discard;
+  vec2 fr = clamp(g - ij, 0.01, 0.99);   // east, north fraction in the cell
+  vec4 t = texelFetch(uCells, ivec2(ij), 0);
+  float idx = floor(t.r * 255.0 + 0.5) + 256.0 * floor(t.g * 255.0 + 0.5);
+  float col = mod(idx, uAtlasGrid.x);
+  float row = floor(idx / uAtlasGrid.x);
+  // Atlas tiles are rendered north up: north is the top of each square.
+  vec2 uv = vec2((col + fr.x) / uAtlasGrid.x,
+                 (row + 1.0 - fr.y) / uAtlasGrid.y);
+  // Derivatives from the continuous cell coordinate, not from uv: at a cell
+  // border uv jumps to another tile, the GPU reads the jump as extreme
+  // minification and draws its blurriest level there - a line along every
+  // border. The continuous coordinate has no jump.
+  vec2 gx = dFdx(g), gy = dFdy(g);
+  vec2 k = vec2(1.0 / uAtlasGrid.x, -1.0 / uAtlasGrid.y);
+  vec4 tex = textureGrad(uAtlas, uv, gx * k, gy * k);
+  vec3 rgb = tex.rgb;
+  if (uHasTileInfo > 0.5) {
+    int ti = int(idx);
+    rgb *= texelFetch(uTileInfo, ivec2(ti, 0), 0).rgb * 2.0;
+    // Detail fades to each tile's mean with distance, as terrain renderers
+    // do: past a few hand-over distances a tile's own pattern is just the
+    // same few shapes repeating, which the eye reads as a lattice.
+    vec3 mean = texelFetch(uTileInfo, ivec2(ti, 1), 0).rgb;
+    float far = smoothstep(uFarStart * 1.5, uFarStart * 5.0, vDepth);
+    rgb = mix(rgb, mean, 0.75 * far);
+  }
+  // Opaque. Drawing with the atlas coverage was tried: behind the far mesh
+  // there is only sky, so a fifth or more of the sky washed into all
+  // distant ground. Gaps between near splats mostly show more ground, not
+  // sky; distance tint belongs to the haze below, and the colour step at
+  // the hand-over to the per-tile gain above.
+  rgb *= mix(1.0, 0.45 + 0.55 * vOpen, uShade);
+  rgb = clamp(rgb * uExposure, 0.0, 1.0);
+  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
+  rgb = clamp(mix(vec3(lum), rgb, uSaturation), 0.0, 1.0);
+  // Debug views reach the far field too; otherwise they describe only the
+  // nearest few dozen tiles and say nothing about the distance.
+  if (uDebug == 1) {
+    rgb = mix(rgb, tileRGB(idx), 0.75);
+  } else if (uDebug == 2) {
+    int cls = int(floor(t.b * 255.0 + 0.5));
+    float sure = t.a;
+    vec3 c = uClassRGB[min(cls, 3)] * sure + vec3(0.62) * (1.0 - sure);
+    rgb = mix(rgb, c, 0.8);
+  } else if (uDebug == 3) {
+    rgb = mix(rgb, vec3(0.92, 0.92, 0.95), 0.6);   // the far field's own level
+  }
+  float fog = 1.0 - exp(-uFogDensity * max(vDepth, 0.0));
+  rgb = mix(rgb, uFogColour, fog);
+  oColour = vec4(rgb, 1.0);
 }
 `;
 
@@ -487,6 +776,9 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'shade', 'shaden', 'exposure', 'exposuren',
                   'figuremode', 'savepng', 'panel', 'gizmo', 'figexit',
                   'scenepick', 'heightpick', 'expert', 'classview',
+                  'farfield', 'busy', 'smoothframes', 'subdivrow', 'autoquality',
+                  'gpuname',
+                  'detailon', 'detailamt', 'detailamtn',
                   'genseed', 'gensize', 'genbtn', 'genstatus',
                   'terrainopen', 'terrainwin', 'terrainclose', 'gencards',
                   'seeddown', 'seedup', 'seedrand', 'genrecent', 'presetchips',
@@ -599,12 +891,26 @@ function fail(err) {
   throw err;
 }
 
+// Ask for the fast GPU. Laptops with a discrete card beside an integrated
+// one often hand a browser the integrated chip unless asked - the splats
+// are still drawn on a GPU, just the slow one, and it feels like CPU.
 const gl = canvas.getContext('webgl2',
-  { antialias: false, alpha: false, premultipliedAlpha: false });
+  { antialias: false, alpha: false, premultipliedAlpha: false,
+    powerPreference: 'high-performance' });
 if (!gl) {
   overlay.querySelector('.msg').innerHTML =
     '<b>No WebGL2</b>This browser cannot run the renderer.';
   throw new Error('webgl2 unavailable');
+}
+
+// Which GPU is drawing. Printed to the console and shown in the scene
+// section, because "is it using my graphics card?" should never need a guess.
+let gpuName = 'unknown';
+if (gl) {
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  gpuName = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+                : gl.getParameter(gl.RENDERER);
+  console.log(`GPU: ${gpuName}`);
 }
 
 function compile(src, type) {
@@ -771,9 +1077,10 @@ class Orbit {
 
 // ================================================================= setup
 
-let splatProg, lineProg, skyProg;
+let splatProg, lineProg, skyProg, farProg;
 try {
   splatProg = program(SPLAT_VERT, SPLAT_FRAG);
+  farProg = program(FAR_VERT, FAR_FRAG);
   lineProg = program(LINE_VERT, LINE_FRAG);
   skyProg = program(SKY_VERT, SKY_FRAG);
 } catch (e) { fail(e); }
@@ -786,7 +1093,14 @@ const splatU = uniforms(splatProg,
    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
    'field', 'fieldSize', 'fieldExtent', 'hasField',
    'open', 'hasOpen', 'shade', 'exposure', 'saturation',
+   'farOn', 'farStart', 'farBand', 'detail', 'detailFreq',
    'edgeN', 'edgeE', 'edgeS', 'edgeW']);
+const farU = uniforms(farProg,
+  ['view', 'eye', 'focal', 'viewport', 'relief', 'wave', 'hasField', 'field',
+   'fieldSize', 'fieldExtent', 'atlas', 'cells', 'atlasGrid', 'tileSize',
+   'gridN', 'rot', 'farStart', 'farBand', 'fogColour', 'fogDensity',
+   'exposure', 'shade', 'saturation', 'open', 'hasOpen', 'debug', 'classRGB',
+   'tileInfo', 'hasTileInfo', 'detail', 'detailFreq']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -902,7 +1216,7 @@ let cacheViews = 9;
 let cacheDirs = null, cacheBuf = null, cacheStride = 0, cacheMs = 0;
 let cacheReady = false;
 let showEdges = false, showDiagonals = false, showTints = false;
-let relief = 0, reliefScale = 6, edgeBand = 0.12, subdiv = 1;
+let relief = 0, reliefScale = 6, edgeBand = 0.12, subdiv = 0;
 // Set once somebody drags the scale slider, after which the grid stops
 // adjusting it for them. Guessing on their behalf is helpful until they
 // have said what they want, and rude afterwards.
@@ -913,6 +1227,138 @@ let reliefScaleTouched = false;
 let fieldTex = null;
 let openTex = null;
 let shotWanted = false;
+// Far field (see FAR_VERT): an atlas of tiles seen from above, a texture of
+// which tile each cell holds, and one mesh for all distant ground.
+let farOn = true;
+let farStartTiles = 14;          // splats out to here, atlas beyond
+let atlas = null;                // { tex, cols, rows }
+let cellTex = null;
+let tileInfoTex = null;   // per tile: colour gain, mean colour
+let farVAO = null, farCount = 0;
+// A scene that is not a Wang tileset - garden, bicycle - is shown as the
+// capture itself: warping it onto terrain or colouring it by a terrain rule
+// only bends and turns something that was never ground.
+let plainScene = false;
+let tileMeans = null;   // mean splat colour per tile, linear 0..1
+
+// Automatic quality, the way games keep a frame budget.
+//
+// First lever: render resolution. Splats are costly per pixel - many
+// blended layers each - so drawing fewer pixels and letting the browser
+// scale the canvas up is the fastest relief there is, and it can change
+// every frame. Range and budget follow Unreal's dynamic resolution
+// defaults: 50-100% of full size, 33.3 ms. Second lever, only when
+// resolution alone cannot keep up: the level-of-detail distance, which also
+// brings the far field closer. The person's slider is its ceiling.
+//
+// Control is proportional (Intel's dynamic-resolution sample): each
+// correction is sized by how far the frame time is from the budget, so a
+// big miss is fixed at once, not a notch at a time. A panic drop, as in
+// Unreal, reacts to a few consecutive frames far over budget. Recovery is
+// deliberately slower than the drop, so the picture does not bounce.
+let autoQuality = true;
+let lodBaseUser = 8;            // what the slider says
+let renderScale = 1;            // fraction of full resolution
+let frameMs = 16;               // smoothed frame time
+let overRun = 0, qualityTick = 0, lastNote = '';
+const BUDGET_MS = 33.3;
+const SCALE_MIN = 0.5;
+const QUALITY_MIN_BASE = 3;
+
+function qualityNote(text) {
+  // At most one note every 1.5 s, so a correction is announced, not chanted.
+  const now = performance.now();
+  if (!ui.busy || text === lastNote || now - (qualityNote.at || 0) < 1500) return;
+  qualityNote.at = now;
+  lastNote = text;
+  ui.busy.textContent = text;
+  ui.busy.style.display = 'block';
+  clearTimeout(qualityNote.t);
+  qualityNote.t = setTimeout(() => {
+    lastNote = '';
+    if (!regenPending && ui.busy) ui.busy.style.display = 'none';
+  }, 2000);
+}
+
+// Two levers on two time scales. Resolution is smooth and cheap to move,
+// so it answers within a quarter second. The detail distance is not: a
+// step moves cells between levels and re-sorts them, which is itself a
+// spike, and moving it back at the first quiet moment made the two chase
+// each other (20 and 45 fps in turn). So detail moves only on sustained
+// need, restores only with a wide margin, and everything holds still while
+// a detail change settles.
+let lodHold = 0, slowFor = 0, quickFor = 0;
+
+function tuneQuality(dt) {
+  if (!autoQuality || !splatCount || !(dt > 0) || dt > 500) return;
+  if (lodHold > 0) {             // settling after a detail change
+    lodHold -= dt;
+    overRun = 0;
+    return;
+  }
+  frameMs += (dt - frameMs) * 0.1;
+  overRun = dt > BUDGET_MS * 1.5 ? overRun + 1 : 0;
+
+  // Panic: five frames in a row far over budget.
+  if (overRun >= 5 && renderScale > SCALE_MIN) {
+    renderScale = Math.max(SCALE_MIN, renderScale * 0.8);
+    overRun = 0;
+    qualityTick = 0;
+    qualityNote(`resolution ${Math.round(renderScale * 100)}% to keep up`);
+    return;
+  }
+  qualityTick += dt;
+  slowFor = frameMs > BUDGET_MS * 1.05 ? slowFor + dt : 0;
+  quickFor = frameMs < BUDGET_MS * 0.6 ? quickFor + dt : 0;
+  if (qualityTick < 250) return;
+  qualityTick = 0;
+
+  // Pixel cost goes with the square of the resolution, so the frame time
+  // predicts the scale that would land at 90% of the budget.
+  const fit = Math.max(SCALE_MIN, Math.min(1,
+    renderScale * Math.sqrt((BUDGET_MS * 0.9) / Math.max(frameMs, 1))));
+  let detail = 0;
+  if (frameMs > BUDGET_MS * 1.05) {
+    if (renderScale > SCALE_MIN + 1e-3) {
+      renderScale = Math.max(SCALE_MIN, renderScale + 0.8 * (fit - renderScale));
+      qualityNote(`resolution ${Math.round(renderScale * 100)}% to keep up`);
+    } else if (slowFor > 1500 && lodBase > QUALITY_MIN_BASE) {
+      detail = -1;
+    }
+  } else if (frameMs < BUDGET_MS * 0.85) {
+    if (renderScale < 1) {
+      renderScale = Math.min(1, renderScale + Math.max(0.02, 0.5 * (fit - renderScale)));
+      qualityNote(renderScale >= 1 ? 'full resolution'
+        : `resolution back to ${Math.round(renderScale * 100)}%`);
+    } else if (quickFor > 4000 && lodBase < lodBaseUser) {
+      detail = 1;
+    }
+  }
+  if (detail) {
+    lodBase = Math.max(QUALITY_MIN_BASE, Math.min(lodBaseUser, lodBase + detail));
+    lodHold = 3000;
+    slowFor = quickFor = 0;
+    qualityNote(detail < 0 ? `detail from ${lodBase} tiles to keep up`
+                           : `detail restored to ${lodBase} tiles`);
+  }
+  if (ui.lodbasen) {
+    ui.lodbasen.textContent = lodBase === lodBaseUser
+      ? `${lodBase} tiles` : `${lodBase} tiles (auto, set ${lodBaseUser})`;
+  }
+}
+
+/** The height the terrain is actually raised by.
+ *
+ *  `relief` is set for a terrain spanning about 24 tiles. Relief scale
+ *  follows the grid so the height field covers it without repeating, and
+ *  without this a 256-tile world spread the same 1.2 of height over ten
+ *  times the width: hills stretched flat. Growing the height with the
+ *  width keeps landforms in proportion, so a bigger world has bigger hills
+ *  rather than none. Below the reference scale nothing changes. */
+const RELIEF_REFERENCE = 24;
+function amplitude() {
+  return relief * Math.max(1, reliefScale / RELIEF_REFERENCE);
+}
 let loadedScene = '';
 let figureMode = false;
 let figExitTimer = 0;
@@ -933,7 +1379,38 @@ const FLAT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 // and then the analytic surface below is used.
 let field = null;
 
+// Detail relief, the JavaScript twin of detailAt() in the shaders: the
+// same integer hash (Math.imul is GLSL's uint multiply), so every part of
+// the viewer that asks where the ground is gets the same answer.
+let detailOn = true, detailStrength = 1;
+function detailAmp() { return detailOn ? 0.05 * detailStrength * (tileSize || 1) : 0; }
+function detailFreq() { return 1 / (0.7 * (tileSize || 1)); }
+function dHash(cx, cy) {
+  let h = (Math.imul(cx, 0x27D4EB2D) ^ Math.imul(cy, 0x165667B1)) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x85EBCA6B) >>> 0;
+  h = (h ^ (h >>> 13)) >>> 0;
+  return (h & 0xFFFFFF) / 16777215;
+}
+function dValue(qx, qy) {
+  const ix = Math.floor(qx), iy = Math.floor(qy);
+  const fx = qx - ix, fy = qy - iy;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+  const a = dHash(ix, iy), b = dHash(ix + 1, iy);
+  const d = dHash(ix, iy + 1), e = dHash(ix + 1, iy + 1);
+  return (a + (b - a) * sx) * (1 - sy) + (d + (e - d) * sx) * sy;
+}
+function detailAt(x, y) {
+  const amp = detailAmp();
+  if (amp <= 0) return 0;
+  const f = detailFreq();
+  const r1 = 1 - Math.abs(2 * dValue(x * f, y * f) - 1);
+  const r2 = 1 - Math.abs(2 * dValue(x * f * 2.03 + 17.3, y * f * 2.03 + 5.1) - 1);
+  const mask = field ? field.sampleMask(x, y) : 1;
+  return amp * mask * ((r1 * r1 + 0.5 * r2 * r2) / 1.5 - 0.5);
+}
+
 function height(x, y) {
+  const relief = amplitude();
   if (relief <= 0) return 0;
   if (field) {
     // Centred on zero so raising relief lifts and lowers about the middle
@@ -945,7 +1422,7 @@ function height(x, y) {
     // swell and a control that does nothing. Letting it set the field's
     // extent instead makes the same terrain readable at any size, and the
     // field mirrors beyond its edge so there is no seam where it repeats.
-    return relief * (field.sample(x, y) - 0.5) * 2.0;
+    return relief * (field.sample(x, y) - 0.5) * 2.0 + detailAt(x, y);
   }
   // Wavelength is measured in tiles, so the terrain keeps the same shape
   // relative to the tiling whatever the tile size happens to be. In world
@@ -953,14 +1430,15 @@ function height(x, y) {
   // as a plane tilt rather than terrain.
   const f = 1 / Math.max(reliefScale * (tileSize || 1), 0.01);
   return relief * (Math.sin(f * x) * Math.cos(f * y)
-    + 0.5 * Math.sin(2.3 * f * x + 1.7) * Math.cos(1.9 * f * y + 0.4));
+    + 0.5 * Math.sin(2.3 * f * x + 1.7) * Math.cos(1.9 * f * y + 0.4))
+    + detailAt(x, y);
 }
 
 /** The tangent frame at a point: two surface tangents and the normal.
  *  Returned column-major, which is what uniformMatrix3fv expects.
  *  Not `frame` - that name is the render loop. */
 function tangentFrame(x, y) {
-  if (relief <= 0) return FLAT;
+  if (amplitude() <= 0) return FLAT;
   // The step has to suit whichever surface is being differenced. For a
   // sampled field the meaningful scale is one texel of ground: a step
   // sized for the analytic wavelength is either far larger than a texel,
@@ -1171,13 +1649,16 @@ function buildGrid() {
     // but an alias of it, which is why the classes looked scattered rather
     // than placed. Drainage suffers most: a channel narrower than a cell
     // cannot be traced at all.
-    const z = sampleGrid(gridN, tileSize, height, gridAngle, 4);
+    // 4 samples per tile up to 64 tiles; fewer beyond, or a kilometre
+    // grid would ask the rule for tens of millions of samples.
+    const over = gridN <= 64 ? 4 : gridN <= 160 ? 2 : 1;
+    const z = sampleGrid(gridN, tileSize, height, gridAngle, over);
     // The erosion's own record of where material settled, sampled on the
     // same grid as the height so the two line up cell for cell. Only
     // generated terrain has one.
     const sed = field && field.sediment
       ? sampleGrid(gridN, tileSize, (x, y) => field.sampleSediment(x, y),
-                   gridAngle, 4)
+                   gridAngle, over)
       : null;
     const r = classify(z, gridN, classCount,
                        { spacing: tileSize, sharpness: classSharp,
@@ -1442,7 +1923,165 @@ function reportSeams() {
     `mean ${(m.mean / unit).toFixed(2)}, over ${m.count} samples`;
 }
 
-function regenerate() { buildGrid(); buildOverlay(); reportSeams(); }
+/** Load <scene>.atlas.png/.json if the scene has one. Without it the far
+ *  field stays off and every cell is splats, as before. */
+async function loadAtlas(name) {
+  atlas = null;
+  try {
+    const r = await fetch(`./data/${name}.atlas.json`);
+    if (!r.ok) return;
+    const lay = await r.json();
+    const img = new Image();
+    img.src = `./data/${name}.atlas.png`;
+    await img.decode();
+    // Per-tile correction. The atlas is painted from straight above, where
+    // the bright tops of things dominate; up close the same tile is seen at
+    // a grazing angle, splats and the ground between them. Scaling each
+    // atlas tile so its mean matches the mean of its own splats removes
+    // most of the step in colour at the hand-over. Row 0: gain (0..2 as
+    // 0..1). Row 1: the tile's mean colour, which distant ground fades to.
+    const cv = document.createElement('canvas');
+    cv.width = img.width; cv.height = img.height;
+    const c2 = cv.getContext('2d', { willReadFrequently: true });
+    c2.drawImage(img, 0, 0);
+    const px = c2.getImageData(0, 0, img.width, img.height).data;
+    const info = new Uint8Array(lay.count * 2 * 4);
+    for (let k = 0; k < lay.count; k++) {
+      const r0 = Math.floor(k / lay.cols) * lay.res;
+      const q0 = (k % lay.cols) * lay.res;
+      let sr = 0, sg = 0, sb = 0, sw = 0;
+      for (let y = r0; y < r0 + lay.res; y++) {
+        for (let x = q0; x < q0 + lay.res; x++) {
+          const o = 4 * (y * img.width + x);
+          const w = px[o + 3] / 255;
+          sr += px[o] * w; sg += px[o + 1] * w; sb += px[o + 2] * w; sw += w;
+        }
+      }
+      const am = sw > 0 ? [sr / sw / 255, sg / sw / 255, sb / sw / 255] : [0.5, 0.5, 0.5];
+      const sm = tileMeans && tileMeans[k] ? tileMeans[k] : am;
+      for (let c = 0; c < 3; c++) {
+        const gain = Math.max(0.5, Math.min(2.0, sm[c] / Math.max(am[c], 1e-3)));
+        info[4 * k + c] = Math.round(127.5 * gain);
+        info[4 * (lay.count + k) + c] = Math.round(255 * Math.min(1, sm[c]));
+      }
+      info[4 * k + 3] = 255;
+      info[4 * (lay.count + k) + 3] = 255;
+    }
+    if (!tileInfoTex) tileInfoTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, tileInfoTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lay.count, 2, 0, gl.RGBA,
+                  gl.UNSIGNED_BYTE, info);
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    // Stop the mip chain while each tile is still several texels wide: the
+    // coarser levels would average a tile with its unrelated neighbours in
+    // the atlas.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL,
+                     Math.max(0, Math.floor(Math.log2(lay.res)) - 3));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    atlas = { tex, cols: lay.cols, rows: lay.rows, count: lay.count };
+    console.log(`far field: atlas of ${lay.count} tiles`);
+    buildFarField();
+  } catch (e) { atlas = null; }
+}
+
+/** Upload which tile each cell holds, and build the far mesh over the grid. */
+function buildFarField() {
+  if (!atlas || !cells.length) return;
+  // An atlas baked from an older export would paint the wrong tiles.
+  if (wangCodes && atlas.count !== wangCodes.length) {
+    console.warn(`far field off: atlas has ${atlas.count} tiles, the tileset `
+                 + `${wangCodes.length}. Re-run scripts/bake_atlas.py.`);
+    atlas = null;
+    return;
+  }
+  const n = gridN;
+  const idx = new Uint8Array(n * n * 4);
+  for (const c of cells) {
+    const k = 4 * (c.j * n + c.i);
+    idx[k] = c.patch & 255;
+    idx[k + 1] = (c.patch >> 8) & 255;
+    idx[k + 2] = (c.cls || 0) & 255;
+    idx[k + 3] = Math.round(255 * Math.max(0, Math.min(1, c.mix == null ? 1 : c.mix)));
+  }
+  if (!cellTex) cellTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE6);
+  gl.bindTexture(gl.TEXTURE_2D, cellTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, idx);
+
+  // A regular mesh over the whole grid, about two vertices per tile: the
+  // height field has no detail finer than that at the distances it is used.
+  const m = Math.max(32, Math.min(512, 2 * n + 1));
+  const extent = n * tileSize;
+  const a = gridAngle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+  const xy = new Float32Array(m * m * 2);
+  for (let j = 0; j < m; j++) {
+    for (let i = 0; i < m; i++) {
+      const lx = (i / (m - 1) - 0.5) * extent, ly = (j / (m - 1) - 0.5) * extent;
+      xy[2 * (j * m + i)] = ca * lx - sa * ly;
+      xy[2 * (j * m + i) + 1] = sa * lx + ca * ly;
+    }
+  }
+  const ix = new Uint32Array((m - 1) * (m - 1) * 6);
+  let t = 0;
+  for (let j = 0; j < m - 1; j++) {
+    for (let i = 0; i < m - 1; i++) {
+      const v = j * m + i;
+      ix[t++] = v; ix[t++] = v + 1; ix[t++] = v + m;
+      ix[t++] = v + 1; ix[t++] = v + m + 1; ix[t++] = v + m;
+    }
+  }
+  if (!farVAO) farVAO = gl.createVertexArray();
+  gl.bindVertexArray(farVAO);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, xy, gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(farProg, 'aXY');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  farCount = ix.length;
+}
+
+function regenerate() { buildGrid(); buildOverlay(); reportSeams(); buildFarField(); }
+
+/** Rebuild after a control moves, with a note on screen first.
+ *
+ *  The rebuild runs on the main thread and freezes the page while it does
+ *  - a second or more at hundreds of tiles - so the note is shown, the
+ *  browser is given two frames to paint it, and only then does the work
+ *  start. Moves that arrive meanwhile are folded into the one rebuild. */
+let regenPending = false;
+function scheduleRegenerate() {
+  if (regenPending) return;
+  regenPending = true;
+  const big = gridN * gridN > 4096;
+  if (big && ui.busy) {
+    ui.busy.textContent = `rebuilding ${(gridN * gridN).toLocaleString()} cells…`;
+    ui.busy.style.display = 'block';
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    regenPending = false;
+    regenerate();
+    if (ui.busy) ui.busy.style.display = 'none';
+  }));
+}
 
 // ================================================================ loading
 
@@ -1458,14 +2097,19 @@ function load(buffer, manifest) {
     lodLevels = Math.max(1, manifest.lod || 1);
     tileSize = manifest.size || 0;
     wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
+    plainScene = !manifest.wang;
     tileClass = manifest.tiles.map(t => t.class || 0);
     classCount = Math.max(1, manifest.classes || 1);
     classColours = meanClassColours(colour, manifest.tiles, classCount);
+    // And each tile's own, for matching the far field to it.
+    tileMeans = manifest.tiles.map((t) =>
+      meanClassColours(colour, [{ start: t.start, count: t.count }], 1)[0]);
   } else {
     patches = [{ start: 0, count: n, levels: [[0, n]] }];
     lodLevels = 1;
     tileSize = 0;
     wangCodes = null;
+    plainScene = true;
     tileClass = null;
     classColours = meanClassColours(colour, [{ start: 0, count: n }], 1);
     classCount = 1;
@@ -1671,8 +2315,11 @@ function measurePop() {
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = Math.floor(canvas.clientWidth * dpr);
-  const h = Math.floor(canvas.clientHeight * dpr);
+  // Below full size while auto quality needs it; the canvas is still laid
+  // out at full size, so the browser scales the smaller image up.
+  const k = autoQuality ? renderScale : 1;
+  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr * k));
+  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr * k));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w; canvas.height = h;
     gl.viewport(0, 0, w, h);
@@ -1720,6 +2367,76 @@ function frame() {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
   drawnSplats = 0; drawCalls = 0;
+  // The far field is the next LOD level: it takes over where the coarsest
+  // splat level would begin, fading in over the same last fifth of the
+  // octave that lodFor() uses, so there is one sequence of transitions
+  // rather than two bands moving at different distances.
+  // One level earlier than the coarsest: at the default that is 16 tiles
+  // rather than 32, a quarter of the splat cells to sort and draw. The
+  // coarsest splat level added little that the atlas does not show, and
+  // cost most of the frame (moving re-sorts every visible cell).
+  const farStart = (lodOn && lodLevels > 1
+    ? lodBase * Math.pow(2, Math.max(0, lodLevels - 2)) : farStartTiles) * (tileSize || 1);
+  const farBand = farStart * (1 - Math.pow(2, -0.2));
+  const farLive = farOn && atlas && farCount && cellTex && tileSize;
+  if (farLive) {
+    // Opaque-ish ground with depth, drawn first; the splats go on top
+    // without depth, exactly as before, so nothing near the camera changes.
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(farProg);
+    gl.bindVertexArray(farVAO);
+    gl.uniformMatrix3fv(farU.view, false, viewMat);
+    gl.uniform3fv(farU.eye, new Float32Array(b.eye));
+    gl.uniform2f(farU.focal, fy, fy);
+    gl.uniform2f(farU.viewport, canvas.width, canvas.height);
+    gl.uniform1f(farU.relief, amplitude());
+    gl.uniform1f(farU.wave, Math.max(reliefScale * (tileSize || 1), 0.01));
+    gl.uniform1i(farU.field, 3);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, field ? fieldTex : null);
+    gl.uniform1f(farU.hasField, field ? 1.0 : 0.0);
+    if (field) {
+      gl.uniform2f(farU.fieldSize, field.w, field.h);
+      gl.uniform1f(farU.fieldExtent, field.extent);
+    }
+    gl.uniform1i(farU.atlas, 5);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, atlas.tex);
+    gl.uniform1i(farU.cells, 6);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, cellTex);
+    gl.uniform2f(farU.atlasGrid, atlas.cols, atlas.rows);
+    gl.uniform1f(farU.tileSize, tileSize);
+    gl.uniform1f(farU.gridN, gridN);
+    const ga = gridAngle * Math.PI / 180;
+    gl.uniform2f(farU.rot, Math.cos(ga), Math.sin(ga));
+    gl.uniform1f(farU.farStart, farStart);
+    gl.uniform1f(farU.farBand, farBand);
+    gl.uniform3fv(farU.fogColour, new Float32Array(S.horizon));
+    gl.uniform1f(farU.fogDensity, S.fog * fogScale);
+    gl.uniform1f(farU.exposure, exposure);
+    gl.uniform1f(farU.shade, groundShade);
+    gl.uniform1f(farU.saturation, saturation);
+    gl.uniform1i(farU.open, 4);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, field && openTex ? openTex : null);
+    gl.uniform1f(farU.hasOpen, field && openTex ? 1.0 : 0.0);
+    gl.uniform1i(farU.debug, showClasses && classCount > 1 ? 2
+      : showIdentity ? 1 : showLodColours ? 3 : 0);
+    gl.uniform3fv(farU.classRGB, new Float32Array(CLASS_RGB.flat()));
+    gl.uniform1f(farU.detail, amplitude() > 0 ? detailAmp() : 0);
+    gl.uniform1f(farU.detailFreq, detailFreq());
+    gl.uniform1i(farU.tileInfo, 7);
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, tileInfoTex);
+    gl.uniform1f(farU.hasTileInfo, tileInfoTex ? 1.0 : 0.0);
+    gl.drawElements(gl.TRIANGLES, farCount, gl.UNSIGNED_INT, 0);
+    gl.bindVertexArray(null);
+    gl.disable(gl.DEPTH_TEST);
+    drawCalls++;
+  }
 
   if (splatCount && sortedReady) {
     gl.useProgram(splatProg);
@@ -1749,6 +2466,11 @@ function frame() {
       gl.uniform1f(splatU.hasOpen, 0.0);
     }
     gl.uniform1f(splatU.shade, groundShade);
+    gl.uniform1f(splatU.detail, amplitude() > 0 ? detailAmp() : 0);
+    gl.uniform1f(splatU.detailFreq, detailFreq());
+    gl.uniform1f(splatU.farOn, farLive ? 1.0 : 0.0);
+    gl.uniform1f(splatU.farStart, farStart);
+    gl.uniform1f(splatU.farBand, farBand);
     gl.uniform1f(splatU.exposure, exposure);
     gl.uniform1f(splatU.saturation, saturation);
     gl.uniformMatrix3fv(splatU.view, false, viewMat);
@@ -1757,7 +2479,7 @@ function frame() {
     gl.uniform2f(splatU.viewport, canvas.width, canvas.height);
     gl.uniform1f(splatU.gain, gain);
     gl.uniform1f(splatU.near, 0.05);
-    gl.uniform1f(splatU.relief, relief);
+    gl.uniform1f(splatU.relief, amplitude());
     gl.uniform1f(splatU.wave, Math.max(reliefScale * (tileSize || 1), 0.01));
     gl.uniform1i(splatU.subdiv, subdiv);
     gl.uniform1f(splatU.tileSize, tileSize);
@@ -1794,7 +2516,7 @@ function frame() {
       // cells above and below while keeping the ones to the side. Rotate,
       // and rows swing between the two, which is why it shows most when a
       // row lines up with the screen.
-      const reach = tileSize * 2.0 + Math.abs(relief);
+      const reach = tileSize * 2.0 + Math.abs(amplitude());
       const padY = reach + Math.max(z, 0.01) * tanHalf;
       const padX = reach + Math.max(z, 0.01) * tanHalf * aspect;
       if (Math.abs(sx) > padX || Math.abs(sy) > padY) continue;
@@ -1817,6 +2539,8 @@ function frame() {
         const kz = kx * b.forward[0] + ky * b.forward[1] + dz * b.forward[2];
         if (kz < near) near = kz;
       }
+      // Handed over to the far field: past its band this cell is atlas.
+      if (farLive && near > farStart) continue;
       visible.push({ c, near, dist, side: Math.abs(sx) + Math.abs(sy) });
     }
 
@@ -2200,6 +2924,8 @@ function frame() {
   if (capture.active) capture.step();
   if (bench.active) bench.step(benchDt);
   if (shotWanted) { shotWanted = false; saveFrame(); }
+  tuneQuality(benchDt);
+  moveCamera(benchDt);
 
   requestAnimationFrame(frame);
 }
@@ -2255,45 +2981,89 @@ canvas.addEventListener('wheel', (e) => {
     cam.speed = Math.max(0.02, Math.min(200, cam.speed * Math.exp(-e.deltaY * 0.001)));
     if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
   } else {
-    cam.distance = Math.max(0.05, cam.distance * Math.exp(e.deltaY * 0.001));
+    // Zoom sets a goal the camera eases towards (moveCamera), in even steps
+    // whatever the device reports: trackpads send pixels, some mice lines.
+    const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+    const near = Math.max(0.05, 0.5 * (tileSize || 0.1));
+    zoomGoal = Math.max(near, (zoomGoal || cam.distance) * Math.exp(dy * 0.0012));
   }
 }, { passive: false });
+let zoomGoal = 0;
 
 const held = new Set();
 addEventListener('keydown', (e) => held.add(e.key.toLowerCase()));
 addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
-setInterval(() => {
-  if (!held.size || !splatCount) return;
+// Movement runs in the frame loop with the real time between frames, and
+// through a velocity that eases towards what the keys ask for: pressing a
+// key accelerates over about a tenth of a second, releasing it glides to a
+// stop. A fixed step on its own timer started and stopped instantly and
+// drifted against the frames, which read as judder.
+const camVel = [0, 0, 0];
+const EASE_S = 0.12;
+
+function moveCamera(dt) {
+  if (!splatCount || !(dt > 0)) return;
+  const sec = Math.min(dt, 100) / 1000;
+  if (zoomGoal && !cam.fly) {
+    // Ease the distance towards the scroll's goal, in log space so zooming
+    // in and out feel the same.
+    const z = 1 - Math.exp(-sec / 0.1);
+    cam.distance = Math.exp(Math.log(cam.distance)
+      + (Math.log(zoomGoal) - Math.log(cam.distance)) * z);
+    if (Math.abs(cam.distance - zoomGoal) < 1e-3 * zoomGoal) {
+      cam.distance = zoomGoal;
+      zoomGoal = 0;
+    }
+  }
   const b = cam.basis();
   const fast = held.has('shift') ? 4 : 1;
-
+  const want = [0, 0, 0];
+  let speed, fwd, rgt;
   if (cam.fly) {
-    // Full 3D: forward follows where you are looking, including up and down.
-    const step = cam.speed * 0.016 * fast;
-    const move = (v, s) => { for (let i = 0; i < 3; i++) cam.pos[i] += v[i] * s; };
-    if (held.has('w')) move(b.forward, step);
-    if (held.has('s')) move(b.forward, -step);
-    if (held.has('d')) move(b.right, step);
-    if (held.has('a')) move(b.right, -step);
-    if (held.has('e')) cam.pos[2] += step;
-    if (held.has('q')) cam.pos[2] -= step;
-    return;
+    speed = cam.speed * fast;                       // units per second
+    fwd = b.forward;
+    rgt = b.right;
+  } else {
+    // Scaled with the view, as before, but with a floor: zoomed in close,
+    // walking speed tied to the distance fell to a crawl.
+    speed = Math.max(cam.distance, 4 * (tileSize || 1)) * 1.25 * fast;
+    const fl = Math.hypot(b.forward[0], b.forward[1]) || 1;
+    fwd = [b.forward[0] / fl, b.forward[1] / fl, 0];
+    const rl = Math.hypot(b.right[0], b.right[1]) || 1;
+    rgt = [b.right[0] / rl, b.right[1] / rl, 0];
   }
+  const add = (v, s) => { for (let i = 0; i < 3; i++) want[i] += v[i] * s; };
+  if (held.has('w')) add(fwd, speed);
+  if (held.has('s')) add(fwd, -speed);
+  if (held.has('d')) add(rgt, speed);
+  if (held.has('a')) add(rgt, -speed);
+  if (held.has('e')) want[2] += speed;
+  if (held.has('q')) want[2] -= speed;
 
-  // Orbiting, movement slides the point being orbited, along the ground.
-  const step = cam.distance * 0.02 * fast;
-  const fl = Math.hypot(b.forward[0], b.forward[1]) || 1;
-  const fwd = [b.forward[0] / fl, b.forward[1] / fl, 0];
-  const rl = Math.hypot(b.right[0], b.right[1]) || 1;
-  const rgt = [b.right[0] / rl, b.right[1] / rl, 0];
-  const move = (v, s) => { for (let i = 0; i < 3; i++) cam.target[i] += v[i] * s; };
-  if (held.has('w')) move(fwd, step);
-  if (held.has('s')) move(fwd, -step);
-  if (held.has('d')) move(rgt, step);
-  if (held.has('a')) move(rgt, -step);
-  if (held.has('e')) cam.target[2] += step;
-  if (held.has('q')) cam.target[2] -= step;
-}, 16);
+  const k = 1 - Math.exp(-sec / EASE_S);
+  let still = true;
+  for (let i = 0; i < 3; i++) {
+    camVel[i] += (want[i] - camVel[i]) * k;
+    if (Math.abs(camVel[i]) < 1e-4 * Math.max(speed, 1e-3)) camVel[i] = 0;
+    if (camVel[i]) still = false;
+  }
+  if (still) return;
+  const p = cam.fly ? cam.pos : cam.target;
+  for (let i = 0; i < 3; i++) p[i] += camVel[i] * sec;
+
+  // The orbited point stays on the map: past the grid there is no ground to
+  // look at, which looked the same as being stuck.
+  if (!cam.fly && tileSize && gridN > 1) {
+    const a = gridAngle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+    const lim = 0.5 * gridN * tileSize;
+    let lx = ca * p[0] + sa * p[1];
+    let ly = -sa * p[0] + ca * p[1];
+    lx = Math.max(-lim, Math.min(lim, lx));
+    ly = Math.max(-lim, Math.min(lim, ly));
+    p[0] = ca * lx - sa * ly;
+    p[1] = sa * lx + ca * ly;
+  }
+}
 
 // Opening a tileset: from the file dialog, or dropped anywhere on the page.
 //
@@ -2413,12 +3183,12 @@ on('grid', 'input', (e) => {
   }
   ui.gridn.textContent = `${gridN} x ${gridN}`;
   markReliefScale();
-  regenerate();
+  scheduleRegenerate();
 });
 on('used', 'input', (e) => {
   usedPatches = +e.target.value;
   if (ui.usedn) ui.usedn.textContent = `${usedPatches} of ${patches.length}`;
-  regenerate();
+  scheduleRegenerate();
 });
 on('tints', 'change', (e) => { showTints = e.target.checked; });
 on('classview', 'change', (e) => { showClasses = e.target.checked; });
@@ -2487,6 +3257,23 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'escape' && figureMode) setFigureMode(false);
 });
 on('figexit', 'click', () => setFigureMode(false));
+on('farfield', 'change', (e) => { farOn = e.target.checked; });
+if (ui.gpuname) {
+  ui.gpuname.textContent = String(gpuName).replace(/^ANGLE \((.*)\)$/, '$1');
+  // An integrated chip on a machine that may have a faster one: say so.
+  if (/intel|uhd|iris|integrated|swiftshader|llvmpipe/i.test(gpuName)) {
+    ui.gpuname.style.color = '#d9a441';
+    ui.gpuname.title = 'This is an integrated or software GPU. If the machine has '
+      + 'a dedicated graphics card, set the browser to "High performance" in '
+      + 'Windows Settings > System > Display > Graphics.';
+  }
+}
+on('detailon', 'change', (e) => { detailOn = e.target.checked; scheduleRegenerate(); });
+on('detailamt', 'input', (e) => {
+  detailStrength = +e.target.value;
+  ui.detailamtn.textContent = detailStrength.toFixed(2);
+  scheduleRegenerate();
+});
 on('orbit', 'change', (e) => { orbiting = e.target.checked; });
 on('freefly', 'change', (e) => {
   cam.setFly(e.target.checked);
@@ -2509,13 +3296,22 @@ on('lodcolours', 'change', (e) => {
   showLodColours = e.target.checked;
 });
 on('lodbase', 'input', (e) => {
-  lodBase = +e.target.value;
+  lodBaseUser = lodBase = +e.target.value;
   ui.lodbasen.textContent = `${lodBase} tiles`;
+  qualityTick = -1500;          // a hand on the slider gets a moment first
+});
+on('autoquality', 'change', (e) => {
+  autoQuality = e.target.checked;
+  if (!autoQuality) {
+    lodBase = lodBaseUser;
+    renderScale = 1;
+    ui.lodbasen.textContent = `${lodBase} tiles`;
+  }
 });
 on('gridangle', 'input', (e) => {
   gridAngle = +e.target.value;
   if (ui.gridanglen) ui.gridanglen.textContent = `${gridAngle}\u00b0`;
-  regenerate();
+  scheduleRegenerate();
 });
 on('popmeter', 'change', (e) => {
   popOn = e.target.checked;
@@ -2539,6 +3335,14 @@ on('recache', 'click', () => {
   worker.postMessage({ type: 'cache', views: cacheViews });
   setTimeout(reportSortError, 300);
 });
+// Smoothing is a switch first, a number second: almost everyone wants it
+// on, and the frames-per-tile count only means anything once it is off.
+on('smoothframes', 'change', (e) => {
+  const smooth = e.target.checked;
+  if (ui.subdivrow) ui.subdivrow.style.display = smooth ? 'none' : '';
+  ui.subdiv.value = smooth ? '17' : '1';
+  ui.subdiv.dispatchEvent(new Event('input'));
+});
 on('subdiv', 'input', (e) => {
   const v = +e.target.value;
   setTimeout(reportSeams, 0);
@@ -2554,7 +3358,7 @@ on('band', 'input', (e) => {
 on('relief', 'input', (e) => {
   relief = +e.target.value;
   ui.reliefn.textContent = relief.toFixed(2);
-  regenerate();
+  scheduleRegenerate();
 });
 on('reliefscale', 'input', (e) => {
   reliefScale = +e.target.value;
@@ -2566,7 +3370,7 @@ on('reliefscale', 'input', (e) => {
   ui.reliefscalen.textContent = reliefScale.toFixed(0);
   markReliefScale();
   if (field) field.fitTo(reliefScale * (tileSize || 1));
-  regenerate();
+  scheduleRegenerate();
 });
 on('edges', 'change', (e) => {
   showEdges = e.target.checked;
@@ -2578,7 +3382,7 @@ on('diagonals', 'change', (e) => {
 });
 on('reseed', 'click', () => {
   seed = (Math.random() * 1e9) | 0;
-  regenerate();
+  scheduleRegenerate();
 });
 on('reset', 'click', () => {
   cam.azimuth = 45; cam.elevation = 25;
@@ -2588,21 +3392,21 @@ on('reset', 'click', () => {
 
 on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
 
-on('classrule', 'change', (e) => { classOn = e.target.checked; regenerate(); });
+on('classrule', 'change', (e) => { classOn = e.target.checked; scheduleRegenerate(); });
 on('classaltitude', 'input', (e) => {
   classAltitude = +e.target.value;
   ui.classaltituden.textContent = `${Math.round(classAltitude * 100)}%`;
-  regenerate();
+  scheduleRegenerate();
 });
 on('classcoherence', 'input', (e) => {
   classCoherence = +e.target.value;
   ui.classcoherencen.textContent = String(classCoherence);
-  regenerate();
+  scheduleRegenerate();
 });
 on('classbalance', 'input', (e) => {
   classBalance = +e.target.value;
   ui.classbalancen.textContent = `${Math.round(classBalance * 100)}%`;
-  regenerate();
+  scheduleRegenerate();
 });
 on('classblend', 'change', (e) => { classBlend = e.target.checked; });
 on('blendwidth', 'input', (e) => {
@@ -2612,7 +3416,7 @@ on('blendwidth', 'input', (e) => {
 on('classsharp', 'input', (e) => {
   classSharp = +e.target.value;
   ui.classsharpn.textContent = classSharp.toFixed(1);
-  regenerate();
+  scheduleRegenerate();
 });
 on('merging', 'change', (e) => {
   mergeOn = e.target.checked;
@@ -3107,22 +3911,40 @@ on('heightpick', 'change', (e) => {
   useHeightField(e.target.value);
 });
 
-for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
-  Promise.all([
+/** Nothing to load: make the starter tileset and lay it on generated
+ *  ground, so the viewer never opens onto an empty page. */
+function loadStarter() {
+  if (splatCount) return;
+  const { buffer, manifest } = starterTileset();
+  loadedScene = 'starter';
+  load(buffer, manifest);
+  loadCatalogue();
+  if (!pendingPreset) pendingPreset = 'readme';
+  useGeneratedField(wantedGen || 'rolling', wantedGen ? wantedSeed : 0,
+                    wantedGen ? wantedSize : 256);
+  console.log('no scene found: showing the starter tileset');
+}
+
+const attempts = [];
+if (wanted === 'starter') loadStarter();
+else for (const name of (wanted ? [wanted] : ['scene', 'bigsur', 'garden'])) {
+  attempts.push(Promise.all([
     fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
     fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]).then(([b, m]) => {
     if (!b || splatCount) return;
     loadedScene = name;
     load(b, m);
+    loadAtlas(name);
     loadCatalogue();
     // The height field is optional and arrives after the splats, so the
     // scene is up either way and gains its terrain a moment later rather
     // than waiting on a file most tilesets do not have.
     if (wantedGen) useGeneratedField(wantedGen, wantedSeed, wantedSize);
     else useHeightField(wantedHeight || name);
-  }).catch(() => {});
+  }).catch(() => {}));
 }
+Promise.allSettled(attempts).then(() => { if (!splatCount) loadStarter(); });
 
 /** Look for a height field beside a tileset and adopt it if there is one. */
 async function useHeightField(name) {
@@ -3195,8 +4017,11 @@ function adoptField(f) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, f.w, f.h, 0, gl.RED, gl.FLOAT,
-                openness(f.z, f.w, f.h));
+  const open = openness(f.z, f.w, f.h);
+  f.mask = roughnessMask(f.z, f.w, f.h, open);
+  const rg = new Float32Array(f.w * f.h * 2);
+  for (let i = 0; i < f.w * f.h; i++) { rg[2 * i] = open[i]; rg[2 * i + 1] = f.mask[i]; }
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, f.w, f.h, 0, gl.RG, gl.FLOAT, rg);
   // Cover the whole grid by default rather than the six tiles the analytic
   // surface wanted. A generated field is 512 across and holds a landscape;
   // showing two tiles of it and mirroring that fourteen times across the
@@ -3214,6 +4039,10 @@ function adoptField(f) {
   if (ui.fieldnote) ui.fieldnote.textContent = f.describe();
   // A preset in the URL waits for the ground: its relief scale and its
   // rule settings mean nothing until there is a field to apply them to.
+  if (plainScene && !pendingPreset && presets.plain) {
+    setTimeout(() => applyPreset('plain'), 0);
+    console.log('not a tileset: showing the capture as it is (preset "no rule")');
+  }
   if (pendingPreset && presets[pendingPreset]) {
     const name = pendingPreset;
     pendingPreset = null;

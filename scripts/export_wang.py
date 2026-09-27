@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
+from bozkir.patches import (appearance, purity, apply_settings, auto_pick,  # noqa: E402
                             balanced_split, cached_search, choose,
                             class_separation, describe_trail, level_patch,
                             part_ink, rendered_coverage, search_kwargs,
@@ -31,6 +31,7 @@ from bozkir.scene import add_scene_args, scene_from_args  # noqa: E402
 from bozkir.wang import (build_tile_set, minimal_codes, layout, check_layout,  # noqa: E402
                          edge_gaussians)
 from bozkir.pack import pack, STRIDE  # noqa: E402
+from bozkir.tile import rotate_patch  # noqa: E402
 from bozkir.catalogue import rebuild as reindex  # noqa: E402
 
 
@@ -169,6 +170,16 @@ def main():
                          "3 colours instead of 81. On by default from 3 "
                          "colours up; the variety that fights repetition "
                          "comes from the colours, not the tile count")
+    ap.add_argument("--purity", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="with --classes, prefer each class's purest patches "
+                         "(least ground that looks like another class); on by "
+                         "default, --no-purity to rank by the search alone")
+    ap.add_argument("--rotations", type=int, default=1, choices=[1, 2, 3, 4],
+                    help="make extra edge colours from real patches turned "
+                         "by 90 degrees (2 = up to two turns each...). Needs "
+                         "fewer distinct patches, so a rarer material still "
+                         "gets variety; shadows in a sunny capture turn too")
     ap.add_argument("--complete", action="store_true",
                     help="build every combination even at 3+ colours")
     ap.add_argument("--blend", type=float, default=0.05,
@@ -289,9 +300,14 @@ def main():
     scale_report(s, args.size)
     up = args.up_axis
     thickness = args.thickness if args.thickness else args.size * 0.25
-    need = 2 * args.colours
+    tiles_need = 2 * args.colours
+    # With rotations, each real patch also supplies turned copies as further
+    # colours, so fewer distinct patches have to be found in the capture.
+    need = -(-tiles_need // max(1, args.rotations))
 
-    print(f"  need {need} patches for {args.colours} colours per axis")
+    print(f"  need {tiles_need} patches for {args.colours} colours per axis"
+          + (f", {need} real and the rest turned copies"
+             if args.rotations > 1 else ""))
     # Search widely, then narrow on appearance: a patch that scores well but
     # looks nothing like the others produces a tile with a visible X in it.
     # Four times what is needed, so appearance has something to choose
@@ -392,7 +408,9 @@ def main():
         # into groups that look unlike each other and each group becomes its own
         # tile set.
         if args.classes > 1:
-            groups = split_classes(chosen, classes=args.classes, per_class=need)
+            # A deeper pool per class when purity is to choose among them.
+            pool = need * 3 if args.purity else need
+            groups = split_classes(chosen, classes=args.classes, per_class=pool)
             sep = class_separation(groups)
             print(f"\n  split into {len(groups)} classes, separation {sep:.2f}")
             # A split of one material into two still finds some gap: noise
@@ -414,6 +432,18 @@ def main():
             short = [i for i, g in enumerate(groups) if len(g) < need]
             if short:
                 raise _ShortClass(short)
+            if args.purity:
+                # Each class keeps its purest patches: least ground that
+                # looks like another class. Stable, so ties keep the
+                # search's own ranking.
+                for gi, g in enumerate(groups):
+                    others = [rgb[k] for k in range(len(rgb)) if k != gi]
+                    pur = [purity(c[2], rgb[gi], others, up) for c in g]
+                    order = sorted(range(len(g)), key=lambda k: -pur[k])
+                    groups[gi] = [g[k] for k in order]
+                    kept = [pur[k] for k in order[:need]]
+                    print(f"  class {gi}: purest {need} of {len(g)} patches, "
+                          f"purity " + " ".join(f"{v:.2f}" for v in kept))
             class_sets = [g[:need] for g in groups]
         else:
             class_sets = [chosen[:need]]
@@ -451,6 +481,13 @@ def main():
                   f"{f[:, 1].mean():.2f} {f[:, 2].mean():.2f}")
         overlap_report(picked[:need], args.size)
         patches = prepare_patches(picked, need, args, up)
+        if args.rotations > 1:
+            # Real patches first, then each turned a quarter, then a half...
+            # so every colour set mixes sources, and a turned copy is only
+            # used where the capture ran out of distinct ground.
+            patches = [rotate_patch(p, r, up) for r in range(args.rotations)
+                       for p in patches][:tiles_need]
+            print(f"  {need} real patches, {len(patches) - need} turned copies")
 
         # Which patches supply which axis is not arbitrary: put the odd one
         # out on one axis and every boundary running that way is made of
@@ -458,11 +495,18 @@ def main():
         (h_patches, v_patches), axis_gap = balanced_split(patches, args.colours)
         naive = float(np.linalg.norm(
             np.mean([appearance(p) for p in patches[:args.colours]], axis=0)
-            - np.mean([appearance(p) for p in patches[args.colours:need]],
+            - np.mean([appearance(p) for p in patches[args.colours:tiles_need]],
                       axis=0)))
-        print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
-              f"({naive:.3f} if split by score)"
-              + ("  <- the grid will have a grain" if axis_gap > 0.05 else ""))
+        if args.rotations > 1:
+            # Turned copies share their source's mean appearance, so both
+            # axes hold the same sources and the balance reads zero by
+            # construction; it measures nothing here.
+            print("\n  axis balance: not meaningful with --rotations "
+                  "(both axes share the same sources)")
+        else:
+            print(f"\n  axis balance: {axis_gap:.3f} between the two sets "
+                  f"({naive:.3f} if split by score)"
+                  + ("  <- the grid will have a grain" if axis_gap > 0.05 else ""))
 
         if args.cut:
             print(f"\n  assembling tiles (graph cut, {args.cut_res}px, "

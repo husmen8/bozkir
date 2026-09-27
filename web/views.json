@@ -1,4 +1,12 @@
 {
+  "plain": {
+    "short": "no rule",
+    "label": "Just the capture: no terrain, no material rule, no far field. For scenes that are not ground tiles (garden, bicycle) and for comparing against the plain splats.",
+    "relief": 0,
+    "classrule": false,
+    "classblend": false,
+    "farfield": false
+  },
   "_about": "Named viewer settings (not to be confused with the repo root's presets.json, which holds capture settings for the Python pipeline). Each key is a panel control's id and the value it is set to, exactly as if the slider had been moved by hand. 'reliefscale': 'grid' means match the grid size. 'view' presses one of the camera buttons. 'short' is the button's text and 'label' its tooltip. Add your own; the viewer lists whatever is here.",
   "readme": {
     "short": "balanced",

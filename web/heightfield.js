@@ -156,6 +156,40 @@ export function openness(z, w, h, radius) {
   return out;
 }
 
+/** Where fine detail belongs, 0..1: steep slopes and convex crests.
+ *
+ *  Rough, broken ground is where the land is steep or exposed; flats and
+ *  hollows are where sediment settles and lies smooth. Terrain renderers
+ *  mask detail the same way - Frostbite computes a mask in the shader from
+ *  slope with a ramp between two slopes; heightfield tools build masks from
+ *  slope and curvature - so the creases appear where they make sense
+ *  instead of on every flat. Slope is normalised by its 95th percentile so
+ *  the mask means the same on gentle and on steep terrain.
+ */
+export function roughnessMask(z, w, h, open) {
+  const g = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const xl = z[y * w + Math.max(0, x - 1)], xr = z[y * w + Math.min(w - 1, x + 1)];
+      const yu = z[Math.max(0, y - 1) * w + x], yd = z[Math.min(h - 1, y + 1) * w + x];
+      g[y * w + x] = Math.hypot(xr - xl, yd - yu);
+    }
+  }
+  const sorted = Float32Array.from(g).sort();
+  const p95 = Math.max(sorted[Math.floor(0.95 * (sorted.length - 1))], 1e-9);
+  const ramp = (a, b, v) => {
+    const t = Math.min(1, Math.max(0, (v - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const out = new Float32Array(w * h);
+  for (let i = 0; i < out.length; i++) {
+    const steep = ramp(0.3, 0.75, g[i] / p95);
+    const crest = open ? ramp(0.6, 0.9, open[i]) : 0;
+    out[i] = Math.max(steep, crest);
+  }
+  return out;
+}
+
 /** Mean over a (2r+1) square window, clipped at the edges, separable. */
 function boxBlur(z, w, h, r) {
   const tmp = new Float32Array(w * h);
@@ -233,6 +267,11 @@ export class HeightField {
    */
   sampleSediment(x, y) {
     return this.sediment ? this._bilinear(this.sediment, x, y) : null;
+  }
+
+  /** The detail mask (roughnessMask) at a world point, or 1 without one. */
+  sampleMask(x, y) {
+    return this.mask ? this._bilinear(this.mask, x, y) : 1;
   }
 
   /** Bilinear read from any grid the size of this field, mirrored past its

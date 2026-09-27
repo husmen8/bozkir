@@ -43,19 +43,33 @@ export const PROFILES = {
                iterations: 150, incision: 0.45, diffusion: 0.06, uplift: 0.02 },
   alpine:    { octaves: 7, freq: 2, ridge: 0.75, relief: 0.4,
                iterations: 180, incision: 0.55, diffusion: 0.04, uplift: 0.03 },
+  crags:     { dome: 0.3, octaves: 7, freq: 5, ridge: 0.95, relief: 1.1,
+               iterations: 60, incision: 0.6, diffusion: 0.01 },
+  buttes:    { dome: 0.35, octaves: 6, freq: 4, ridge: 0.6, relief: 1.0,
+               iterations: 55, incision: 0.7, diffusion: 0.02, terraces: 4 },
+  gorge:     { dome: 0.2, octaves: 7, freq: 3, ridge: 0.9, relief: 1.3,
+               iterations: 100, incision: 1.2, diffusion: 0.02 },
   piedmont:  { octaves: 6, freq: 3, ridge: 0.4, relief: 1.0,
                iterations: 70, incision: 0.45, diffusion: 0.08, tilt: 0.55 },
+  steppe:    { dome: 0.5, octaves: 5, freq: 2, ridge: 0.1, relief: 0.25,
+               iterations: 45, incision: 0.3, diffusion: 0.12 },
+  terraced:  { dome: 0.45, octaves: 6, freq: 3, ridge: 0.3, relief: 0.9,
+               iterations: 50, incision: 0.35, diffusion: 0.05, terraces: 7 },
+  dunes:     { dome: 0.3, octaves: 5, freq: 5, ridge: 0.9, relief: 0.5,
+               iterations: 20, incision: 0.1, diffusion: 0.02, stretch: 0.3 },
+  scree:     { dome: 0.35, octaves: 7, freq: 7, ridge: 0.7, relief: 1.0,
+               iterations: 70, incision: 0.9, diffusion: 0.01 },
 };
-
 /** The profiles by kind of country, three each, in the order the terrain
  *  window shows them. A list of twelve names asks the reader to know what
  *  "piedmont" means; four kinds of place with three variations each only
  *  asks which kind of place they want. */
 export const GROUPS = [
-  { name: 'lowlands', profiles: ['plains', 'rolling', 'hills'] },
-  { name: 'desert', profiles: ['desert', 'badlands', 'mesa'] },
-  { name: 'highlands', profiles: ['plateau', 'canyon', 'piedmont'] },
-  { name: 'mountains', profiles: ['foothills', 'ridges', 'alpine'] },
+  { name: 'lowlands', profiles: ['plains', 'steppe', 'rolling'] },
+  { name: 'hills', profiles: ['hills', 'terraced', 'foothills'] },
+  { name: 'desert', profiles: ['desert', 'dunes', 'badlands', 'buttes'] },
+  { name: 'highlands', profiles: ['mesa', 'plateau', 'canyon', 'gorge', 'piedmont'] },
+  { name: 'mountains', profiles: ['ridges', 'alpine', 'crags', 'scree'] },
 ];
 
 /** Fraction of each side simulated but not returned; see generate(). */
@@ -64,7 +78,7 @@ export const CROP_MARGIN = 0.15;
 const DEFAULTS = {
   octaves: 6, freq: 4, ridge: 0.5, relief: 1.0, iterations: 40,
   incision: 0.3, diffusion: 0.1, uplift: 0.0, terraces: 0, dome: 0.0,
-  tilt: 0.0,
+  tilt: 0.0, stretch: 1.0,
 };
 
 // ---------------------------------------------------------------- noise
@@ -85,14 +99,14 @@ const GY = [1, 1, -1, -1, 0, 0, 1, -1];
 
 /** One octave of gradient noise into `out` (added with weight `amp`, or
  *  folded into a ridge when `ridge` is set). */
-function octave(out, h, w, f, s, amp, ridge) {
+function octave(out, h, w, f, s, amp, ridge, stretch = 1.0) {
   for (let j = 0; j < h; j++) {
     const y = (j * f) / h;
     const y0 = Math.floor(y);
     const fy = y - y0;
     const uy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
     for (let i = 0; i < w; i++) {
-      const x = (i * f) / w;
+      const x = (i * (f * stretch)) / w;
       const x0 = Math.floor(x);
       const fx = x - x0;
       const ux = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
@@ -118,11 +132,11 @@ function octave(out, h, w, f, s, amp, ridge) {
   }
 }
 
-function fractal(n, octaves, freq, seed, ridge, gain = 0.5, lac = 2.0) {
+function fractal(n, octaves, freq, seed, ridge, stretch = 1.0, gain = 0.5, lac = 2.0) {
   const out = new Float64Array(n * n);
   let amp = 1.0, f = +freq, norm = 0.0;
   for (let k = 0; k < Math.max(1, octaves | 0); k++) {
-    octave(out, n, n, f, (seed | 0) * 1013 + (ridge ? 7919 : 0) + k, amp, ridge);
+    octave(out, n, n, f, (seed | 0) * 1013 + (ridge ? 7919 : 0) + k, amp, ridge, stretch);
     norm = norm + amp;
     amp = amp * gain;
     f = f * lac;
@@ -133,12 +147,12 @@ function fractal(n, octaves, freq, seed, ridge, gain = 0.5, lac = 2.0) {
 }
 
 /** Fractal (fBm) gradient noise, 0..1 in practice. */
-export const fbm = (n, octaves = 6, freq = 4, seed = 0) =>
-  fractal(n, octaves, freq, seed, false);
+export const fbm = (n, octaves = 6, freq = 4, seed = 0, stretch = 1.0) =>
+  fractal(n, octaves, freq, seed, false, stretch);
 
 /** Ridged fractal noise: creases where fbm has smooth maxima. */
-export const ridged = (n, octaves = 6, freq = 4, seed = 0) =>
-  fractal(n, octaves, freq, seed, true);
+export const ridged = (n, octaves = 6, freq = 4, seed = 0, stretch = 1.0) =>
+  fractal(n, octaves, freq, seed, true, stretch);
 
 function unitInPlace(a) {
   let lo = Infinity, hi = -Infinity;
@@ -177,9 +191,9 @@ export function terrace(z, steps, sharpness = 0.5) {
 
 /** The noise a profile starts from, 0..1, before erosion. */
 export function baseSurface(n, seed, p) {
-  let z = fbm(n, p.octaves, p.freq, seed);
+  let z = fbm(n, p.octaves, p.freq, seed, p.stretch);
   if (p.ridge > 0) {
-    const r = ridged(n, p.octaves, p.freq, seed);
+    const r = ridged(n, p.octaves, p.freq, seed, p.stretch);
     for (let i = 0; i < z.length; i++) z[i] = z[i] * (1.0 - p.ridge) + r[i] * p.ridge;
   }
   unitInPlace(z);

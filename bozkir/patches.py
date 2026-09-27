@@ -931,6 +931,44 @@ def salience(p, size, up_axis=2, grid=16, min_count=6):
     return top * min(1.0, max(0.0, (0.12 - share) / 0.08))
 
 
+def purity(p, own, others, up_axis=2, grid=12, min_count=4):
+    """Share of a patch's ground that looks like its own material.
+
+    The desert's scrub patches each held a pale opening of bare sand, and
+    once rotated copies made colours cheap, that opening became what
+    repeated - pointing four ways. A patch sorted into a class by its
+    average colour can still carry a large piece of the other class; this
+    says how much, so a class can prefer its purest patches.
+
+    Top-down cells of the patch, each assigned to whichever class mean
+    colour it is nearest. `own` is this class's mean RGB, `others` a list
+    of the other classes' means. Returns the share of occupied cells
+    nearest `own`, 0..1.
+    """
+    plane = [i for i in range(3) if i != up_axis]
+    xy = p.xyz[:, plane]
+    if len(xy) < 50:
+        return 0.0
+    lo = xy.min(axis=0)
+    span = max(float((xy.max(axis=0) - lo).max()), 1e-6)
+    ij = np.clip(((xy - lo) / span * grid).astype(int), 0, grid - 1)
+    cell = ij[:, 0] * grid + ij[:, 1]
+    w = np.asarray(p.opacity, dtype=np.float64)
+    rgb = p.base_rgb
+    count = np.bincount(cell, minlength=grid * grid)
+    wsum = np.bincount(cell, weights=w, minlength=grid * grid)
+    ok = (count >= min_count) & (wsum > 0)
+    if not ok.any():
+        return 0.0
+    mean = np.stack([np.bincount(cell, weights=w * rgb[:, c],
+                                 minlength=grid * grid)[ok] / wsum[ok]
+                     for c in range(3)], axis=1)
+    d_own = np.linalg.norm(mean - np.asarray(own), axis=1)
+    d_other = np.min([np.linalg.norm(mean - np.asarray(o), axis=1)
+                      for o in others], axis=0)
+    return float((d_own <= d_other).mean())
+
+
 def appearance(p):
     """A patch's colour signature: per-channel mean and spread.
 

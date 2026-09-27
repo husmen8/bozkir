@@ -41,3 +41,51 @@ def pack(s, sort=False):
     buf[:, 28:32] = np.clip(np.round(q * 128.0 + 128.0), 0, 255).astype(np.uint8)
 
     return buf.reshape(-1)
+
+def read_splat(splat_path, json_path):
+    """A packed tileset back as (manifest, Splats of every splat).
+
+    The inverse of `pack` for reading: .splat is 32 bytes a splat -
+    position and scale as floats, colour and opacity as bytes, rotation as
+    bytes centred on 128.
+    """
+    import json
+    from .ply import Splats, SH_C0
+    m = json.loads(open(json_path).read())
+    raw = np.fromfile(splat_path, dtype=np.uint8)
+    n = len(raw) // STRIDE
+    rec = raw[:n * STRIDE].reshape(n, STRIDE)
+    f = rec[:, :24].copy().view(np.float32).reshape(n, 6)
+    rgba = rec[:, 24:28].astype(np.float64) / 255
+    q = (rec[:, 28:32].astype(np.float64) - 128) / 128
+    q /= np.linalg.norm(q, axis=1, keepdims=True) + 1e-9
+    s = Splats(xyz=f[:, :3].astype(np.float64), opacity=rgba[:, 3],
+               scale=f[:, 3:6].astype(np.float64), rot=q,
+               sh_dc=(rgba[:, :3] - 0.5) / SH_C0,
+               sh_rest=np.zeros((n, 0, 3)), sh_degree=0)
+    return m, s
+
+
+def tile_atlas(m, s, res=64):
+    """Every tile rendered straight down, north up, packed into one image.
+
+    What far-away ground is drawn with: past the distance where a tile's
+    splats are smaller than a pixel, sorting and drawing thousands of them
+    buys nothing a texture cannot show, and a texture costs one lookup.
+    Returns (rgba uint8 image, layout dict). Alpha is coverage.
+    """
+    from .graphcut import render_patch
+    tiles = m["tiles"]
+    cols = int(np.ceil(np.sqrt(len(tiles))))
+    rows = int(np.ceil(len(tiles) / cols))
+    img = np.zeros((rows * res, cols * res, 4), dtype=np.uint8)
+    for k, t in enumerate(tiles):
+        a, c = t["levels"][0]
+        rgb, cov = render_patch(s.subset(np.arange(a, a + c)), m["size"],
+                                res, m.get("up_axis", 2))
+        r, q = divmod(k, cols)
+        cell = np.dstack([np.clip(rgb, 0, 1), np.clip(cov, 0, 1)])
+        img[r * res:(r + 1) * res, q * res:(q + 1) * res] = \
+            np.round(cell * 255).astype(np.uint8)
+    return img, {"res": res, "cols": cols, "rows": rows,
+                 "count": len(tiles), "size": m["size"]}
