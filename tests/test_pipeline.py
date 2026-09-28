@@ -2253,6 +2253,37 @@ def _():
         assert img[..., 3].mean() > 100, 'atlas tiles came out empty'
 
 
+SECTION = 'viewer guide'
+
+
+@test('docs/viewer-guide.md is what web/info.json says')
+def _():
+    # The info drawer and the guide are one text; edit the JSON, then
+    # run scripts/viewer_guide.py.
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / 'scripts'))
+    import viewer_guide
+    topics = json.loads((root / 'web/info.json').read_text(encoding='utf-8'))
+    want = viewer_guide.render(topics)
+    have = (root / 'docs/viewer-guide.md').read_text(encoding='utf-8')
+    ok(have.replace('\r\n', '\n') == want,
+       'docs/viewer-guide.md is stale: run python scripts/viewer_guide.py')
+
+
+@test('every info topic the page points at exists, and every link resolves')
+def _():
+    import re
+    root = Path(__file__).resolve().parents[1]
+    topics = json.loads((root / 'web/info.json').read_text(encoding='utf-8'))
+    html = (root / 'web/index.html').read_text(encoding='utf-8')
+    for name in re.findall(r'data-info="([^"]+)"', html):
+        ok(name in topics, f'index.html asks for info topic {name!r}, which info.json lacks')
+    for k, t in topics.items():
+        ok(t.get('title') and t.get('short'), f'topic {k!r} needs a title and a short line')
+        for r in t.get('related', []):
+            ok(r in topics, f'topic {k!r} relates to missing {r!r}')
+
+
 # ====================================================================== run
 
 if __name__ == '__main__':
