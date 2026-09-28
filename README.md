@@ -40,6 +40,15 @@ needs no data at all: a two-material tileset generated in the browser, on
 generated ground. Everything below - making a tileset from your own capture,
 generating terrain, validating the rule - uses the same install.
 
+**In the viewer.** *Explore* shows the scene, world, materials, camera and
+look; *Research* (the tab, or M) adds the renderer's switches, ordering,
+measurement, debug views and live numbers. **story** walks through capture,
+tiles, world and rule on the live renderer. The ⓘ on a section, or I over
+any control, opens a short note with sources and measured numbers - the
+same text as [docs/viewer-guide.md](docs/viewer-guide.md). **walk on it** puts
+you on the ground in first person (the terrain is the collider). **share**
+copies a link that reopens the exact view, or the settings as text.
+
 ---
 
 ## The contribution: material coverage computed from terrain
@@ -500,7 +509,10 @@ scripts/   thin CLI wrappers; none imports another. make_tileset (one
 web/       viewer, sort-worker, grid, order, merge, tileset, capture,
            heightfield (+ openness, detail mask, generated-terrain cache),
            landform + rule.json, terrain + terrain-worker (the generator),
-           starter (the no-data scene), benchmark, views.json (presets)
+           starter (the no-data scene), benchmark, views.json (presets
+           and story steps), ui (intro, modes, info drawer, scene card,
+           share links), info.json (the info texts; docs/viewer-guide.md
+           is generated from it), tilesets.json (material names), img/
 tests/     run_all.py runs the three suites: test_all.py (package),
            test_pipeline.py (pipeline, including both scripts end to end),
            test_web.mjs (browser modules); bridge.mjs runs the shared

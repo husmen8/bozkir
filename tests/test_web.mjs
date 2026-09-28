@@ -1266,7 +1266,8 @@ test('every preset names real controls, with values they accept', () => {
   for (const [name, p] of Object.entries(presets)) {
     if (name.startsWith('_')) continue;
     for (const [k, v] of Object.entries(p)) {
-      if (k === 'label' || k === 'short') continue;
+      // Keys about the preset itself (viewer.js PRESET_META), not controls.
+      if (['label', 'short', 'research', 'chapter', 'caption', 'camera'].includes(k)) continue;
       if (k === 'view') {
         ok(html.includes(`id="${v}"`), `${name}: no camera button '${v}'`);
         continue;

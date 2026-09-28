@@ -1,0 +1,12 @@
+{
+  "_about": "What the viewer says about each public tileset: material names in the tileset's class order (the exporter's order, which is arbitrary), the unit its sizes are in, and one line for the scene card. A manifest's own 'names' wins over these.",
+  "desert": {
+    "names": ["sand", "scrub"],
+    "units": "m",
+    "note": "one drone capture; the scrub comes from about 4 × 5 m of it"
+  },
+  "starter": {
+    "units": "m",
+    "note": "synthetic tiles made in the browser, no capture"
+  }
+}

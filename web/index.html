@@ -4,23 +4,32 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>bozkır</title>
+    <title>bozkır · captured ground, placed by terrain</title>
+    <link rel="icon" href="icon.png" type="image/png">
+    <meta name="description" content="Kilometres of terrain from a few square metres of captured Gaussian-splat ground, with materials placed by the shape of the land. Runs in the browser.">
     <style>
-        /* Panel styled after Blender's: dense, one control per row, prose in
-           tooltips. With sixty controls, paragraphs pushed the useful ones
-           off screen. */
+        /* One spacing unit (4px), one row height, one radius. Explore and
+           Research share the layout; Research only reveals rows (.adv). */
         :root {
             --bg: #0b0d0e;
-            --panel: #1d2021;
-            --sunken: #131617;
-            --line: #333a3d;
-            --text: #d6d2c8;
-            --dim: #7d8488;
-            --accent: #c9a227;
-            /* Row height follows text size, or slider labels clip. */
-            --fs: 11px;
-            --row: calc(var(--fs) + 8px);
-            --panel-w: 232px;
+            --panel: #16191a;
+            --raised: #1f2325;
+            --sunken: #0f1112;
+            --line: #272d30;
+            --edge: #363e42;
+            --text: #e4e0d6;
+            --dim: #9ba2a5;
+            --faint: #6b7376;
+            --accent: #d4a93a;
+            --accent-bg: #2c2512;
+            --ui: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+            --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+            --fs: 12px;
+            --row: calc(var(--fs) + 14px);
+            --gap: 4px;
+            --pad: 12px;
+            --r: 4px;
+            --panel-w: 272px;
         }
 
         * { box-sizing: border-box; }
@@ -28,41 +37,194 @@
         html, body {
             margin: 0; height: 100%; overflow: hidden;
             background: var(--bg); color: var(--text);
-            font: var(--fs)/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            font: var(--fs)/1.45 var(--ui);
             -webkit-font-smoothing: antialiased;
         }
+        b, strong { font-weight: 600; }
 
         #app { display: flex; height: 100%; }
         #stage { position: relative; flex: 1; min-width: 0; }
-        #gl { display: block; width: 100%; height: 100%; }
+        #gl { display: block; width: 100%; height: 100%; touch-action: none; }
 
         #gizmo {
             position: absolute; right: 12px; top: 12px;
-            width: 92px; height: 92px; pointer-events: none; opacity: .85;
+            width: 84px; height: 84px; pointer-events: none; opacity: .8;
         }
+        #gizmo text { font: 600 9px var(--mono); }
+
+        /* ------------------------------------------- the intro / loading card */
 
         #overlay {
-            position: absolute; inset: 0; display: flex;
-            align-items: center; justify-content: center;
-            background: rgba(11, 13, 14, .82); z-index: 20;
+            position: absolute; inset: 0; display: flex; padding: 24px;
+            background: rgba(11, 13, 14, .96); z-index: 60; overflow-y: auto;
         }
         #overlay.hidden { display: none; }
-        .msg { text-align: center; color: var(--dim); line-height: 1.7; }
-        .msg b { display: block; color: var(--text); font-size: 15px;
-                 letter-spacing: .12em; margin-bottom: 6px; }
-        #bar { width: 180px; height: 2px; background: var(--line);
-               margin: 12px auto 0; }
-        #bar i { display: block; height: 100%; width: 0;
+        /* margin:auto rather than centring the flex box, which clips the top
+           when the card is taller than the screen. */
+        .intro { width: min(860px, 100%); margin: auto; color: var(--dim); font-size: 13px; line-height: 1.6; }
+        .intro h1 {
+            margin: 0; font: 600 28px var(--mono); letter-spacing: .16em;
+            background: linear-gradient(100deg, #e0b552, #c96f6f 55%, #7fa8c4);
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+            display: inline-block;
+        }
+        .intro .tag { color: var(--text); font-size: 14px; margin: 2px 0 16px; }
+        .intro .claim { max-width: 66ch; margin: 0 0 20px; }
+        .intro .claim b { color: var(--text); }
+        .strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 0 0 18px; }
+        .strip figure { margin: 0; }
+        .strip .ph {
+            aspect-ratio: 4 / 3; border: 1px solid var(--line); border-radius: var(--r);
+            background: var(--sunken) center / cover no-repeat; margin-bottom: 8px;
+        }
+        .strip figcaption { font-size: 12px; line-height: 1.45; }
+        .strip figcaption b { color: var(--text); display: block; margin-bottom: 1px; }
+        /* Until the four pictures exist the strip is text only, numbered. */
+        .strip.noimg .ph { display: none; }
+        .strip figcaption { padding-left: 28px; position: relative; }
+        .strip figcaption::before {
+            content: attr(data-n); position: absolute; left: 0; top: 0;
+            width: 20px; height: 20px; display: grid; place-items: center; line-height: 1;
+            border-radius: 50%; background: var(--accent); color: #1a1605;
+            font: 700 11px var(--mono);
+        }
+        .intro .foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+        .intro .foot a { color: var(--accent); }
+        #bar { flex: 1; min-width: 160px; height: 2px; background: var(--edge); border-radius: 1px; }
+        #bar i { display: block; height: 100%; width: 0; border-radius: 1px;
                  background: var(--accent); transition: width .2s; }
+        #loadnote { font-size: 12px; min-width: 18ch; }
+        #introgo { width: auto; padding: 0 22px; height: 32px; display: none; }
+        #overlay.ready #introgo { display: inline-block; }
+        #overlay.ready #bar, #overlay.ready #loadnote { display: none; }
+        .intro .small { font-size: 12px; }
+        .intro .phone { display: none; color: #d9a441; }
+        #loadwarn { color: #d9a441; margin: 0 0 14px; }
+        #loadwarn:empty { display: none; }
+
+        /* ------------------------------------------ things over the canvas */
+
+        .glass {
+            background: rgba(12, 14, 15, .74); border: 1px solid rgba(255, 255, 255, .09);
+            border-radius: var(--r); backdrop-filter: blur(6px);
+        }
+        #hud {
+            position: absolute; left: 12px; top: 12px; z-index: 10;
+            display: none; padding: 8px 10px; min-width: 220px;
+            font: 11px/1.6 var(--mono); pointer-events: none;
+        }
+        body.expert #hud { display: block; }
+        #hud div { display: flex; justify-content: space-between; gap: 14px; }
+        #hud span:first-child { color: var(--dim); }
+        #hud span:last-child { text-align: right; max-width: 170px; }
+
+        #card {
+            position: absolute; left: 12px; bottom: 12px; z-index: 10;
+            padding: 10px 12px; width: 250px; font-size: 12px; line-height: 1.5;
+        }
+        #card:empty { display: none; }
+        #card .t { color: var(--text); font-weight: 600; margin-bottom: 6px; padding-right: 16px; }
+        #card .m { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+        #card .m + .m { margin-top: 2px; }
+        #card .m i { width: 10px; height: 10px; border-radius: 2px; flex: none;
+                     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .2); }
+        #card .m b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+        #card .m .role { margin-left: auto; color: var(--faint); font-size: 11px; }
+        #card .d { color: var(--dim); margin-top: 6px; font-size: 11px; }
+        #card .d.warn { color: #d9a441; }
+        #card .scale { margin-top: 8px; display: flex; align-items: center; gap: 8px;
+                       color: var(--dim); font: 11px var(--mono); }
+        #card .scale i { display: block; height: 6px; border: 1px solid var(--text); border-top: 0; }
+        #card .hide {
+            position: absolute; top: 6px; right: 6px; width: 20px; height: 20px;
+            padding: 0; border: 0; background: none; color: var(--faint); font-size: 14px;
+        }
+        #card .hide:hover { color: var(--text); background: none; }
+        body.figure #card, body.figure #hud, body.figure #caption { display: none; }
+        body.story #card { display: none; }
+
+        #caption {
+            position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+            z-index: 11; width: min(560px, calc(100% - 24px)); padding: 12px 14px;
+            font-size: 13px; line-height: 1.55; display: none;
+            border-color: rgba(212, 169, 58, .35);
+        }
+        #caption.on { display: block; }
+        #caption b { color: var(--accent); }
+        #caption .nav { display: flex; gap: var(--gap); margin-top: 10px; justify-content: flex-end; }
+        #caption .nav button { width: auto; padding: 0 12px; }
+
+        #busy {
+            position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+            z-index: 40; display: none; padding: 6px 12px; font-size: 12px; white-space: nowrap;
+        }
+        #hint {
+            position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+            z-index: 9; padding: 6px 12px; font-size: 12px; color: var(--dim);
+            transition: opacity 1.2s; pointer-events: none; white-space: nowrap;
+        }
+        #hint.gone { opacity: 0; }
+
+        /* ------------------------------------------------ the info drawer */
+
+        #info {
+            position: absolute; top: 0; right: 0; bottom: 0; z-index: 50;
+            width: min(380px, 92%); background: var(--panel);
+            border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0, 0, 0, .45);
+            display: none; flex-direction: column;
+        }
+        #info.open { display: flex; }
+        #info .ih {
+            display: flex; align-items: center; gap: var(--gap);
+            padding: 10px var(--pad); border-bottom: 1px solid var(--line);
+        }
+        #info .ih button { width: auto; padding: 0 10px; }
+        #info .ih .x { margin-left: auto; width: var(--row); padding: 0; }
+        #infobody { overflow-y: auto; padding: 16px 18px 24px; font-size: 13px; line-height: 1.6; }
+        #infobody h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--text); }
+        #infobody .lead { color: var(--text); margin: 0 0 12px; }
+        #infobody p { color: #c2beb4; margin: 0 0 12px; }
+        #infobody img { width: 100%; border-radius: var(--r); border: 1px solid var(--line); margin: 2px 0 12px; }
+        #infobody .src { font-size: 12px; color: var(--dim); border-top: 1px solid var(--line);
+                         padding-top: 10px; margin-top: 4px; }
+        #infobody .src div + div { margin-top: 4px; }
+        #infobody .see { margin-top: 16px; font-size: 11px; color: var(--faint);
+                         text-transform: uppercase; letter-spacing: .08em; }
+        #infobody .links { display: flex; flex-wrap: wrap; gap: var(--gap); margin-top: 6px; }
+        #infobody .links button { width: auto; padding: 0 10px; }
+        #infobody .grp { margin: 14px 0 6px; font-size: 11px; color: var(--faint);
+                         text-transform: uppercase; letter-spacing: .08em; }
+        #infobody .grp:first-child { margin-top: 0; }
+        #infobody .idx button {
+            display: block; width: 100%; height: 28px; text-align: left; padding: 0 8px;
+            background: none; border: 0; border-radius: var(--r); color: #c2beb4;
+        }
+        #infobody .idx button:hover { background: var(--raised); color: var(--text); }
+        #infobody code, #infobody .src code { font: 12px var(--mono); color: var(--accent); }
+
+        /* ------------------------------------------------ the floating tip */
+
+        #tip {
+            position: fixed; z-index: 80; max-width: 260px; padding: 8px 10px;
+            background: #0d0f10; color: var(--text); border: 1px solid var(--edge);
+            border-radius: var(--r); font-size: 12px; line-height: 1.45;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, .55); pointer-events: none;
+            opacity: 0; transition: opacity .12s; white-space: pre-line;
+        }
+        #tip.on { opacity: 1; }
+        #tip .more { display: block; margin-top: 5px; color: var(--faint); font-size: 11px; }
+        #tip kbd { font: 10px var(--mono); padding: 0 4px; border: 1px solid var(--edge);
+                   border-radius: 3px; color: var(--dim); }
 
         /* ---------------------------------------------------- the panel */
 
         #panel {
             width: var(--panel-w); flex: none; background: var(--panel);
             border-left: 1px solid var(--line);
-            overflow-y: auto; overscroll-behavior: contain;
-            padding: 0 0 24px;
+            overflow-y: auto; overscroll-behavior: contain; padding-bottom: 32px;
         }
+        #panel::-webkit-scrollbar { width: 8px; }
+        #panel::-webkit-scrollbar-thumb { background: #2c3336; border-radius: 4px; }
 
         /* Drag handle on the panel's left edge, over the canvas so it takes
            no layout space. */
@@ -74,267 +236,263 @@
             content: ""; position: absolute; inset: 0 3px;
             background: transparent; transition: background .12s;
         }
-        #grip:hover::after, body.sizing #grip::after {
-            background: var(--accent);
-        }
+        #grip:hover::after, body.sizing #grip::after { background: var(--accent); }
         body.sizing { cursor: ew-resize; user-select: none; }
         body.sizing #gl { pointer-events: none; }
-        #panel::-webkit-scrollbar { width: 8px; }
-        #panel::-webkit-scrollbar-thumb { background: #30373a; }
 
         .head {
-            padding: 9px 9px 8px; border-bottom: 1px solid var(--line);
-            display: flex; align-items: baseline; gap: 7px;
+            padding: 12px var(--pad); border-bottom: 1px solid var(--line);
             position: sticky; top: 0; background: var(--panel); z-index: 5;
         }
-        .head b {
-            font-size: 13px; letter-spacing: .16em;
+        .head .top { display: flex; align-items: center; gap: 8px; }
+        .head .brand {
+            font: 600 15px var(--mono); letter-spacing: .16em;
             /* Sunrise over flat ground, which is what the word means. */
             background: linear-gradient(100deg, #e0b552, #c96f6f 55%, #7fa8c4);
-            -webkit-background-clip: text; background-clip: text;
-            color: transparent;
+            -webkit-background-clip: text; background-clip: text; color: transparent;
         }
-        .head span { color: var(--dim); font-size: 9px; letter-spacing: .08em; }
-        .head .sz { margin-left: auto; display: flex; gap: 2px; }
-        .head .sz button {
-            width: 17px; height: 15px; padding: 0; margin: 0; font-size: 11px;
-            line-height: 1; color: var(--dim);
+        .head .tools { margin-left: auto; display: flex; gap: 2px; }
+        .head .tools button {
+            width: 22px; height: 22px; padding: 0; font-size: 12px; color: var(--dim);
+            background: none; border-color: transparent;
         }
-        .head .sz button:hover { color: var(--text); }
+        .head .tools button:hover { color: var(--text); background: var(--raised); border-color: var(--edge); }
+        .head .tagline { color: var(--dim); font-size: 11.5px; margin: 1px 0 10px; }
 
-        /* Each section has its own colour in --c, so collapsed headers can be
-           told apart at a glance. */
-        details {
-            border-bottom: 1px solid var(--line);
-            --c: var(--dim);
-        }
-        /* Measurement controls, hidden until 'show everything'. */
-        /* The terrain window: profiles are chosen by looking at previews. */
-        /* The scene section as three steps: tiles, terrain, view. */
-        .step { display: flex; align-items: baseline; gap: 6px; margin: 9px 0 3px; }
-        .step:first-child { margin-top: 2px; }
-        .step-n { width: 15px; height: 15px; line-height: 15px; text-align: center;
-                  border-radius: 50%; background: #c9a227; color: #17191a;
-                  font-size: 9px; font-weight: bold; flex: none; }
-        .step-t { color: var(--text); letter-spacing: .06em; }
-        .step-h { color: var(--dim); font-size: 9px; }
-        button.big { height: calc(var(--row) + 6px); font-size: 11px;
-                     border-color: #6b5a2a; }
-        .chips { display: flex; flex-wrap: wrap; gap: 3px; margin: 2px 0 6px; }
-        .chips button { width: auto; flex: 1 1 auto; padding: 0 7px; }
-        .chips button.on { border-color: #c9a227; color: #fff; }
-        .tw-cards { display: grid; grid-template-columns: 1fr; gap: 10px; }
-        .tw-group-head { color: var(--dim); font-size: 10px; letter-spacing: .12em;
-                         text-transform: uppercase; margin: 0 0 5px 2px; }
-        .tw-group-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
-        #terrainwin {
-            width: min(720px, 92vw); padding: 0; border: 1px solid var(--line);
-            border-radius: 4px; background: var(--panel); color: var(--text);
-            font-size: 11px;
-        }
-        #terrainwin::backdrop { background: rgba(8, 10, 11, .55); }
-        .tw-head {
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 8px 12px; border-bottom: 1px solid var(--line);
-            letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
-        }
-        .tw-head button { width: auto; padding: 0 8px; }
-        .tw-cards { padding: 12px; }
-        .tw-card {
-            display: flex; flex-direction: column; align-items: center; gap: 4px;
-            padding: 5px; border: 1px solid var(--line); border-radius: 3px;
-            background: var(--sunken); cursor: pointer; color: var(--dim);
-        }
-        .tw-card:hover { border-color: #6b6150; color: var(--text); }
-        .tw-card.on { border-color: #c9a227; color: #fff; }
-        .tw-card canvas { width: 100%; aspect-ratio: 1; image-rendering: auto;
-                          border-radius: 2px; background: #1b1e1f; }
-        .tw-row {
-            display: flex; align-items: center; gap: 5px; padding: 0 12px 8px;
-        }
-        .tw-row > * { width: auto; margin: 0; }
-        .tw-row label { color: var(--dim); }
-        .tw-row #genseed {
-            width: 6em; height: var(--row); padding: 0 5px; font: inherit;
-            font-size: 11px; color: var(--text); background: var(--sunken);
-            border: 1px solid var(--line); border-radius: 2px;
-        }
-        .tw-row #gensize { width: 5em; }
-        .tw-row .go { margin-left: auto; padding: 0 16px; }
-        .tw-note { padding: 0 12px 8px; color: var(--dim); font-size: 10px; }
-        .tw-recent-head { padding: 6px 12px 4px; color: var(--dim);
-                          border-top: 1px solid var(--line); font-size: 10px;
-                          letter-spacing: .1em; text-transform: uppercase; }
-        .tw-recent { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 12px; }
-        .tw-recent button { width: auto; padding: 0 8px; }
-        #busy {
-            position: absolute; left: 12px; bottom: 12px; z-index: 40;
-            display: none; padding: 6px 10px; border-radius: 3px;
-            background: rgba(11, 13, 14, .78); color: #e8e2d4;
-            border: 1px solid rgba(255, 255, 255, .15); font-size: 11px;
-        }
-        .adv { display: none; }
-        /* Exit button for figure mode: HTML over the canvas, so saved PNGs
-           never contain it. Fades, and returns under the pointer. */
-        #figexit {
-            position: absolute; top: 12px; right: 12px; z-index: 40;
-            display: none; padding: 6px 10px; border-radius: 3px;
-            background: rgba(11, 13, 14, .72); color: #e8e2d4;
-            border: 1px solid rgba(255, 255, 255, .15);
-            font-family: inherit; font-size: 11px; line-height: 1.3;
-            letter-spacing: .04em; cursor: pointer;
-            transition: opacity .6s;
-        }
-        body.figure #figexit { display: block; }
-        body.figure #figexit.faded { opacity: .18; }
-        body.figure #figexit:hover { opacity: 1; }
-        body.figure #panel, body.figure #grip, body.figure #gizmo { display: none; }
-        body.expert .adv { display: block; }
-        #expertrow {
-            display: flex; align-items: center; gap: 6px;
-            padding: 6px 9px; border-bottom: 1px solid var(--line);
-            color: var(--dim); font-size: 10px; letter-spacing: .08em;
-        }
-        #expertrow input { margin: 0; }
+        /* Segmented controls: modes, story, views, presets. */
+        .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
+        .seg.two { grid-auto-flow: row; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+        .seg:not(.two) > button { border-radius: 0; margin-left: -1px; }
+        .seg:not(.two) > button:first-child { border-radius: var(--r) 0 0 var(--r); margin-left: 0; }
+        .seg:not(.two) > button:last-child { border-radius: 0 var(--r) var(--r) 0; }
+        .seg > button { position: relative; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+        .seg > button:hover, .seg > button.on { z-index: 1; }
+        #expert { display: none; }
+
+        .story { padding: 10px var(--pad) 12px; border-bottom: 1px solid var(--line); }
+        .lbl { color: var(--faint); font-size: 10.5px; letter-spacing: .08em;
+               text-transform: uppercase; margin-bottom: 6px; }
+
+        /* Sections */
+        details { border-bottom: 1px solid var(--line); --c: var(--dim); }
         summary {
-            height: 23px; line-height: 23px; padding: 0 9px;
-            color: var(--dim); font-size: 10px; letter-spacing: .1em;
-            text-transform: uppercase; cursor: pointer;
-            list-style: none; user-select: none;
-            display: flex; align-items: center; gap: 6px;
-            border-left: 2px solid transparent;
+            height: 34px; padding: 0 var(--pad); cursor: pointer; list-style: none; user-select: none;
+            display: flex; align-items: center; gap: 8px;
+            color: var(--dim); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
         }
         summary::-webkit-details-marker { display: none; }
         summary::before {
-            content: "\25B8"; font-size: 8px; color: var(--c);
-            transition: transform .12s;
+            content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--c);
+            opacity: .55; flex: none;
         }
-        details[open] > summary {
-            color: var(--text); border-left-color: var(--c);
+        summary::after {
+            content: ""; width: 6px; height: 6px; margin-left: auto; flex: none;
+            border-right: 1.5px solid var(--faint); border-bottom: 1.5px solid var(--faint);
+            transform: rotate(-45deg); transition: transform .12s;
         }
-        details[open] > summary::before { transform: rotate(90deg); }
-        summary:hover {
-            color: var(--text);
-            background: linear-gradient(to right,
-                color-mix(in srgb, var(--c) 14%, transparent), transparent 70%);
+        details[open] > summary { color: var(--text); }
+        details[open] > summary::before { opacity: 1; }
+        details[open] > summary::after { transform: rotate(45deg); }
+        summary:hover { color: var(--text); background: rgba(255, 255, 255, .02); }
+        .body { padding: 0 var(--pad) 14px; display: flex; flex-direction: column; gap: var(--gap); }
+        .body > .gap { height: 4px; }
+        .sub {
+            color: var(--faint); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+            margin-top: 8px;
         }
-        .body {
-            padding: 5px 9px 10px;
-            border-left: 2px solid color-mix(in srgb, var(--c) 22%, transparent);
+        .divider {
+            display: none; padding: 16px var(--pad) 6px; color: var(--faint); font-size: 10.5px;
+            letter-spacing: .12em; text-transform: uppercase; border-bottom: 1px solid var(--line);
         }
-        .body > * + * { margin-top: 3px; }
-        .body > .r + .s, .body > .s + .s { margin-top: 2px; }
+        body.expert .divider { display: block; }
 
-        /* A row: label left, value right, one line. */
-        .r {
-            display: flex; align-items: center; justify-content: space-between;
-            height: var(--row); gap: 6px;
+        /* Research-only rows; !important because rows set their own display. */
+        body:not(.expert) .adv { display: none !important; }
+
+        /* The scene section's three steps. */
+        .step { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+        .step:first-child { margin-top: 0; }
+        .step-n {
+            width: 18px; height: 18px; display: grid; place-items: center; line-height: 1; flex: none;
+            border-radius: 50%; background: var(--accent); color: #1a1605; font: 700 10px var(--mono);
         }
+        .step-t { color: var(--text); font-weight: 600; }
+        .step-h { color: var(--faint); font-size: 11px; margin-left: auto; }
+
+        /* A read-only row: label left, value right. */
+        .r { display: flex; align-items: center; justify-content: space-between; height: 20px; gap: 8px; }
         .r > span:first-child { color: var(--dim); white-space: nowrap; }
-        .r > .v { color: var(--text); text-align: right;
-                  overflow: hidden; text-overflow: ellipsis; }
-        .r.wrap { height: auto; min-height: var(--row); }
-        .r.wrap .v { white-space: normal; text-align: right; }
+        .r > .v { color: var(--text); text-align: right; overflow: hidden; text-overflow: ellipsis;
+                  font: 11px var(--mono); }
 
-        /* Slider with label and value written on it (Blender style), one row
-           per control. The filled part comes from JS via --f. */
-        .s { position: relative; height: var(--row); margin: 1px 0; }
+        /* Slider with its label and value written on it (Blender style). The
+           filled part comes from JS via --f. */
+        .s { position: relative; height: var(--row); }
         .s input[type=range] {
-            position: absolute; inset: 0; width: 100%; height: 100%;
-            margin: 0; -webkit-appearance: none; appearance: none;
+            position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+            -webkit-appearance: none; appearance: none; cursor: ew-resize;
             background: linear-gradient(to right,
-                color-mix(in srgb, var(--c) 34%, var(--sunken))
-                    0 calc(var(--f, 0) * 1%),
+                color-mix(in srgb, var(--c) 30%, var(--sunken)) 0 calc(var(--f, 0) * 1%),
                 var(--sunken) calc(var(--f, 0) * 1%) 100%);
-            border: 1px solid var(--line); border-radius: 2px; cursor: ew-resize;
+            border: 1px solid var(--edge); border-radius: var(--r);
         }
-        .s input[type=range]:hover { border-color: #48504f; }
+        .s input[type=range]:hover { border-color: #4a5357; }
+        /* No thumb: the filled part is the value, and a line crossed the label. */
         .s input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none; width: 2px; height: 100%;
-            background: var(--c); cursor: ew-resize;
+            -webkit-appearance: none; width: 1px; height: calc(var(--row) - 2px); background: transparent;
         }
         .s input[type=range]::-moz-range-thumb {
-            width: 2px; height: 100%; border: 0; border-radius: 0;
-            background: var(--c);
+            width: 1px; height: calc(var(--row) - 2px); border: 0; background: transparent;
         }
-        .s input[type=range]:disabled { opacity: .4; cursor: default; }
+        .s input[type=range]:focus-visible { outline: 1px solid var(--c); outline-offset: 1px; }
+        .s input[type=range]:disabled { opacity: .45; cursor: default; }
         .s label {
             position: absolute; inset: 0; display: flex; align-items: center;
-            justify-content: space-between; padding: 0 5px;
-            pointer-events: none; font-size: 10px; color: var(--dim);
+            justify-content: space-between; gap: 8px; padding: 0 9px;
+            pointer-events: none; color: var(--dim);
         }
-        .s label b { color: var(--text); font-weight: 400; }
+        .s label b { color: var(--text); font: 400 11.5px var(--mono); }
 
         button {
-            height: var(--row); width: 100%; padding: 0 6px; margin: 1px 0;
-            font: inherit; font-size: 10px; color: var(--text);
-            background: #2a2f31; border: 1px solid var(--line);
-            border-radius: 2px; cursor: pointer;
+            height: var(--row); width: 100%; padding: 0 8px; margin: 0;
+            font: inherit; color: var(--text); background: var(--raised);
+            border: 1px solid var(--edge); border-radius: var(--r); cursor: pointer;
         }
-        button:hover {
-            background: color-mix(in srgb, var(--c) 16%, #2a2f31);
-            border-color: color-mix(in srgb, var(--c) 45%, var(--line));
-            color: #fff;
-        }
-        button:active { background: #23272a; }
-        .cols { display: flex; gap: 2px; }
+        button:hover { background: #283032; border-color: #4a5357; }
+        button:active { background: #1a1e20; }
+        button:disabled { opacity: .45; cursor: default; }
+        button.on { background: var(--accent-bg); border-color: #7a6320; color: #f3e6bf; }
+        button.primary { border-color: #6d5a22; color: #f0dca4; }
+        button.primary:hover { background: var(--accent-bg); }
+        .cols { display: flex; gap: var(--gap); }
 
+        /* Checkbox rows with a drawn box, the same size everywhere. */
         label.c {
-            display: flex; align-items: center; gap: 5px;
-            height: var(--row); color: var(--dim); cursor: pointer;
+            display: flex; align-items: center; gap: 9px; height: 24px;
+            color: var(--dim); cursor: pointer;
         }
         label.c:hover { color: var(--text); }
-        label.c input { accent-color: var(--c); margin: 0; width: 11px;
-                        height: 11px; }
+        input[type=checkbox] {
+            -webkit-appearance: none; appearance: none; margin: 0; flex: none;
+            width: 14px; height: 14px; border: 1px solid var(--edge); border-radius: 3px;
+            background: var(--sunken); display: grid; place-content: center; cursor: pointer;
+        }
+        input[type=checkbox]::after {
+            content: ""; width: 7px; height: 4px; margin-top: -2px;
+            border-left: 1.5px solid #1a1605; border-bottom: 1.5px solid #1a1605;
+            transform: rotate(-45deg); opacity: 0;
+        }
+        input[type=checkbox]:checked { background: var(--c, var(--accent)); border-color: var(--c, var(--accent)); }
+        input[type=checkbox]:checked::after { opacity: 1; }
+        label.c:hover input[type=checkbox] { border-color: #4a5357; }
 
         select {
-            height: var(--row); width: 100%; padding: 0 4px; font: inherit;
-            font-size: 10px; color: var(--text); background: var(--sunken);
-            border: 1px solid var(--line); border-radius: 2px; cursor: pointer;
+            height: var(--row); width: 100%; padding: 0 26px 0 9px; font: inherit;
+            color: var(--text); background: var(--sunken); border: 1px solid var(--edge);
+            border-radius: var(--r); cursor: pointer; -webkit-appearance: none; appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239ba2a5' stroke-width='1.5'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 9px center;
         }
-        input[type=file] { font-size: 9px; width: 100%; color: var(--dim); }
-        input[type=file]::file-selector-button {
-            font: inherit; font-size: 10px; color: var(--text);
-            background: #2a2f31; border: 1px solid var(--line);
-            border-radius: 2px; padding: 1px 6px; margin-right: 5px;
-            cursor: pointer;
-        }
+        select:hover { border-color: #4a5357; }
+        select option { background: var(--panel); }
 
         .out {
-            background: var(--sunken);
-            border: 1px solid var(--line);
-            border-left: 2px solid color-mix(in srgb, var(--c) 55%, transparent);
-            border-radius: 2px; padding: 4px 6px;
-            color: var(--dim); font-size: 10px; min-height: var(--row);
-            word-break: break-word; line-height: 1.5;
+            background: var(--sunken); border: 1px solid var(--line); border-radius: var(--r);
+            padding: 6px 9px; color: var(--dim); font-size: 11.5px; line-height: 1.5;
+            word-break: break-word; white-space: pre-line;
         }
+        .out:empty { display: none; }
+        .note { color: var(--faint); font-size: 11px; line-height: 1.45; }
 
-        kbd { color: var(--text); }
-        code { color: var(--accent); }
+        code { font-family: var(--mono); color: var(--accent); }
 
-        /* Tooltips (data-tip), shown to the left of the panel. */
-        [data-tip] { position: relative; }
-        [data-tip]::after {
-            content: attr(data-tip);
-            position: absolute; right: calc(100% + 10px); top: -2px;
-            width: 240px; padding: 7px 9px;
-            background: #0e1011; color: var(--text);
-            border: 1px solid var(--line);
-            border-left: 2px solid var(--c); border-radius: 3px;
-            font-size: 10px; line-height: 1.45; text-transform: none;
-            letter-spacing: 0; text-align: left; white-space: pre-wrap;
-            opacity: 0; visibility: hidden; transition: opacity .1s .35s;
-            z-index: 40; pointer-events: none;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, .6);
+        /* The info mark on section headers, in the section's own colour. */
+        summary .i {
+            width: 16px; height: 16px; flex: none; margin-left: auto;
+            display: inline-grid; place-items: center;
+            border-radius: 50%; border: 1px solid var(--c);
+            background: color-mix(in srgb, var(--c) 18%, transparent);
+            color: var(--c);
+            font: 700 10px/1 var(--mono); font-style: normal;
+            text-transform: none; letter-spacing: 0;
+            opacity: .75; transition: opacity .12s, background .12s; cursor: help;
         }
-        [data-tip]:hover::after { opacity: 1; visibility: visible; }
+        summary:has(.i)::after { margin-left: 0; }
+        details[open] > summary .i { opacity: .9; }
+        summary .i:hover { opacity: 1; background: color-mix(in srgb, var(--c) 35%, transparent); }
 
-        #drophint { position: fixed; inset: 0; display: none; z-index: 50;
+        /* The terrain window */
+        #terrainwin {
+            width: min(720px, 92vw); padding: 0; border: 1px solid var(--edge);
+            border-radius: 6px; background: var(--panel); color: var(--text);
+        }
+        #terrainwin::backdrop { background: rgba(8, 10, 11, .6); }
+        .tw-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; border-bottom: 1px solid var(--line);
+            font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+        }
+        .tw-head button { width: var(--row); padding: 0; }
+        .tw-cards { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 14px; }
+        .tw-group-head { color: var(--faint); font-size: 10.5px; letter-spacing: .08em;
+                         text-transform: uppercase; margin: 0 0 6px 2px; }
+        .tw-group-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+        .tw-card {
+            display: flex; flex-direction: column; align-items: center; gap: 5px;
+            padding: 5px 5px 6px; border: 1px solid var(--line); border-radius: var(--r);
+            background: var(--sunken); cursor: pointer; color: var(--dim); font-size: 11.5px;
+        }
+        .tw-card:hover { border-color: #4a5357; color: var(--text); }
+        .tw-card.on { border-color: var(--accent); color: #fff; }
+        .tw-card canvas { width: 100%; aspect-ratio: 1; border-radius: 3px; background: #1b1e1f; }
+        .tw-row { display: flex; align-items: center; gap: var(--gap); padding: 0 14px 10px; flex-wrap: wrap; }
+        .tw-row > * { width: auto; }
+        .tw-row label { color: var(--dim); margin: 0 4px 0 6px; }
+        .tw-row label:first-child { margin-left: 0; }
+        .tw-row button { padding: 0 10px; }
+        .tw-row #genseed {
+            width: 6em; height: var(--row); padding: 0 8px; font: 12px var(--mono);
+            color: var(--text); background: var(--sunken); border: 1px solid var(--edge); border-radius: var(--r);
+        }
+        .tw-row #gensize { width: 5.5em; }
+        .tw-row .go { margin-left: auto; padding: 0 18px; }
+        .tw-note { padding: 0 14px 10px; color: var(--faint); font-size: 11.5px; }
+        .tw-recent-head { padding: 10px 14px 6px; color: var(--faint); border-top: 1px solid var(--line);
+                          font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+        .tw-recent { display: flex; flex-wrap: wrap; gap: var(--gap); padding: 0 14px 14px; color: var(--faint); }
+        .tw-recent button { width: auto; padding: 0 10px; }
+
+        /* Figure mode: the canvas is the whole picture. */
+        #figexit {
+            position: absolute; top: 12px; right: 12px; z-index: 40; display: none;
+            width: auto; padding: 0 12px; font-size: 12px; transition: opacity .6s;
+            background: rgba(12, 14, 15, .74);
+        }
+        body.figure #figexit { display: block; }
+        body.figure #figexit.faded { opacity: .15; }
+        body.figure #figexit:hover { opacity: 1; }
+        body.figure #panel, body.figure #grip, body.figure #gizmo { display: none; }
+
+        #drophint { position: fixed; inset: 0; display: none; z-index: 70;
             align-items: center; justify-content: center; pointer-events: none;
             background: rgba(10, 10, 12, .72); text-align: center; }
         body.dropping #drophint { display: flex; }
-        #drophint span { border: 1px dashed var(--accent); border-radius: 10px;
-            padding: 28px 40px; }
+
+        /* Phones: canvas on top, the panel as a sheet underneath. */
+        @media (max-width: 760px) {
+            #app { flex-direction: column; }
+            #stage { flex: none; height: 58vh; height: 58dvh; }
+            #panel { width: 100%; flex: 1; border-left: 0; border-top: 1px solid var(--line); }
+            #grip { display: none; }
+            #gizmo { width: 60px; height: 60px; }
+            #card { width: 200px; font-size: 11px; padding: 8px 10px; }
+            #caption { top: 12px; bottom: auto; font-size: 12px; }
+            #info { width: 100%; }
+            #hud { min-width: 0; font-size: 10px; }
+            .strip { grid-template-columns: 1fr 1fr; }
+            .intro .phone { display: block; }
+            #overlay { position: fixed; }
+        }
     </style>
 </head>
 
@@ -344,7 +502,7 @@
             <canvas id="gl"></canvas>
             <dialog id="terrainwin">
                 <div class="tw-head">
-                    <span>terrain</span>
+                    <span>make terrain</span>
                     <button type="button" id="terrainclose" title="close (Esc)">×</button>
                 </div>
                 <div id="gencards" class="tw-cards"></div>
@@ -356,23 +514,60 @@
                     <button type="button" id="seedrand" title="a random seed">random</button>
                     <label>size</label>
                     <select id="gensize"><option value="128">128</option><option value="256" selected>256</option><option value="512">512</option></select>
-                    <button type="button" id="genbtn" class="go">generate</button>
+                    <button type="button" id="genbtn" class="go primary">generate</button>
                 </div>
-                <div class="tw-note" id="twnote">Previews are 64 cells across; the terrain itself is made at the size chosen. Each is made once, then kept in this browser.</div>
+                <div class="tw-note" id="twnote">Previews are painted in this tileset's materials, placed by the rule. Double-click one to make it.</div>
                 <div class="tw-recent-head">made before</div>
                 <div id="genrecent" class="tw-recent"></div>
             </dialog>
-            <div id="busy"></div>
+            <div id="hud" class="glass">
+                <div><span>fps</span><span id="fps">—</span></div>
+                <div><span>drawn</span><span id="drawn">—</span></div>
+                <div><span>in file</span><span id="n">—</span></div>
+                <div><span>sort</span><span id="sortms">—</span></div>
+                <div><span>resolution</span><span id="resn">100%</span></div>
+                <div><span>gpu</span><span id="gpuname">—</span></div>
+            </div>
+            <div id="card" class="glass"></div>
+            <div id="caption" class="glass"></div>
+            <div id="hint" class="glass gone"></div>
+            <div id="busy" class="glass"></div>
+            <aside id="info" aria-label="about this control">
+                <div class="ih">
+                    <button type="button" id="infoindex">all topics</button>
+                    <button type="button" id="infoclose" class="x" title="close (Esc)">×</button>
+                </div>
+                <div id="infobody"></div>
+            </aside>
             <button id="figexit" type="button">exit figure mode · F or Esc · P saves</button>
             <svg id="gizmo" viewBox="0 0 92 92">
                 <g id="gz"></g>
             </svg>
             <div id="overlay">
-                <div class="msg">
-                    <b>bozkır</b>
-                    Load a .splat file to begin.<br>
-                    Export one with <code>scripts/export_splat.py</code>.
-                    <div id="bar"><i></i></div>
+                <div class="intro">
+                    <h1>bozkır</h1>
+                    <div class="tag">captured ground, placed by terrain</div>
+                    <p class="claim">A few square metres of real ground, captured as Gaussian splats, laid over kilometres of terrain as seamless Wang tiles.
+                        <b>What is new:</b> which material goes where is computed from the shape of the land (drainage, slope, position, height)
+                        instead of being painted by hand. It runs here, in the browser, on a laptop GPU.</p>
+                    <div class="strip noimg">
+                        <figure><div class="ph" data-img="img/intro-1.webp"></div>
+                            <figcaption data-n="1"><b>capture</b>a patch of real ground, photographed and trained as splats</figcaption></figure>
+                        <figure><div class="ph" data-img="img/intro-2.webp"></div>
+                            <figcaption data-n="2"><b>tiles</b>cut into Wang tiles whose edges always match</figcaption></figure>
+                        <figure><div class="ph" data-img="img/intro-3.webp"></div>
+                            <figcaption data-n="3"><b>world</b>laid over generated terrain, far beyond the capture</figcaption></figure>
+                        <figure><div class="ph" data-img="img/intro-4.webp"></div>
+                            <figcaption data-n="4"><b>rule</b>each material placed where the land says it collects</figcaption></figure>
+                    </div>
+                    <p class="phone small">Best on a computer: on a phone it runs, slowly, at reduced resolution.</p>
+                    <p id="loadwarn" class="small"></p>
+                    <div class="foot">
+                        <div id="bar"><i></i></div>
+                        <span id="loadnote">starting…</span>
+                        <button type="button" id="introgo" class="primary">explore</button>
+                        <span class="small"><a href="https://github.com/husmen8/bozkir" target="_blank" rel="noopener">code and write-up</a> · the story buttons walk through the four steps</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -381,211 +576,198 @@
 
         <div id="panel">
             <div class="head">
-                <b>bozkır</b><span>splat wang tiles</span>
-                <span class="sz" data-tip="Text size. The panel edge drags to resize it.">
-                    <button id="fsdown">−</button>
-                    <button id="fsup">+</button>
-                </span>
+                <div class="top">
+                    <span class="brand">bozkır</span>
+                    <span class="tools">
+                        <button id="aboutbtn" data-tip="What this is.">?</button>
+                        <button id="fsdown" data-tip="Smaller text.">−</button>
+                        <button id="fsup" data-tip="Larger text.">+</button>
+                    </span>
+                </div>
+                <div class="tagline">captured ground, placed by terrain</div>
+                <div class="seg" role="tablist">
+                    <button type="button" id="modeExplore" role="tab" class="on" data-tip="The essentials. M switches.">explore</button>
+                    <button type="button" id="modeResearch" role="tab" data-tip="Every control, the renderer's switches, measurement and debug views, and live numbers. M switches.">research</button>
+                </div>
+                <input type="checkbox" id="expert">
             </div>
 
-            <label id="expertrow" data-tip="Shows the sections used to measure the renderer: ordering, measurement, level of detail and the debug views, plus the finer controls inside the sections already open.">
-                <input type="checkbox" id="expert"> show everything
-            </label>
+            <div class="story">
+                <div class="lbl">story</div>
+                <div class="seg" id="chapters"></div>
+            </div>
 
-            <details open style="--c:#c9a227">
-                <summary data-tip="A tileset is a .splat of packed Gaussians plus a .json saying which splats belong to which tile, the tile size, the LOD ranges and the Wang edge codes. Without the .json the splats load as one scene rather than as tiles.">scene</summary>
+            <details open style="--c:#d4a93a">
+                <summary data-info="tileset">scene</summary>
                 <div class="body">
-                    <div class="step"><span class="step-n">1</span><span class="step-t">tiles</span>
-                        <span class="step-h">what the ground is made of</span></div>
-                    <select id="scenepick" data-tip="Tilesets this server has: the desert tileset, the starter made in the browser, and whatever a working copy lists in data/index.json (rebuilt by the tools that write there, or by python scripts/index_data.py)."><option value="">tileset…</option></select>
-                    <input type="file" id="file" accept=".splat,.json,.zip" multiple>
+                    <div class="step"><span class="step-n">1</span><span class="step-t">tiles</span><span class="step-h">what it is made of</span></div>
+                    <select id="scenepick" data-tip="Tilesets on this server. The starter is made in the browser."><option value="">tileset…</option></select>
+                    <button type="button" id="fileopen" data-tip="A .zip, or a .splat with its .json. Dropping them on the page works too.">open your own…</button>
+                    <input type="file" id="file" accept=".splat,.json,.zip" multiple hidden>
 
-                    <div class="step"><span class="step-n">2</span><span class="step-t">ground</span>
-                        <span class="step-h">the shape they lie on</span></div>
-                    <button type="button" id="terrainopen" class="big" data-tip="Make terrain here in the browser: nineteen kinds of ground in five groups, any seed, each previewed in this tileset's own materials before you commit. Stream power erosion solved the FastScape way; the same generator as scripts/terrain_gen.py, bit for bit.">make terrain…</button>
-                    <select id="heightpick" data-tip="The terrain the tiles lie on, chosen separately from the tileset. Any height field with any tileset: the two used to have to share a name, which meant copying a whole .splat to put the same tiles on different ground."><option value="">or a terrain file…</option></select>
-                    <div class="out" id="genstatus">—</div>
+                    <div class="step"><span class="step-n">2</span><span class="step-t">ground</span><span class="step-h">the shape it lies on</span></div>
+                    <button type="button" id="terrainopen" class="primary" data-info="terrain" data-tip="Nineteen landforms, any seed, previewed in this tileset's materials.">make terrain…</button>
+                    <select id="heightpick" data-tip="A saved height field. Any terrain works with any tileset."><option value="">or a terrain file…</option></select>
+                    <div class="out" id="genstatus"></div>
 
-                    <div class="step"><span class="step-n">3</span><span class="step-t">start from</span>
-                        <span class="step-h">a set of settings, then adjust</span></div>
-                    <div id="presetchips" class="chips" data-tip="Named viewer settings from views.json. Each sets the panel's controls exactly as a hand on the sliders would, so nothing is hidden and everything can be adjusted afterwards."></div>
-
-                    <div class="r"><span>splats</span><span class="v" id="n">—</span></div>
-                    <div class="r"><span>drawn</span><span class="v" id="drawn">—</span></div>
-                    <div class="r"><span>fps</span><span class="v" id="fps">—</span></div>
-                    <div class="r" data-tip="The graphics chip the browser is drawing with. Amber means an integrated or software renderer: on a laptop with a dedicated card, set the browser to High performance in Windows Settings > System > Display > Graphics."><span>gpu</span><span class="v" id="gpuname" style="font-size:9px">—</span></div>
-                    <div class="r"><span>sort</span><span class="v" id="sortms">—</span></div>
+                    <div class="step"><span class="step-n">3</span><span class="step-t">settings</span><span class="step-h">then adjust</span></div>
+                    <div id="presetchips" class="seg two" data-info="presets"></div>
                 </div>
             </details>
 
-            <details class="adv" style="--c:#7fa8c4">
-                <summary data-tip="GSWT section 3.4. Which tile is drawn in front of which, and what to do when neither answer is right.">ordering</summary>
+            <details open style="--c:#c9a26e">
+                <summary data-info="world">world</summary>
                 <div class="body">
-                    <div class="r" data-tip="Topological: each adjacent pair is decided by which side of their shared boundary the camera is on, then the whole is topologically sorted.&#10;&#10;Depth key: cells ranked by nearest footprint depth. Ties across a whole row when the view lines up with a grid axis, and the row then reverses in one frame.">
-                        <span>tiles</span></div>
-                    <select id="tileorder">
-                        <option value="topological" selected>topological (GSWT)</option>
-                        <option value="depth">depth key only</option>
-                    </select>
-
-                    <label class="c" data-tip="Where the camera lies in the plane of a shared boundary, neither tile is in front and no draw order is right. Those tiles are drawn as one interleaved stream instead.&#10;&#10;Costs a re-sort of every splat in the group, so it fires only near a boundary."><input type="checkbox" id="merging" checked> selective merging</label>
-                    <div class="s" data-tip="How close the camera must be to a boundary's plane before its two tiles are merged, in tile widths.&#10;&#10;Measured crossings sit at about 0.25. Higher merges more and costs more; watch the readout below.">
-                        <input type="range" id="mergethr" min="0.05" max="1" step="0.05" value="0.5">
-                        <label>merge within<b id="mergethrn">0.50</b></label>
-                    </div>
-                    <div class="r"><span>merged</span><span class="v" id="mergestat">—</span></div>
-
-                    <div class="r" data-tip="Live: one sort per frame along the true view direction. Exact while tiles are flat.&#10;&#10;Cached: an order kept per direction, as GSWT does with nine views. Cheaper, and wrong by the amount shown as order error."><span>within a tile</span></div>
-                    <select id="sortmode">
-                        <option value="live" selected>live, one per frame</option>
-                        <option value="cached">cached, per direction</option>
-                    </select>
-                    <div class="s" data-tip="How many view directions get their own cached order. GSWT uses nine.">
-                        <input type="range" id="views" min="1" max="49" step="1" value="9">
-                        <label>cached views<b id="viewsn">9</b></label>
-                    </div>
-                    <button id="recache">rebuild cache</button>
-                    <div class="r"><span>order error</span></div>
-                    <div class="out" id="sorterr">—</div>
-                    <label class="c" data-tip="Off draws splats in storage order. Everything blends wrongly; useful only to see what sorting is for."><input type="checkbox" id="sorting" checked> depth sorting</label>
-                </div>
-            </details>
-
-            <details class="adv" style="--c:#c17a54">
-                <summary data-tip="Numbers rather than impressions. The pop meter is immediate; the capture feeds scripts/pop_metric.py for a real comparison.">measure</summary>
-                <div class="body">
-                    <label class="c" data-tip="Picture change per degree turned. A spike means something switched rather than moved."><input type="checkbox" id="popmeter"> pop meter</label>
-                    <div class="out" id="pop">off</div>
-                    <button id="popreset">reset peak</button>
-                    <div class="r"><span>boundary gap</span></div>
-                    <div class="out" id="seam">—</div>
-
-                    <div class="r" data-tip="Turns the camera through a fixed arc, saving every frame to a zip.&#10;&#10;Keep the step under about half a degree: the metric compares neighbouring frames, and a large turn moves near and far ground by different amounts, which no per-block translation can undo and which then reads as popping whatever the ordering."><span>sweep</span><span class="v"><b id="capstepn">0.42</b>° / frame</span></div>
-                    <div class="s">
-                        <input type="range" id="caparc" min="4" max="360" step="4" value="20">
-                        <label>arc<b id="caparcn">20</b>°</label>
-                    </div>
-                    <div class="s">
-                        <input type="range" id="capframes" min="12" max="180" step="12" value="48">
-                        <label>frames<b id="capframesn">48</b></label>
-                    </div>
-                    <label class="c" data-tip="Orbits the middle of the laid-out terrain rather than wherever the camera is pointed. WASD moves the camera's own target, and a target nudged off the terrain orbits a point in mid air.&#10;&#10;It is also the same place every session, which is what makes a capture repeatable."><input type="checkbox" id="capcentre" checked> orbit terrain centre</label>
-                    <button id="capture" data-tip="One run, using the ordering selected above.">capture sweep</button>
-                    <button id="captureboth" data-tip="Runs both orderings back to back from this same camera, then restores the setting. Both travel the identical path, which is what makes them comparable.&#10;&#10;Then: python scripts/pop_metric.py frames/topological --against frames/depth">capture both orderings</button>
-
-                    <button id="bench" data-tip="Steps the grid from 4x4 to 48x48, holding the camera still and waiting for each sort to settle, and reports frame rate, splats drawn, draw calls and sort time at each size.&#10;&#10;Reading down the table shows which one turns over first, which is what says where the limit actually is.">scaling sweep</button>
-                    <div class="out" id="benchout" style="white-space:pre; overflow-x:auto">—</div>
-                </div>
-            </details>
-
-            <details open style="--c:#8fa87f">
-                <summary>camera</summary>
-                <div class="body">
-                    <div class="r"><span>azimuth</span><span class="v" id="azim">—</span></div>
-                    <div class="r"><span>elevation</span><span class="v" id="elev">—</span></div>
-                    <div class="r"><span>distance</span><span class="v" id="dist">—</span></div>
-                    <div class="s adv">
-                        <input type="range" id="fov" min="20" max="100" value="60">
-                        <label>field of view</label>
-                    </div>
-                    <div class="cols">
-                        <button id="viewGround" data-tip="Low and close, where boundary artifacts live.">ground</button>
-                        <button id="viewWalk" data-tip="Eye height, as if standing on the terrain.">walk</button>
-                    </div>
-                    <div class="cols">
-                        <button id="viewSurvey" data-tip="High and back, the whole grid in frame.">survey</button>
-                        <button id="viewTop" data-tip="Straight down. Shows the tiling itself.">top</button>
-                    </div>
-                    <button id="reset">reset view</button>
-                    <label class="c"><input type="checkbox" id="orbit"> slow orbit</label>
-                    <label class="c adv" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
-                    <div class="r"><span>speed</span><span class="v" id="speedn">1.00</span></div>
-                    <div class="out" id="flynote">drag orbits · WASD moves · scroll zooms</div>
-                </div>
-            </details>
-
-            <details open style="--c:#bb9a63">
-                <summary>terrain</summary>
-                <div class="body">
-                    <div class="s">
+                    <div class="s" data-tip="Tiles across the world.">
                         <input type="range" id="grid" min="1" max="256" step="1" value="1" disabled>
-                        <label>grid<b id="gridn">1 x 1</b></label>
+                        <label>size<b id="gridn">1 x 1</b></label>
                     </div>
-                    <div class="s adv" data-tip="Fewer tiles makes repetition easier to see, which is the point of the control.">
-                        <input type="range" id="used" min="1" max="16" step="1" value="16" disabled>
-                        <label>tiles used<b id="usedn">—</b></label>
-                    </div>
-                    <button id="reseed">shuffle tiles</button>
-                    <div class="s adv" data-tip="Turns the layout off the world axes. Moves where the grid lines up with the screen rather than removing it.">
-                        <input type="range" id="gridangle" min="0" max="45" step="1" value="0">
-                        <label>grid angle<b id="gridanglen">0°</b></label>
-                    </div>
-                    <div class="out" id="wangnote">—</div>
-                    <label class="c" data-tip="Choose each tile's material from the shape of the ground under it, rather than at random.&#10;&#10;Loose material collects where water would run and where the ground is concave; bare ground shows where it is steep and convex. The same rule every terrain shader uses, with captured Gaussians instead of textures.&#10;&#10;Needs a tileset built with --classes 2."><input type="checkbox" id="classrule" checked> material follows terrain</label>
-                    <div class="s adv" data-tip="How wide the undecided band is. Low leaves many cells near a tie, which blending dissolves across a wide band; high narrows it to the cells that really are a tie, for a crisp boundary.&#10;&#10;It cannot move the boundary itself: the share is set by a quantile, and a quantile is a rank. Visible only with blending on.">
-                        <input type="range" id="classsharp" min="0.5" max="6" step="0.5" value="2">
-                        <label>decisiveness<b id="classsharpn">2.0</b></label>
-                    </div>
-                    <div class="s" data-tip="How much altitude counts against the shape of the ground.&#10;&#10;At 0 the rule is purely about slope, position and drainage, so a hollow at the top of a mountain reads the same as one at the bottom. At 1 it is purely elevation, but smoothed elevation, not a contour line: each cell is compared with its neighbourhood (a one-cell blur, then the patch-size median), so a low cell ringed by high ground can still lose. Patch size 0 comes closest to a plain height cut. The readout below shows what each cue is worth; the interesting settings are in between.">
-                        <input type="range" id="classaltitude" min="0" max="1" step="0.05" value="0.4">
-                        <label>follows height<b id="classaltituden">40%</b></label>
-                    </div>
-                    <div class="s adv" data-tip="How large a patch of one material should be, in tiles.&#10;&#10;At zero, neighbouring tiles either side of the threshold make opposite choices over a difference too small to mean anything, and the result is a scatter of single tiles rather than regions. Material in a landscape is contiguous; the terrain maps alone do not say so.">
-                        <input type="range" id="classcoherence" min="0" max="6" step="1" value="2">
-                        <label>patch size<b id="classcoherencen">2</b></label>
-                    </div>
-                    <div class="s" data-tip="How much of the grid the first material takes. The rule still decides where the boundary falls; this decides how much land is either side of it.&#10;&#10;With more than two classes it is still the first material's share, and the others divide what is left evenly.&#10;&#10;Without it the split is whatever the rule's arithmetic happens to give, which was 27% on every scene tried whatever the terrain - no use to somebody who wants a third of their ground to be scrub.">
-                        <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
-                        <label>first material<b id="classbalancen">50%</b></label>
-                    </div>
-                    <label class="c" data-tip="Which material collects where the ground collects: in hollows, channels and low ground. The exporter numbers a tileset's materials in whatever order it found them, so which one is 'first' is an accident of the capture - in the desert set it is the sand. Swapping hands the other material that part; the rule, the share above and the class decision view stay the same.&#10;&#10;With three or more materials it reverses their order."><input type="checkbox" id="classswap"> swap materials</label>
-                    <label class="c" data-tip="Where the rule is nearly undecided, draw both materials and dissolve between them splat by splat instead of choosing one for the whole tile.&#10;&#10;A tile boundary is a straight line, so a class boundary made of tile choices is a staircase however good the rule is. Hybrid GSWT avoids that with a priority that varies per Gaussian; this is the same idea.&#10;&#10;Costs a second draw call for the cells near a boundary. Off by default."><input type="checkbox" id="classblend"> blend at boundaries</label>
-                    <div class="s" data-tip="How undecided a cell must be before both materials are drawn. Wider blends over more ground and costs more draw calls.">
-                        <input type="range" id="blendwidth" min="0.05" max="1" step="0.05" value="0.35">
-                        <label>blend width<b id="blendwidthn">0.35</b></label>
-                    </div>
-                    <div class="out" id="classnote">—</div>
-                    <label class="c" data-tip="Paints each cell with the class the rule chose - green for the class that collects material, yellow for exposed - washed towards grey where it was nearly undecided.&#10;&#10;This is the decision itself, not the material drawn. If a green-looking summit paints yellow here, the rule called it exposed and what you are seeing is an impure tile or the blend band, not a rule that disagrees with the terrain.">
-                        <input type="checkbox" id="classview"> class decision
-                    </label>
-                    <label class="c" data-tip="Distant ground drawn as one mesh coloured from an atlas of the tiles seen from above, instead of a draw per cell - what lets the grid reach hundreds of tiles. It takes over one level before the coarsest splat level (at the default, 16 tiles out), dithered across the hand-over, so the level-of-detail slider moves both together. Needs web/data/&lt;scene&gt;.atlas.png, made by scripts/bake_atlas.py.">
-                        <input type="checkbox" id="farfield" checked> far field
-                    </label>
-                    <label class="c" data-tip="Keeps the viewer near 30 frames per second, the way games do. First it lowers the render resolution (down to half), in proportion to how far behind it is; only if that is not enough does it pull the level-of-detail distance in. With headroom it gives detail back first, then resolution, more slowly than it took them. A note says when it acts. Save PNG is taken at the current resolution.">
-                        <input type="checkbox" id="autoquality" checked> auto quality
-                    </label>
-                    <div class="r" data-tip="A measured height field loaded beside the tileset, written by scripts/heightmap.py from a drone survey's DSM or any other height raster.&#10;&#10;Without one the surface is two sine waves: smooth, periodic, and with no channels or ridges for a material rule to read."><span>height field</span></div>
-                    <div class="out" id="fieldnote">none — analytic surface</div>
-                    <div class="s">
+                    <div class="s" data-info="relief" data-tip="How high the terrain rises.">
                         <input type="range" id="relief" min="0" max="2" step="0.02" value="0">
                         <label>relief<b id="reliefn">0.00</b></label>
                     </div>
-                    <div class="s" data-tip="How many tiles a landform spans. With a measured height field this is how much ground the field covers, so a small survey can be read at any size; beyond its edge the field mirrors, so it repeats without a seam.&#10;&#10;Without a field it is the wavelength of the analytic surface.">
+                    <div class="s adv" data-info="relief" data-tip="Tiles one height field spans. Below the world size, landforms repeat.">
                         <input type="range" id="reliefscale" min="2" max="256" step="1" value="6">
-                        <label>relief scale<b id="reliefscalen">6</b> tiles</label>
+                        <label>relief scale<b id="reliefscalen">6</b></label>
                     </div>
-                    <label class="c" data-tip="How splats follow the terrain. On: every splat bends with the ground under it, so tiles meet without gaps however steep the terrain - the look you usually want. Off: each tile is bent by a few frames only, as GSWT does; faster to set up, and the gaps it leaves on slopes show what the smoothing is for.">
-                        <input type="checkbox" id="smoothframes" checked> smooth tiles on terrain
-                    </label>
-                    <label class="c" data-tip="Fine creases added to the ground at the scale of a tile, so terrain close up is not perfectly smooth. The height field has only a couple of samples per tile on a big world and erosion rounds every crest; this puts the small-scale roughness back. The same in the splats, the far field and the camera.">
-                        <input type="checkbox" id="detailon" checked> detail relief
-                    </label>
-                    <div class="s" data-tip="How strong the detail relief is.">
+                    <label class="c adv" data-info="detail" data-tip="Tile-scale creases on steep ground and crests."><input type="checkbox" id="detailon" checked> detail relief</label>
+                    <div class="s adv">
                         <input type="range" id="detailamt" min="0.25" max="3" step="0.05" value="1">
                         <label>detail<b id="detailamtn">1.00</b></label>
                     </div>
-                    <div class="s" id="subdivrow" style="display:none" data-tip="One frame per tile is GSWT. More frames shorten the span but add breaks inside the tile. The far end is a frame per splat, with no break anywhere.">
-                        <input type="range" id="subdiv" min="1" max="17" step="1" value="17">
-                        <label>frames / tile<b id="subdivn">1</b></label>
+                    <div class="s adv" data-tip="Fewer tiles make repetition easier to see. Only for sets that are not Wang sets.">
+                        <input type="range" id="used" min="1" max="16" step="1" value="16" disabled>
+                        <label>tiles used<b id="usedn">—</b></label>
+                    </div>
+                    <div class="s adv" data-tip="Turns the layout off the world axes.">
+                        <input type="range" id="gridangle" min="0" max="45" step="1" value="0">
+                        <label>grid angle<b id="gridanglen">0°</b></label>
+                    </div>
+                    <button id="reseed" data-tip="Another random choice among the tiles that fit.">shuffle tiles</button>
+                    <div class="out adv" id="fieldnote">none, an analytic surface</div>
+                    <div class="out adv" id="wangnote">—</div>
+                </div>
+            </details>
+
+            <details open style="--c:#8fbf7a">
+                <summary data-info="rule">materials</summary>
+                <div class="body">
+                    <label class="c" data-info="rule" data-tip="Each tile's material from the shape of the ground. Off: at random, the baseline."><input type="checkbox" id="classrule" checked> placed by terrain</label>
+                    <div class="s" data-info="share" data-tip="How much of the world this material covers. The rule decides where.">
+                        <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
+                        <label><span id="classbalancelbl">share</span><b id="classbalancen">50%</b></label>
+                    </div>
+                    <div class="s" data-info="rule" data-tip="How much altitude counts against shape. 0: shape only. 1: smoothed height only.">
+                        <input type="range" id="classaltitude" min="0" max="1" step="0.05" value="0.4">
+                        <label>follows height<b id="classaltituden">40%</b></label>
+                    </div>
+                    <div class="s adv" data-info="rule" data-tip="Width of the undecided band. It cannot move the boundary.">
+                        <input type="range" id="classsharp" min="0.5" max="6" step="0.5" value="2">
+                        <label>decisiveness<b id="classsharpn">2.0</b></label>
+                    </div>
+                    <div class="s adv" data-info="rule" data-tip="Median filter size in tiles: regions rather than single tiles.">
+                        <input type="range" id="classcoherence" min="0" max="6" step="1" value="2">
+                        <label>patch size<b id="classcoherencen">2</b></label>
+                    </div>
+                    <label class="c" data-info="share" data-tip="Which material collects in hollows and channels."><input type="checkbox" id="classswap"> swap materials</label>
+                    <label class="c adv" data-info="blend" data-tip="Near a tie, dissolve both materials splat by splat."><input type="checkbox" id="classblend"> blend at boundaries</label>
+                    <div class="s adv" data-tip="How undecided a cell must be to blend. Wider costs more draw calls.">
+                        <input type="range" id="blendwidth" min="0.05" max="1" step="0.05" value="0.35">
+                        <label>blend width<b id="blendwidthn">0.35</b></label>
+                    </div>
+                    <label class="c" data-info="decision" data-tip="Paints the class the rule chose over each cell, grey where it was nearly a tie."><input type="checkbox" id="classview"> show the decision</label>
+                    <div class="out adv" id="classnote">—</div>
+                </div>
+            </details>
+
+            <details open style="--c:#7fb0a0">
+                <summary data-info="camera">camera</summary>
+                <div class="body">
+                    <div class="seg">
+                        <button id="viewGround" data-tip="Low and close.">ground</button>
+                        <button id="viewSurvey" data-tip="High and back.">survey</button>
+                        <button id="viewTop" data-tip="Straight down: the tiling itself.">top</button>
+                    </div>
+                    <button id="viewWalk" class="primary" data-info="walk" data-tip="First person on the ground. WASD walks, shift runs, V leaves.">walk on it</button>
+                    <button id="reset" data-tip="Back to the starting angle.">reset view</button>
+                    <div class="note" id="flynote">drag orbits · WASD moves · scroll zooms</div>
+                    <label class="c adv"><input type="checkbox" id="orbit"> slow orbit</label>
+                    <label class="c adv" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
+                    <div class="s adv">
+                        <input type="range" id="fov" min="20" max="100" value="60">
+                        <label>field of view<b id="fovn">60°</b></label>
+                    </div>
+                    <div class="r adv"><span>azimuth</span><span class="v" id="azim">—</span></div>
+                    <div class="r adv"><span>elevation</span><span class="v" id="elev">—</span></div>
+                    <div class="r adv"><span>distance</span><span class="v" id="dist">—</span></div>
+                    <div class="r adv"><span>fly speed</span><span class="v" id="speedn">1.00</span></div>
+                </div>
+            </details>
+
+            <details style="--c:#6fa0b8">
+                <summary data-info="look">look</summary>
+                <div class="body">
+                    <select id="sky" data-tip="Sets the haze colour too.">
+                        <option value="overcast" selected>overcast sky</option>
+                        <option value="clear">clear sky</option>
+                        <option value="dusk">dusk sky</option>
+                        <option value="none">no sky</option>
+                    </select>
+                    <div class="s" data-tip="Haze with distance.">
+                        <input type="range" id="fog" min="0" max="3" step="0.05" value="1">
+                        <label>haze<b id="fogn">1.00</b></label>
+                    </div>
+                    <div class="s" data-tip="Brightness. A .splat keeps only base colours, so it reads flatter than the capture.">
+                        <input type="range" id="exposure" min="0.5" max="2" step="0.05" value="1">
+                        <label>exposure<b id="exposuren">1.00</b></label>
+                    </div>
+                    <div class="s adv" data-info="lighting" data-tip="Hollows see less sky, so they sit darker. Only ever darkens.">
+                        <input type="range" id="shade" min="0" max="1" step="0.05" value="0.4">
+                        <label>ground shading<b id="shaden">0.40</b></label>
+                    </div>
+                    <div class="s adv" data-info="macro" data-tip="Slow brightness variation over several tiles. A render-time tint; figures turn it off.">
+                        <input type="range" id="macro" min="0" max="1" step="0.05" value="0.5">
+                        <label>land variation<b id="macron">0.50</b></label>
+                    </div>
+                    <div class="s adv" data-tip="Colour strength. Above 1 is stronger than the capture.">
+                        <input type="range" id="saturation" min="0" max="2" step="0.05" value="1">
+                        <label>saturation<b id="saturationn">1.00</b></label>
+                    </div>
+                    <div class="s adv" data-tip="Scales every splat drawn. The far field does not follow.">
+                        <input type="range" id="gain" min="0.2" max="2" step="0.05" value="1">
+                        <label>splat size<b id="gainn">1.00</b></label>
                     </div>
                 </div>
             </details>
 
-            <details class="adv" style="--c:#9c8fae">
-                <summary>level of detail</summary>
+            <details style="--c:#b39ac9">
+                <summary>share</summary>
                 <div class="body">
-                    <label class="c"><input type="checkbox" id="lod" checked> use levels</label>
-                    <div class="s">
+                    <div class="cols">
+                        <button type="button" id="savepng" data-tip="The frame as a PNG at full resolution. Shortcut: P.">save PNG</button>
+                        <button type="button" id="copylink" data-tip="A link that reopens this exact view.">copy link</button>
+                    </div>
+                    <button type="button" id="copysettings" class="adv" data-tip="Every changed setting and the camera, as text to paste beside a screenshot.">copy settings as text</button>
+                    <label class="c adv" data-tip="Hides everything but the picture. F leaves."><input type="checkbox" id="figuremode"> figure mode</label>
+                    <div class="out" id="sharenote"></div>
+                </div>
+            </details>
+
+            <div class="divider">research</div>
+
+            <details class="adv" style="--c:#d0b26a">
+                <summary data-info="renderer">renderer</summary>
+                <div class="body">
+                    <label class="c" data-info="farfield" data-tip="Distant ground as one atlas-coloured mesh, continued past the grid to the haze."><input type="checkbox" id="farfield" checked> far field</label>
+                    <label class="c" data-info="quality" data-tip="Holds about 30 fps: resolution first, then level of detail."><input type="checkbox" id="autoquality" checked> auto quality</label>
+                    <label class="c" data-info="warp" data-tip="On: every splat bends with the ground. Off: a few frames per tile, as GSWT."><input type="checkbox" id="smoothframes" checked> smooth tiles on terrain</label>
+                    <div class="s" id="subdivrow" style="display:none" data-tip="One frame per tile is GSWT.">
+                        <input type="range" id="subdiv" min="1" max="17" step="1" value="17">
+                        <label>frames / tile<b id="subdivn">1</b></label>
+                    </div>
+                    <div class="sub">level of detail</div>
+                    <label class="c" data-info="lod"><input type="checkbox" id="lod" checked> use levels</label>
+                    <div class="s" data-info="lod" data-tip="Tiles out where the first coarser level takes over; each next level is twice as far.">
                         <input type="range" id="lodbase" min="2" max="40" step="1" value="8">
                         <label>first switch<b id="lodbasen">8</b></label>
                     </div>
@@ -593,64 +775,83 @@
                 </div>
             </details>
 
-            <details class="adv" style="--c:#c96f6f">
-                <summary data-tip="Each of these paints something the renderer normally hides, so a claim about tiling can be checked by eye.">debug views</summary>
+            <details class="adv" style="--c:#7fa8c4">
+                <summary data-info="ordering">ordering</summary>
                 <div class="body">
-                    <label class="c" data-tip="One fixed colour per tile. If a cell changes colour as you turn, cells are swapping tiles."><input type="checkbox" id="identity"> tile identity</label>
-                    <label class="c" data-tip="The Wang matching constraint. Two tiles meet correctly when their shared boundary reads as one colour, not two."><input type="checkbox" id="tints"> edge colours</label>
+                    <select id="tileorder" data-tip="Topological: by which side of each shared boundary the camera is on. Depth key: ties along whole rows at axis-aligned views.">
+                        <option value="topological" selected>tiles: topological (GSWT)</option>
+                        <option value="depth">tiles: depth key only</option>
+                    </select>
+                    <label class="c" data-info="merging" data-tip="Near a shared boundary's plane, draw both tiles as one interleaved stream."><input type="checkbox" id="merging" checked> selective merging</label>
+                    <div class="s" data-tip="How close to a boundary's plane, in tiles, before merging. Crossings measured near 0.25.">
+                        <input type="range" id="mergethr" min="0.05" max="1" step="0.05" value="0.5">
+                        <label>merge within<b id="mergethrn">0.50</b></label>
+                    </div>
+                    <div class="r"><span>merged</span><span class="v" id="mergestat">—</span></div>
+                    <select id="sortmode" data-tip="Live: one sort per frame. Cached: an order per view direction, as GSWT does with nine.">
+                        <option value="live" selected>within a tile: live</option>
+                        <option value="cached">within a tile: cached</option>
+                    </select>
+                    <div class="s" data-tip="View directions with their own cached order. GSWT uses nine.">
+                        <input type="range" id="views" min="1" max="49" step="1" value="9">
+                        <label>cached views<b id="viewsn">9</b></label>
+                    </div>
+                    <button id="recache">rebuild cache</button>
+                    <div class="r"><span>order error</span></div>
+                    <div class="out" id="sorterr">—</div>
+                    <label class="c" data-tip="Off draws in storage order. Only to see what sorting is for."><input type="checkbox" id="sorting" checked> depth sorting</label>
+                </div>
+            </details>
+
+            <details class="adv" style="--c:#c17a54">
+                <summary data-info="measure">measure</summary>
+                <div class="body">
+                    <label class="c" data-tip="Picture change per degree turned. A spike means something switched."><input type="checkbox" id="popmeter"> pop meter</label>
+                    <div class="out" id="pop">off</div>
+                    <button id="popreset">reset peak</button>
+                    <div class="r"><span>boundary gap</span></div>
+                    <div class="out" id="seam">—</div>
+                    <div class="sub">sweep for pop_metric.py</div>
+                    <div class="r"><span>step</span><span class="v"><b id="capstepn">0.42</b>° / frame</span></div>
+                    <div class="s">
+                        <input type="range" id="caparc" min="4" max="360" step="4" value="20">
+                        <label>arc<b><span id="caparcn">20</span>°</b></label>
+                    </div>
+                    <div class="s">
+                        <input type="range" id="capframes" min="12" max="180" step="12" value="48">
+                        <label>frames<b id="capframesn">48</b></label>
+                    </div>
+                    <label class="c" data-tip="Orbit the middle of the terrain, the same place every session."><input type="checkbox" id="capcentre" checked> orbit terrain centre</label>
+                    <button id="capture" data-tip="One run with the ordering selected above.">capture sweep</button>
+                    <button id="captureboth" data-tip="Both orderings along the same path. Then: python scripts/pop_metric.py frames/topological --against frames/depth">capture both orderings</button>
+                    <div class="sub">scaling</div>
+                    <button id="bench" data-tip="Steps the grid from 4 to 48 and reports fps, splats, draw calls and sort time.">scaling sweep</button>
+                    <div class="out" id="benchout" style="white-space:pre; overflow-x:auto; font-family:var(--mono)">—</div>
+                </div>
+            </details>
+
+            <details class="adv" style="--c:#c96f6f">
+                <summary data-info="tiles">debug views</summary>
+                <div class="body">
+                    <label class="c" data-tip="One colour per tile. A cell that changes colour while turning is swapping tiles."><input type="checkbox" id="identity"> tile identity</label>
+                    <label class="c" data-tip="Wang edge colours: a correct join reads as one colour."><input type="checkbox" id="tints"> edge colours</label>
                     <div class="s">
                         <input type="range" id="band" min="0.02" max="0.4" step="0.01" value="0.12">
                         <label>edge band<b id="bandn">0.12</b></label>
                     </div>
-                                        <label class="c"><input type="checkbox" id="edges"> tile edges</label>
-                    <label class="c" data-tip="Where the graph cut placed each seam between two patches."><input type="checkbox" id="diagonals"> patch diagonals</label>
-                    <label class="c" data-tip="Green, yellow, orange, red as detail drops."><input type="checkbox" id="lodcolours"> colour by level</label>
-                </div>
-            </details>
-
-            <details style="--c:#6fa89a">
-                <summary>look</summary>
-                <div class="body">
-                    <div class="r"><span>sky</span></div>
-                    <select id="sky">
-                        <option value="overcast" selected>overcast</option>
-                        <option value="clear">clear</option>
-                        <option value="dusk">dusk</option>
-                        <option value="none">none (black)</option>
-                    </select>
-                    <div class="s">
-                        <input type="range" id="fog" min="0" max="3" step="0.05" value="1">
-                        <label>haze<b id="fogn">1.00</b></label>
-                    </div>
-                    <div class="s" data-tip="Ground shading from the shape of the terrain: a hollow sees less sky than open ground, so it sits darker.&#10;&#10;It only ever takes light away. The capture was lit where it was taken and cannot be relit, so adding a sun here would fight the shadows already baked into the splats.">
-                        <input type="range" id="shade" min="0" max="1" step="0.05" value="0.4">
-                        <label>ground shading<b id="shaden">0.40</b></label>
-                    </div>
-                    <div class="s" data-tip="Brightness. .splat keeps only the constant term of each Gaussian's colour, so exported scenes read flatter and paler than the capture did; this puts that back by eye.">
-                        <input type="range" id="exposure" min="0.5" max="2" step="0.05" value="1">
-                        <label>exposure<b id="exposuren">1.00</b></label>
-                    </div>
-                    <div class="s adv" data-tip="Colour strength. 0 is grey, 1 is the exported colour, above that is stronger than the capture - useful for a figure, dishonest for a measurement.">
-                        <input type="range" id="saturation" min="0" max="2" step="0.05" value="1">
-                        <label>saturation<b id="saturationn">1.00</b></label>
-                    </div>
-                    <div data-tip="Scales every splat drawn up close. The far field is a picture baked at the normal size, so it does not change with this slider." class="s adv">
-                        <input type="range" id="gain" min="0.2" max="2" step="0.05" value="1">
-                        <label>splat size</label>
-                    </div>
-                    <label class="c" data-tip="Hides the panel and the axis marker so the canvas is the whole picture. Press P, or F to leave it - the panel is not there to click.">
-                        <input type="checkbox" id="figuremode"> figure mode
-                    </label>
-                    <button type="button" id="savepng" data-tip="Writes the frame as a PNG at the canvas's real resolution, named after the scene, grid, rule and camera - so a figure can be retaken exactly. Shortcut: P.">save PNG</button>
+                    <label class="c"><input type="checkbox" id="edges"> tile edges</label>
+                    <label class="c" data-tip="Where the graph cut placed each seam."><input type="checkbox" id="diagonals"> patch diagonals</label>
+                    <label class="c" data-tip="Green, yellow, orange, red as detail drops; grey is the far field."><input type="checkbox" id="lodcolours"> colour by level</label>
                 </div>
             </details>
 
             <details class="adv" style="--c:#7c8489">
-                <summary data-tip="The command that would rebuild this scene from the capture with the settings above.">match in python</summary>
-                <div class="body"><div class="out" id="cmd">—</div></div>
+                <summary>match in python</summary>
+                <div class="body"><div class="out" id="cmd" style="font-family:var(--mono)">—</div></div>
             </details>
         </div>
     </div>
+    <div id="tip"></div>
     <script type="module" src="./viewer.js"></script>
 </body>
 

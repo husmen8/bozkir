@@ -13,8 +13,10 @@ import { Benchmark, report } from './benchmark.js';
 import { classify, sampleGrid } from './landform.js';
 import { GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from './terrain.js';
 import { starterTileset } from './starter.js';
+import { initUI, loadProgress, loadDone, loadFailed, updateCard, setChapters,
+         endChapters, takeView } from './ui.js';
 
-const BUILD = 'bozkir viewer 5.0 (far field, auto quality, detail relief, starter)';
+const BUILD = 'bozkir viewer 6.1 (explore/research, story, walk)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -171,8 +173,19 @@ uniform float uHasOpen;
 uniform float uShade;         // how much of it to apply
 uniform float uExposure;
 uniform float uSaturation;
+uniform float uMacro;         // variation over the land; 0 is off
 
 ${TERRAIN_GLSL}
+
+// Slow brightness variation over the land, at scales of several tiles.
+// A tileset repeats at one tile; this does not, so it breaks the lattice the
+// eye picks out (landscape 'macro variation'). The same function in the far
+// field, so the hand-over keeps it. Render-time only; figures turn it off.
+float macroAt(vec2 p) {
+  vec2 w = p / uTileSize;
+  float m = 0.6 * dValue(w / 11.0 + 3.7) + 0.4 * dValue(w / 4.3 + 17.1);
+  return 1.0 + uMacro * 0.36 * (m - 0.5);
+}
 
 // Sky openness, 0 in a hollow and 1 in the open. From a texture: it needs
 // the ground around the point and does not change with the camera.
@@ -364,6 +377,7 @@ void main() {
   }
   // .splat keeps only the constant colour term, so it reads flat and a bit
   // washed; exposure and saturation compensate by eye.
+  if (uMacro > 0.0 && uTileSize > 0.0) rgb *= macroAt(anchorWorld);
   rgb = clamp(rgb * uExposure, 0.0, 1.0);
   float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
   rgb = clamp(mix(vec3(lum), rgb, uSaturation), 0.0, 1.0);
@@ -464,6 +478,7 @@ uniform int uDebug;            // 0 none, 1 tile identity, 2 class, 3 level
 uniform sampler2D uTileInfo;   // row 0 gain, row 1 mean colour, per tile
 uniform float uHasTileInfo;
 uniform vec3 uClassRGB[4];
+uniform float uMacro;
 in vec2 vXY;
 in float vDepth;
 in float vOpen;
@@ -481,15 +496,29 @@ vec3 tileRGB(float i) {
   vec3 k = clamp(min(min(v, 4.0 - v), vec3(1.0)), 0.0, 1.0);
   return 0.30 + 0.70 * k;
 }
+// Value noise for the macro variation, on the same kind of integer hash as
+// the detail relief (a separate copy: TERRAIN_GLSL is vertex-only here).
+float mHash(ivec2 c) {
+  uint h = uint(c.x) * 0x27D4EB2Du ^ uint(c.y) * 0x165667B1u;
+  h = (h ^ (h >> 15u)) * 0x85EBCA6Bu;
+  h ^= h >> 13u;
+  return float(h & 0xFFFFFFu) / 16777215.0;
+}
+float mValue(vec2 q) {
+  vec2 i = floor(q), f = q - i;
+  vec2 s = f * f * (3.0 - 2.0 * f);
+  ivec2 c = ivec2(i);
+  return mix(mix(mHash(c), mHash(c + ivec2(1, 0)), s.x),
+             mix(mHash(c + ivec2(0, 1)), mHash(c + ivec2(1, 1)), s.x), s.y);
+}
 void main() {
-  float a = smoothstep(uFarStart - uFarBand, uFarStart, vDepth);
-  if (a < doorway(gl_FragCoord.xy)) discard;
-  a = 1.0;
   vec2 l = vec2(uRot.x * vXY.x + uRot.y * vXY.y,
                 -uRot.y * vXY.x + uRot.x * vXY.y);
-  vec2 g = l / uTileSize + (uGridN - 1.0) * 0.5 + 0.5;
+  vec2 g = l / uTileSize + uGridN * 0.5;
   vec2 ij = floor(g);
   if (ij.x < 0.0 || ij.y < 0.0 || ij.x >= uGridN || ij.y >= uGridN) discard;
+  float a = smoothstep(uFarStart - uFarBand, uFarStart, vDepth);
+  if (a < doorway(gl_FragCoord.xy)) discard;
   vec2 fr = clamp(g - ij, 0.01, 0.99);   // east, north fraction in the cell
   vec4 t = texelFetch(uCells, ivec2(ij), 0);
   float idx = floor(t.r * 255.0 + 0.5) + 256.0 * floor(t.g * 255.0 + 0.5);
@@ -505,14 +534,23 @@ void main() {
   vec2 k = vec2(1.0 / uAtlasGrid.x, -1.0 / uAtlasGrid.y);
   vec4 tex = textureGrad(uAtlas, uv, gx * k, gy * k);
   vec3 rgb = tex.rgb;
+  // b holds the rule class in its low two bits.
+  int packed = int(floor(t.b * 255.0 + 0.5));
   if (uHasTileInfo > 0.5) {
     int ti = int(idx);
     rgb *= texelFetch(uTileInfo, ivec2(ti, 0), 0).rgb * 2.0;
-    // Fade to the tile mean with distance, as terrain renderers do; far
-    // away a tile's own pattern only reads as a lattice.
+    // Fade part-way to the tile mean with distance, as terrain renderers do.
+    // Fading fully to the material mean (tried 2026-09-28) made distant
+    // ground a flat third look next to the splats and the near atlas.
     vec3 mean = texelFetch(uTileInfo, ivec2(ti, 1), 0).rgb;
     float far = smoothstep(uFarStart * 1.5, uFarStart * 5.0, vDepth);
     rgb = mix(rgb, mean, 0.75 * far);
+  }
+  // Same macro variation as the splats (macroAt there).
+  if (uMacro > 0.0) {
+    vec2 w = vXY / uTileSize;
+    float m = 0.6 * mValue(w / 11.0 + 3.7) + 0.4 * mValue(w / 4.3 + 17.1);
+    rgb *= 1.0 + uMacro * 0.36 * (m - 0.5);
   }
   // Opaque on purpose: drawing with atlas coverage washed the sky into all
   // distant ground.
@@ -524,7 +562,7 @@ void main() {
   if (uDebug == 1) {
     rgb = mix(rgb, tileRGB(idx), 0.75);
   } else if (uDebug == 2) {
-    int cls = int(floor(t.b * 255.0 + 0.5));
+    int cls = packed & 3;
     float sure = t.a;
     vec3 c = uClassRGB[min(cls, 3)] * sure + vec3(0.62) * (1.0 - sure);
     rgb = mix(rgb, c, 0.8);
@@ -591,9 +629,11 @@ void main() {
   vec3 dir = transpose(uView) * normalize(vec3(px.x / uFocal.x,
                                                px.y / uFocal.y, 1.0));
   float t = dir.z;
+  // Below the horizon it stays the haze colour for a while: darkening right
+  // under the horizon drew a grey band wherever the ground ended.
   vec3 c = t > 0.0
     ? mix(uSkyHorizon, uSkyTop, pow(clamp(t, 0.0, 1.0), 0.55))
-    : mix(uSkyHorizon, uGround, pow(clamp(-t, 0.0, 1.0), 0.5));
+    : mix(uSkyHorizon, uGround, smoothstep(0.08, 0.7, -t));
   oColour = vec4(c, 1.0);
 }
 `;
@@ -601,8 +641,6 @@ void main() {
 // =============================================================== helpers
 
 const canvas = document.getElementById('gl');
-const overlay = document.getElementById('overlay');
-const bar = document.querySelector('#bar i');
 const ui = {};
 for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
@@ -622,7 +660,8 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'genseed', 'gensize', 'genbtn', 'genstatus',
                   'terrainopen', 'terrainwin', 'terrainclose', 'gencards',
                   'seeddown', 'seedup', 'seedrand', 'genrecent', 'presetchips',
-                  'saturation', 'saturationn',
+                  'saturation', 'saturationn', 'macro', 'macron',
+                  'resn', 'fovn', 'gainn', 'viewWalk',
                   'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
                   'mergestat', 'capture', 'captureboth', 'capframes',
                   'capframesn', 'capcentre', 'caparc', 'caparcn',
@@ -653,9 +692,13 @@ function setFontSize(px) {
 }
 
 {
-  let fs = 11;
-  on('fsup', 'click', () => { fs = setFontSize(fs + 1); });
-  on('fsdown', 'click', () => { fs = setFontSize(fs - 1); });
+  // Text size is remembered, since it is set for the reader's screen.
+  let fs = 12;
+  try { fs = +localStorage.getItem('bozkir.fs') || 12; } catch (e) { /**/ }
+  fs = setFontSize(fs);
+  const keep = () => { try { localStorage.setItem('bozkir.fs', String(fs)); } catch (e) { /**/ } };
+  on('fsup', 'click', () => { fs = setFontSize(fs + 1); keep(); });
+  on('fsdown', 'click', () => { fs = setFontSize(fs - 1); keep(); });
 
   const grip = document.getElementById('grip');
   if (grip) {
@@ -678,7 +721,7 @@ function setFontSize(px) {
     grip.addEventListener('pointerup', stop);
     grip.addEventListener('pointercancel', stop);
     // Double-click resets the width.
-    grip.addEventListener('dblclick', () => setPanelWidth(232));
+    grip.addEventListener('dblclick', () => setPanelWidth(256));
   }
 }
 
@@ -709,11 +752,7 @@ function on(id, event, fn) {
 
 function fail(err) {
   console.error(err);
-  overlay.classList.remove('hidden');
-  overlay.querySelector('.msg').innerHTML =
-    '<b>renderer failed to start</b><pre style="text-align:left;' +
-    'white-space:pre-wrap;font-size:11px;color:#c07a5a">' +
-    String(err && err.message || err) + '</pre>';
+  loadFailed('The renderer failed to start.', String(err && err.message || err));
   throw err;
 }
 
@@ -722,8 +761,8 @@ const gl = canvas.getContext('webgl2',
   { antialias: false, alpha: false, premultipliedAlpha: false,
     powerPreference: 'high-performance' });
 if (!gl) {
-  overlay.querySelector('.msg').innerHTML =
-    '<b>No WebGL2</b>This browser cannot run the renderer.';
+  loadFailed('This browser has no WebGL2, which the renderer needs.',
+             'A current Chrome, Edge, Firefox or Safari has it; check that hardware acceleration is on.');
   throw new Error('webgl2 unavailable');
 }
 
@@ -844,6 +883,7 @@ class Orbit {
     this.elevation = 25;
     this.fov = 60;
     this.fly = false;
+    this.walk = false;           // fly, held at eye height on the ground
     this.pos = [0, 0, 0];        // eye, when flying
     this.speed = 1;              // world units per second, when flying
   }
@@ -907,14 +947,14 @@ const splatU = uniforms(splatProg,
    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
    'field', 'fieldSize', 'fieldExtent', 'hasField',
    'open', 'hasOpen', 'shade', 'exposure', 'saturation',
-   'farOn', 'farStart', 'farBand', 'detail', 'detailFreq',
+   'farOn', 'farStart', 'farBand', 'detail', 'detailFreq', 'macro',
    'edgeN', 'edgeE', 'edgeS', 'edgeW']);
 const farU = uniforms(farProg,
   ['view', 'eye', 'focal', 'viewport', 'relief', 'wave', 'hasField', 'field',
    'fieldSize', 'fieldExtent', 'atlas', 'cells', 'atlasGrid', 'tileSize',
    'gridN', 'rot', 'farStart', 'farBand', 'fogColour', 'fogDensity',
    'exposure', 'shade', 'saturation', 'open', 'hasOpen', 'debug', 'classRGB',
-   'tileInfo', 'hasTileInfo', 'detail', 'detailFreq']);
+   'tileInfo', 'hasTileInfo', 'detail', 'detailFreq', 'macro']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -1038,6 +1078,29 @@ let farVAO = null, farCount = 0;
 // warping onto terrain, no material rule.
 let plainScene = false;
 let tileMeans = null;   // mean splat colour per tile, linear 0..1
+let loadedManifest = null;
+// Cells of each tile class in the current layout, for the scene card.
+let tileClassCounts = null;
+// Names and notes for the public tilesets (web/tilesets.json); a manifest's
+// own "names" wins.
+let tilesetMeta = {};
+fetch('./tilesets.json').then((r) => (r.ok ? r.json() : {}))
+  .then((m) => { tilesetMeta = m || {}; updateShareLabel(); })
+  .catch(() => {});
+
+/** A name per tile class: the manifest's, the catalogue's, or a number. */
+function materialNames() {
+  const meta = tilesetMeta[loadedScene] || {};
+  const given = (loadedManifest && loadedManifest.names) || meta.names || [];
+  return Array.from({ length: classCount }, (_, k) => given[k] || `material ${k + 1}`);
+}
+
+/** The share slider names the material it sets: the one that collects. */
+function updateShareLabel() {
+  const el = document.getElementById('classbalancelbl');
+  if (!el) return;
+  el.textContent = classCount > 1 ? `${materialNames()[tileClassFor(0)]} share` : 'share';
+}
 
 // Auto quality, the way games keep a frame budget.
 // First lever: render resolution (50-100%, 33.3 ms budget, Unreal's dynamic
@@ -1047,7 +1110,8 @@ let tileMeans = null;   // mean splat colour per tile, linear 0..1
 // on several frames far over budget; recovery slower than the drop.
 let autoQuality = true;
 let lodBaseUser = 8;            // what the slider says
-let renderScale = 1;            // fraction of full resolution
+// Phones start lower; auto quality raises it if there is room.
+let renderScale = matchMedia('(pointer: coarse)').matches ? 0.6 : 1;
 let frameMs = 16;               // smoothed frame time
 let overRun = 0, qualityTick = 0, lastNote = '';
 const BUDGET_MS = 33.3;
@@ -1058,6 +1122,8 @@ function qualityNote(text) {
   // At most one note every 1.5 s.
   const now = performance.now();
   if (!ui.busy || text === lastNote || now - (qualityNote.at || 0) < 1500) return;
+  // A running commentary is for measuring; Explore shows the result only.
+  if (!document.body.classList.contains('expert')) return;
   qualityNote.at = now;
   lastNote = text;
   ui.busy.textContent = text;
@@ -1158,6 +1224,7 @@ let figExitTimer = 0;
 let groundShade = 0.4;
 let exposure = 1;
 let saturation = 1;
+let macro = 0.5;
 
 // Turning the layout off the world axes. It moves the axis-alignment effect
 // rather than removing it (a grid at 22 degrees aligns at 22, 112, ...).
@@ -1457,6 +1524,8 @@ function buildGrid() {
                    mix: cellMix ? cellMix[cellIdx] : 1 });
     }
   }
+  tileClassCounts = new Array(classCount).fill(0);
+  if (tileClass) for (const c of cells) tileClassCounts[Math.min(classCount - 1, tileClass[c.patch] || 0)]++;
 }
 
 // Edge colours as in the GSWT figures: warm for north/south, cool for east/west.
@@ -1646,11 +1715,73 @@ async function loadAtlas(name) {
   atlas = null;
   try {
     const r = await fetch(`./data/${name}.atlas.json`);
-    if (!r.ok) return;
+    if (!r.ok) { adoptAtlas(bakedAtlas); return; }
     const lay = await r.json();
     const img = new Image();
     img.src = `./data/${name}.atlas.png`;
     await img.decode();
+    adoptAtlas({ img, lay });
+  } catch (e) { adoptAtlas(bakedAtlas); }
+}
+
+/** A top-down atlas made here from the splats, for tilesets that ship
+ *  without one (the starter, a dropped file). Rougher than bake_atlas.py:
+ *  each splat is a round footprint of its larger axis, averaged by opacity,
+ *  from a coarse level of detail. At far-field distances that is enough. */
+let bakedAtlas = null;
+function bakeAtlas(positions, data, colour) {
+  if (!wangCodes || !tileSize || patches.length < 2) return null;
+  const count = patches.length, res = 48;
+  const cols = Math.ceil(Math.sqrt(count)), rows = Math.ceil(count / cols);
+  const cv = document.createElement('canvas');
+  cv.width = cols * res; cv.height = rows * res;
+  const acc = new Float32Array(res * res * 4);
+  const img = new ImageData(cv.width, cv.height);
+  const px = res / tileSize;
+  for (let k = 0; k < count; k++) {
+    acc.fill(0);
+    const p = patches[k];
+    // The coarsest level that still has a few thousand splats.
+    let [start, n] = p.levels[0];
+    for (const [s2, n2] of p.levels) if (n2 >= 3000) { start = s2; n = n2; }
+    for (let i = start; i < start + n; i++) {
+      const x = (positions[3 * i] / tileSize + 0.5) * res;
+      const y = (0.5 - positions[3 * i + 1] / tileSize) * res;
+      const d = i * 12;
+      const sig = Math.min(4, Math.max(0.6, Math.max(data[d + 4], data[d + 5]) * px));
+      const r = Math.ceil(2 * sig), op = data[d + 3];
+      const x0 = Math.max(0, Math.floor(x - r)), x1 = Math.min(res - 1, Math.ceil(x + r));
+      const y0 = Math.max(0, Math.floor(y - r)), y1 = Math.min(res - 1, Math.ceil(y + r));
+      for (let yy = y0; yy <= y1; yy++) {
+        for (let xx = x0; xx <= x1; xx++) {
+          const dx = xx + 0.5 - x, dy = yy + 0.5 - y;
+          const w = op * Math.exp(-(dx * dx + dy * dy) / (2 * sig * sig));
+          const o = 4 * (yy * res + xx);
+          acc[o] += colour[4 * i] * w; acc[o + 1] += colour[4 * i + 1] * w;
+          acc[o + 2] += colour[4 * i + 2] * w; acc[o + 3] += w;
+        }
+      }
+    }
+    const q0 = (k % cols) * res, r0 = Math.floor(k / cols) * res;
+    const mean = tileMeans && tileMeans[k] ? tileMeans[k].map((v) => v * 255) : [128, 128, 128];
+    for (let yy = 0; yy < res; yy++) {
+      for (let xx = 0; xx < res; xx++) {
+        const o = 4 * (yy * res + xx), w = acc[o + 3];
+        const t = 4 * ((r0 + yy) * cv.width + q0 + xx);
+        for (let c = 0; c < 3; c++) img.data[t + c] = w > 1e-3 ? acc[o + c] / w : mean[c];
+        img.data[t + 3] = 255;
+      }
+    }
+  }
+  cv.getContext('2d').putImageData(img, 0, 0);
+  return { img: cv, lay: { cols, rows, count, res }, baked: true };
+}
+
+/** Upload an atlas (a file's or one baked here) and turn the far field on. */
+function adoptAtlas(source) {
+  if (!source) { atlas = null; return; }
+  try {
+    const { img, lay } = source;
     // Per-tile colour gain: the atlas is seen from straight above, the
     // splats at a grazing angle, so each atlas tile is scaled to its own
     // splats' mean (removes most of the colour step at the hand-over).
@@ -1703,10 +1834,13 @@ async function loadAtlas(name) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    atlas = { tex, cols: lay.cols, rows: lay.rows, count: lay.count };
-    console.log(`far field: atlas of ${lay.count} tiles`);
+    atlas = { tex, cols: lay.cols, rows: lay.rows, count: lay.count,
+              baked: !!source.baked };
+    farMeshKey = '';
+    console.log(`far field: atlas of ${lay.count} tiles`
+                + (source.baked ? ', baked in the browser' : ''));
     buildFarField();
-  } catch (e) { atlas = null; }
+  } catch (e) { console.warn('far field off:', e); atlas = null; }
 }
 
 /** Upload which tile each cell holds, and build the far mesh over the grid. */
@@ -1725,7 +1859,12 @@ function buildFarField() {
     const k = 4 * (c.j * n + c.i);
     idx[k] = c.patch & 255;
     idx[k + 1] = (c.patch >> 8) & 255;
-    idx[k + 2] = (c.cls || 0) & 255;
+    // Rule class, tile class and the tile class it would blend towards, two
+    // bits each (the far field's fade and the class view both read these).
+    const tcls = tileClass ? tileClass[c.patch] & 3 : 0;
+    const acls = c.alt != null ? tileClassFor(c.alt) & 3
+      : (classCount === 2 ? 1 - tcls : tcls);
+    idx[k + 2] = ((c.cls || 0) & 3) | (tcls << 2) | (acls << 4);
     idx[k + 3] = Math.round(255 * Math.max(0, Math.min(1, c.mix == null ? 1 : c.mix)));
   }
   if (!cellTex) cellTex = gl.createTexture();
@@ -1735,37 +1874,52 @@ function buildFarField() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, idx);
+  buildFarMesh();
+}
 
-  // Regular mesh, ~2 vertices per tile: enough at the distances it is used.
+/** The far mesh: ~2 vertices per tile over the grid. */
+let farMeshKey = '';
+function buildFarMesh() {
+  if (!atlas || !cells.length) return;
+  const n = gridN;
   const m = Math.max(32, Math.min(512, 2 * n + 1));
   const extent = n * tileSize;
+  const key = `${n},${tileSize},${gridAngle}`;
+  if (key === farMeshKey && farVAO) return;
+  farMeshKey = key;
+  const axis = [];
+  for (let i = 0; i < m; i++) axis.push((i / (m - 1) - 0.5) * extent);
+  const q = axis.length;
   const a = gridAngle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
-  const xy = new Float32Array(m * m * 2);
-  for (let j = 0; j < m; j++) {
-    for (let i = 0; i < m; i++) {
-      const lx = (i / (m - 1) - 0.5) * extent, ly = (j / (m - 1) - 0.5) * extent;
-      xy[2 * (j * m + i)] = ca * lx - sa * ly;
-      xy[2 * (j * m + i) + 1] = sa * lx + ca * ly;
+  const xy = new Float32Array(q * q * 2);
+  for (let j = 0; j < q; j++) {
+    for (let i = 0; i < q; i++) {
+      const lx = axis[i], ly = axis[j];
+      xy[2 * (j * q + i)] = ca * lx - sa * ly;
+      xy[2 * (j * q + i) + 1] = sa * lx + ca * ly;
     }
   }
-  const ix = new Uint32Array((m - 1) * (m - 1) * 6);
+  const mm = q;
+  const ix = new Uint32Array((mm - 1) * (mm - 1) * 6);
   let t = 0;
-  for (let j = 0; j < m - 1; j++) {
-    for (let i = 0; i < m - 1; i++) {
-      const v = j * m + i;
-      ix[t++] = v; ix[t++] = v + 1; ix[t++] = v + m;
-      ix[t++] = v + 1; ix[t++] = v + m + 1; ix[t++] = v + m;
+  for (let j = 0; j < mm - 1; j++) {
+    for (let i = 0; i < mm - 1; i++) {
+      const v = j * mm + i;
+      ix[t++] = v; ix[t++] = v + 1; ix[t++] = v + mm;
+      ix[t++] = v + 1; ix[t++] = v + mm + 1; ix[t++] = v + mm;
     }
   }
   if (!farVAO) farVAO = gl.createVertexArray();
   gl.bindVertexArray(farVAO);
-  const vb = gl.createBuffer();
+  // Reuse the buffers: this runs again whenever the haze changes.
+  if (!buildFarMesh.vb) { buildFarMesh.vb = gl.createBuffer(); buildFarMesh.ib = gl.createBuffer(); }
+  const vb = buildFarMesh.vb;
   gl.bindBuffer(gl.ARRAY_BUFFER, vb);
   gl.bufferData(gl.ARRAY_BUFFER, xy, gl.STATIC_DRAW);
   const loc = gl.getAttribLocation(farProg, 'aXY');
   gl.enableVertexAttribArray(loc);
   gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-  const ib = gl.createBuffer();
+  const ib = buildFarMesh.ib;
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
@@ -1798,6 +1952,7 @@ function scheduleRegenerate() {
 function load(buffer, manifest) {
   const { n, positions, data, colour } = unpack(buffer);
   splatCount = n;
+  loadedManifest = manifest || null;
 
   if (manifest && manifest.tiles && manifest.tiles.length) {
     patches = manifest.tiles.map(t => ({
@@ -1825,6 +1980,10 @@ function load(buffer, manifest) {
     classCount = 1;
   }
   usedPatches = patches.length;
+  atlas = null;
+  bakedAtlas = null;
+  try { bakedAtlas = bakeAtlas(positions, data, colour); }
+  catch (e) { console.warn('could not bake an atlas:', e); }
 
   const w = 2048;
   const h = Math.ceil(n * 3 / w);
@@ -1894,7 +2053,7 @@ function load(buffer, manifest) {
     : (tileSize ? 'random placement, edges do not match' : 'single scene');
 
   regenerate();
-  overlay.classList.add('hidden');
+  updateShareLabel();
   console.log(`loaded ${n} splats, ${patches.length} patches, ` +
               `tile size ${tileSize}, wang ${!!wangCodes}`);
 }
@@ -2016,6 +2175,9 @@ function frame() {
     if (benchPrev) benchDt = t - benchPrev;
     benchPrev = t;
   }
+  // Nothing is seen under the intro card, so draw nothing: its first
+  // seconds are the download and the first sorts, and a laptop needs them.
+  if (introOpen()) { requestAnimationFrame(frame); return; }
   resize();
   const b = cam.basis();
   const fy = (canvas.height / 2) / Math.tan(cam.fov * Math.PI / 360);
@@ -2095,6 +2257,7 @@ function frame() {
     gl.uniform1f(farU.exposure, exposure);
     gl.uniform1f(farU.shade, groundShade);
     gl.uniform1f(farU.saturation, saturation);
+    gl.uniform1f(farU.macro, macro);
     gl.uniform1i(farU.open, 4);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, field && openTex ? openTex : null);
@@ -2146,6 +2309,7 @@ function frame() {
     gl.uniform1f(splatU.farBand, farBand);
     gl.uniform1f(splatU.exposure, exposure);
     gl.uniform1f(splatU.saturation, saturation);
+    gl.uniform1f(splatU.macro, tileSize ? macro : 0);
     gl.uniformMatrix3fv(splatU.view, false, viewMat);
     gl.uniform3fv(splatU.eye, new Float32Array(b.eye));
     gl.uniform2f(splatU.focal, fy, fy);
@@ -2460,8 +2624,9 @@ function frame() {
         ui.classnote.textContent = `${classCount} classes, placed at random`;
       } else if (classStats) {
         const total = classStats.counts.reduce((a, b) => a + b, 0) || 1;
+        const names = materialNames();
         const share = classStats.counts
-          .map((c, k) => `${k}: ${(100 * c / total).toFixed(0)}%`).join('  ');
+          .map((c, k) => `${names[tileClassFor(k)]} ${(100 * c / total).toFixed(0)}%`).join(' \u00b7 ');
         // A field squeezed into a few tiles repeats across the grid, and the
         // rule then looks like a chequerboard; say so.
         const repeats = field && reliefScale > 0
@@ -2470,11 +2635,13 @@ function frame() {
         const cues = (classStats.weights || [])
           .filter((c) => c.w > 0.005)
           .map((c) => `${c.cue} ${(c.w * 100).toFixed(0)}%`).join(' \u00b7 ');
+        const extra = [classBlend ? `${blendedCells} cells blended` : '',
+                       classStats.source === 'sediment' ? 'drainage from sediment' : '']
+          .filter(Boolean).join(' \u00b7 ');
         ui.classnote.textContent = share
-          + `   confidence ${(classStats.sure * 100).toFixed(0)}%`
+          + ` \u00b7 confidence ${(classStats.sure * 100).toFixed(0)}%`
           + (cues ? `\n${cues}` : '')
-          + (classBlend ? `   ${blendedCells} blended` : '')
-          + (classStats.source === 'sediment' ? '   from sediment' : '')
+          + (extra ? `\n${extra}` : '')
           + (repeats > 3 ? `\n${repeats} terrain repeats across the grid `
                            + `- raise relief scale to ${gridN}` : '')
           + (classStats.missed ? `   ${classStats.missed} unmatched` : '');
@@ -2496,6 +2663,8 @@ function frame() {
       console.warn(`tile order: ${orderStats.cycles} cycle(s) broken by depth `
                  + `key - relief has tilted boundary planes into disagreement`);
     }
+    if (ui.resn) ui.resn.textContent = `${Math.round((autoQuality ? renderScale : 1) * 100)}%`;
+    updateCard(viewerState());
     frames = 0; fpsTime = now;
   }
   if (ui.azim) ui.azim.textContent = cam.azimuth.toFixed(0) + '\u00b0';
@@ -2543,22 +2712,85 @@ function saveFrame() {
 // ============================================================ interaction
 
 let dragging = false, lastX = 0, lastY = 0;
+// Touch: one finger orbits, two pinch to zoom.
+const touches = new Map();
+let pinchFrom = 0;
+const pinchSpan = () => {
+  const [a, b] = [...touches.values()];
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+};
 canvas.addEventListener('pointerdown', (e) => {
-  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touches.size === 2) { dragging = false; pinchFrom = pinchSpan(); }
+  else { dragging = true; lastX = e.clientX; lastY = e.clientY; }
   canvas.setPointerCapture(e.pointerId);
 });
-canvas.addEventListener('pointerup', (e) => {
-  dragging = false; canvas.releasePointerCapture(e.pointerId);
-});
+const release = (e) => {
+  touches.delete(e.pointerId);
+  dragging = false;
+  if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+};
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
 canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
+  const locked = document.pointerLockElement === canvas;
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touches.size === 2 && pinchFrom > 0) {
+    const span = pinchSpan();
+    if (!cam.fly && span > 0) {
+      const near = Math.max(0.05, 0.5 * (tileSize || 0.1));
+      zoomGoal = Math.max(near, (zoomGoal || cam.distance) * pinchFrom / span);
+    }
+    pinchFrom = span;
+    return;
+  }
+  if (!dragging && !locked) return;
   // Orbit swings the eye around a point; fly turns the view about the eye.
+  // With the pointer locked (walking) the movement comes as deltas.
+  const dx = locked ? e.movementX * 0.7 : e.clientX - lastX;
+  const dy = locked ? e.movementY * 0.7 : e.clientY - lastY;
   const s = cam.fly ? 0.18 : -0.3;
-  cam.azimuth = ((cam.azimuth + (e.clientX - lastX) * s) % 360 + 360) % 360;
+  cam.azimuth = ((cam.azimuth + dx * s) % 360 + 360) % 360;
   cam.elevation = Math.max(-89, Math.min(89,
-    cam.elevation + (e.clientY - lastY) * (cam.fly ? -0.18 : 0.3)));
+    cam.elevation + dy * (cam.fly ? -0.18 : 0.3)));
   lastX = e.clientX; lastY = e.clientY;
 });
+// Walking: a click locks the pointer so the mouse looks around, as in games.
+canvas.addEventListener('click', () => {
+  if (cam.walk && document.pointerLockElement !== canvas && canvas.requestPointerLock) {
+    try { canvas.requestPointerLock(); } catch (e) { /* drag still looks */ }
+  }
+});
+
+// Walk: first person on the ground. Sizes assume the capture is in metres.
+const EYE_HEIGHT = 1.7, WALK_SPEED = 1.4;
+function setWalk(on) {
+  if (on === cam.walk) return;
+  if (on) {
+    if (!cam.fly) cam.setFly(true);
+    const t = cam.target;
+    cam.pos = [t[0], t[1], height(t[0], t[1]) + EYE_HEIGHT];
+    cam.elevation = 4;
+    cam.walk = true;
+    camVel.fill(0);
+  } else {
+    cam.walk = false;
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+    cam.distance = 6 * (tileSize || 1);
+    cam.setFly(false);
+    cam.elevation = Math.max(cam.elevation, 12);
+    if (ui.freefly) ui.freefly.checked = false;
+  }
+  if (ui.viewWalk) {
+    ui.viewWalk.textContent = on ? 'leave walk (V)' : 'walk on it';
+    ui.viewWalk.classList.toggle('on', on);
+  }
+  if (ui.flynote) {
+    ui.flynote.textContent = on
+      ? 'WASD walks · shift runs · click, then the mouse looks · Esc frees the mouse · V leaves'
+      : 'drag orbits · WASD moves · scroll zooms';
+  }
+}
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (cam.fly) {
@@ -2583,6 +2815,24 @@ addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
 const camVel = [0, 0, 0];
 const EASE_S = 0.12;
 
+/** Keep the walker on the laid-out world and at eye height over the same
+ *  ground the splats are drawn on (detail relief included). */
+function walkStep(sec) {
+  const p = cam.pos;
+  if (tileSize && gridN > 1) {
+    const a = gridAngle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+    const lim = 0.5 * gridN * tileSize - 0.25 * tileSize;
+    const lx = Math.max(-lim, Math.min(lim, ca * p[0] + sa * p[1]));
+    const ly = Math.max(-lim, Math.min(lim, -sa * p[0] + ca * p[1]));
+    p[0] = ca * lx - sa * ly;
+    p[1] = sa * lx + ca * ly;
+  }
+  const want = height(p[0], p[1]) + EYE_HEIGHT;
+  // A short ease, so the fine creases do not shake the view.
+  p[2] += (want - p[2]) * (1 - Math.exp(-sec / 0.08));
+  if (p[2] < want - 0.5) p[2] = want - 0.5;
+}
+
 function moveCamera(dt) {
   if (!splatCount || !(dt > 0)) return;
   const sec = Math.min(dt, 100) / 1000;
@@ -2597,10 +2847,17 @@ function moveCamera(dt) {
     }
   }
   const b = cam.basis();
-  const fast = held.has('shift') ? 4 : 1;
+  const fast = held.has('shift') ? (cam.walk ? 3 : 4) : 1;
   const want = [0, 0, 0];
   let speed, fwd, rgt;
-  if (cam.fly) {
+  if (cam.walk) {
+    // Level movement at walking pace, whatever the view's pitch.
+    speed = WALK_SPEED * fast;
+    const fl = Math.hypot(b.forward[0], b.forward[1]) || 1;
+    fwd = [b.forward[0] / fl, b.forward[1] / fl, 0];
+    const rl = Math.hypot(b.right[0], b.right[1]) || 1;
+    rgt = [b.right[0] / rl, b.right[1] / rl, 0];
+  } else if (cam.fly) {
     speed = cam.speed * fast;                       // units per second
     fwd = b.forward;
     rgt = b.right;
@@ -2617,8 +2874,8 @@ function moveCamera(dt) {
   if (held.has('s')) add(fwd, -speed);
   if (held.has('d')) add(rgt, speed);
   if (held.has('a')) add(rgt, -speed);
-  if (held.has('e')) want[2] += speed;
-  if (held.has('q')) want[2] -= speed;
+  if (!cam.walk && held.has('e')) want[2] += speed;
+  if (!cam.walk && held.has('q')) want[2] -= speed;
 
   const k = 1 - Math.exp(-sec / EASE_S);
   let still = true;
@@ -2627,9 +2884,11 @@ function moveCamera(dt) {
     if (Math.abs(camVel[i]) < 1e-4 * Math.max(speed, 1e-3)) camVel[i] = 0;
     if (camVel[i]) still = false;
   }
+  if (cam.walk) walkStep(sec);
   if (still) return;
   const p = cam.fly ? cam.pos : cam.target;
   for (let i = 0; i < 3; i++) p[i] += camVel[i] * sec;
+  if (cam.walk) walkStep(sec);
 
   // Keep the orbit target on the map; past the grid there is nothing to see.
   if (!cam.fly && tileSize && gridN > 1) {
@@ -2649,24 +2908,27 @@ function moveCamera(dt) {
 async function openTileset(fileList) {
   const list = [...(fileList || [])];
   if (!list.length) return;
-  overlay.classList.remove('hidden');
-  const msg = overlay.querySelector('.msg b');
-  msg.textContent = 'opening ' + list[0].name;
-  bar.style.width = '20%';
+  const say = (t, ms) => {
+    if (!ui.busy) return;
+    ui.busy.textContent = t;
+    ui.busy.style.display = 'block';
+    clearTimeout(openTileset.t);
+    if (ms) openTileset.t = setTimeout(() => { ui.busy.style.display = 'none'; }, ms);
+  };
+  say('opening ' + list[0].name + '…');
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   try {
     const t = await openDrop(list);
-    bar.style.width = '70%';
     const d = describe(t.meta);
     // Without metadata the tile size is a guess; say so.
     if (d.note) console.warn(`${t.name}: ${d.note}; tiling may be wrong`);
-    msg.textContent = 'loading ' + t.name;
+    loadedScene = t.name.replace(/\.(zip|splat|json)$/i, '');
     load(t.buffer, t.meta);
-    bar.style.width = '100%';
+    adoptAtlas(bakedAtlas);
+    say(`opened ${t.name}` + (d.note ? ` (${d.note})` : ''), 4000);
   } catch (err) {
     console.error(err);
-    msg.textContent = 'could not open: ' + err.message;
-    bar.style.width = '0%';
-    setTimeout(() => overlay.classList.add('hidden'), 4000);
+    say('could not open: ' + err.message, 6000);
   }
 }
 
@@ -2714,10 +2976,14 @@ window.addEventListener('drop', (e) => {
   document.body.appendChild(hint);
 }
 
-document.getElementById('fov').addEventListener('input',
-  (e) => { cam.fov = +e.target.value; });
-document.getElementById('gain').addEventListener('input',
-  (e) => { gain = +e.target.value; });
+on('fov', 'input', (e) => {
+  cam.fov = +e.target.value;
+  if (ui.fovn) ui.fovn.textContent = `${cam.fov}\u00b0`;
+});
+on('gain', 'input', (e) => {
+  gain = +e.target.value;
+  if (ui.gainn) ui.gainn.textContent = gain.toFixed(2);
+});
 on('sorting', 'change', (e) => {
   sortingEnabled = e.target.checked;
   lastSortKey = '';
@@ -2741,8 +3007,11 @@ function markReliefScale() {
 
 on('grid', 'input', (e) => {
   gridN = +e.target.value;
-  // Relief scale follows the grid until the scale slider is touched.
-  if (field && !reliefScaleTouched && ui.reliefscale) {
+  // Relief scale follows the grid until the scale slider is touched; in
+  // Explore, where that slider is hidden, it always follows.
+  const explore = !document.body.classList.contains('expert');
+  if (field && (!reliefScaleTouched || explore) && ui.reliefscale) {
+    reliefScaleTouched = false;
     const want = Math.min(+ui.reliefscale.max, Math.max(4, gridN));
     ui.reliefscale.value = String(want);
     reliefScale = want;
@@ -2778,6 +3047,10 @@ on('exposure', 'input', (e) => {
   exposure = +e.target.value;
   ui.exposuren.textContent = exposure.toFixed(2);
 });
+on('macro', 'input', (e) => {
+  macro = +e.target.value;
+  ui.macron.textContent = macro.toFixed(2);
+});
 on('saturation', 'input', (e) => {
   saturation = +e.target.value;
   ui.saturationn.textContent = saturation.toFixed(2);
@@ -2800,6 +3073,12 @@ function setFigureMode(on) {
 on('expert', 'change', (e) => {
   // Remembered across visits.
   document.body.classList.toggle('expert', e.target.checked);
+  // Back in Explore the relief scale slider is hidden, so a scale below the
+  // world size (landforms mirrored and repeated) could not be undone there.
+  if (!e.target.checked && field && tileSize && reliefScale < gridN && ui.reliefscale) {
+    ui.reliefscale.value = String(Math.min(+ui.reliefscale.max, gridN));
+    ui.reliefscale.dispatchEvent(new Event('input'));
+  }
   try { localStorage.setItem('bozkir.expert', e.target.checked ? '1' : ''); }
   catch (err) { /* private window: the choice just does not persist */ }
 });
@@ -2817,18 +3096,32 @@ window.addEventListener('keydown', (e) => {
   // P saves a PNG; F toggles figure mode (the checkbox is hidden with the panel).
   if (k === 'p') shotWanted = true;
   else if (k === 'f') setFigureMode(!figureMode);
+  else if (k === 'v' && splatCount) setWalk(!cam.walk);
   else if (k === 'escape' && figureMode) setFigureMode(false);
+  else if (k === 'escape' && cam.walk && document.pointerLockElement !== canvas) setWalk(false);
 });
 on('figexit', 'click', () => setFigureMode(false));
 on('farfield', 'change', (e) => { farOn = e.target.checked; });
 if (ui.gpuname) {
-  ui.gpuname.textContent = String(gpuName).replace(/^ANGLE \((.*)\)$/, '$1');
-  // Warn when it looks like an integrated or software GPU.
+  // Privacy-minded browsers (Brave) answer with their own name or a
+  // made-up string; say so rather than print it as a GPU.
+  const known = /nvidia|geforce|quadro|radeon|amd|intel|apple|mali|adreno|powervr|swiftshader|llvmpipe|angle|direct3d|vulkan|metal|opengl/i;
+  ui.gpuname.textContent = known.test(gpuName)
+    ? String(gpuName).replace(/^ANGLE \((.*)\)$/, '$1') : 'hidden by the browser';
+  // Warn when it looks like an integrated or software GPU, once, where it
+  // can be seen: it costs a laptop most of its frame rate.
   if (/intel|uhd|iris|integrated|swiftshader|llvmpipe/i.test(gpuName)) {
-    ui.gpuname.style.color = '#d9a441';
-    ui.gpuname.title = 'This is an integrated or software GPU. If the machine has '
+    const tip = 'This is an integrated or software GPU. If the machine has '
       + 'a dedicated graphics card, set the browser to "High performance" in '
       + 'Windows Settings > System > Display > Graphics.';
+    ui.gpuname.style.color = '#d9a441';
+    ui.gpuname.title = tip;
+    setTimeout(() => {
+      if (!ui.busy) return;
+      ui.busy.textContent = 'drawing on an integrated GPU: slower than it could be (research mode shows which)';
+      ui.busy.style.display = 'block';
+      setTimeout(() => { ui.busy.style.display = 'none'; }, 7000);
+    }, 2500);
   }
 }
 on('detailon', 'change', (e) => { detailOn = e.target.checked; scheduleRegenerate(); });
@@ -2839,6 +3132,7 @@ on('detailamt', 'input', (e) => {
 });
 on('orbit', 'change', (e) => { orbiting = e.target.checked; });
 on('freefly', 'change', (e) => {
+  if (cam.walk) setWalk(false);
   cam.setFly(e.target.checked);
   ui.flynote.textContent = cam.fly
     ? 'drag looks around, WASD flies, Q/E down and up, shift is faster, '
@@ -2846,9 +3140,11 @@ on('freefly', 'change', (e) => {
     : 'drag orbits, WASD slides the centre, scroll zooms';
   if (ui.speedn) ui.speedn.textContent = cam.speed.toFixed(2);
 });
-for (const [id, elev, dist] of [['viewGround', 3, 8], ['viewWalk', 12, 6],
+on('viewWalk', 'click', () => setWalk(!cam.walk));
+for (const [id, elev, dist] of [['viewGround', 3, 8],
                                 ['viewSurvey', 32, 14], ['viewTop', 85, 18]]) {
   on(id, 'click', () => {
+    setWalk(false);
     if (cam.fly) { cam.setFly(false); ui.freefly.checked = false; }
     cam.elevation = elev;
     cam.distance = (tileSize || 1) * dist;
@@ -2944,6 +3240,7 @@ on('reseed', 'click', () => {
   scheduleRegenerate();
 });
 on('reset', 'click', () => {
+  setWalk(false);
   cam.azimuth = 45; cam.elevation = 25;
 });
 
@@ -2952,7 +3249,11 @@ on('reset', 'click', () => {
 on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
 
 on('classrule', 'change', (e) => { classOn = e.target.checked; scheduleRegenerate(); });
-on('classswap', 'change', (e) => { classSwap = e.target.checked; scheduleRegenerate(); });
+on('classswap', 'change', (e) => {
+  classSwap = e.target.checked;
+  updateShareLabel();
+  scheduleRegenerate();
+});
 on('classaltitude', 'input', (e) => {
   classAltitude = +e.target.value;
   ui.classaltituden.textContent = `${Math.round(classAltitude * 100)}%`;
@@ -3386,21 +3687,23 @@ async function loadPresets() {
   } catch (e) { presets = {}; }
   if (!ui.presetchips) return;
   for (const [name, p] of Object.entries(presets)) {
-    if (name.startsWith('_')) continue;
+    if (name.startsWith('_') || p.chapter) continue;
     const b = document.createElement('button');
     b.type = 'button';
     b.dataset.preset = name;
+    if (p.research) b.classList.add('adv');
     b.textContent = p.short || name;
     b.dataset.tip = p.label || name;
-    b.title = p.label || name;
     b.addEventListener('click', () => applyPreset(name));
     ui.presetchips.appendChild(b);
   }
+  setChapters(presets);
   // If the ground arrived before this file, the URL's preset is still waiting.
   if (pendingPreset && presets[pendingPreset] && field) {
     const name = pendingPreset;
     pendingPreset = null;
     applyPreset(name);
+    applyView(takeView());
   }
 }
 
@@ -3419,16 +3722,31 @@ function setControl(id, value) {
   }
 }
 
+// Keys in views.json that are about the preset, not panel controls.
+const PRESET_META = new Set(['label', 'short', 'view', 'research', 'chapter',
+                             'caption', 'camera']);
+
 function applyPreset(name) {
   const p = presets[name];
   if (!p) { console.warn(`no preset '${name}'`); return; }
   // Grid first, since 'reliefscale: grid' and the rule both depend on it.
   if ('grid' in p) setControl('grid', p.grid);
   for (const [k, v] of Object.entries(p)) {
-    if (k === 'label' || k === 'short' || k === 'grid' || k === 'view') continue;
+    if (PRESET_META.has(k) || k === 'grid') continue;
     setControl(k, k === 'reliefscale' && v === 'grid' ? gridN : v);
   }
   if (p.view) document.getElementById(p.view)?.click();
+  // A chapter frames its own shot: angles in degrees, distance in tiles.
+  if (p.camera) {
+    setWalk(false);
+    if (cam.fly) { cam.setFly(false); if (ui.freefly) ui.freefly.checked = false; }
+    const t = tileSize || 1;
+    if (p.camera.azimuth != null) cam.azimuth = p.camera.azimuth;
+    if (p.camera.elevation != null) cam.elevation = p.camera.elevation;
+    if (p.camera.distance != null) { cam.distance = p.camera.distance * t; zoomGoal = 0; }
+    cam.target = [0, 0, height(0, 0)];
+  }
+  if (!p.chapter) endChapters();
   if (ui.presetchips) {
     for (const b of ui.presetchips.children) b.classList.toggle('on', b.dataset.preset === name);
   }
@@ -3450,13 +3768,16 @@ on('heightpick', 'change', (e) => {
 
 /** Nothing to load: build the starter tileset and lay it on generated
  *  ground, so the viewer never opens empty. */
-function loadStarter() {
+function loadStarter(note) {
   if (splatCount) return;
   const { buffer, manifest } = starterTileset();
   loadedScene = 'starter';
   load(buffer, manifest);
+  adoptAtlas(bakedAtlas);
+  loadDone(note);
   loadCatalogue();
-  if (!pendingPreset) pendingPreset = 'readme';
+  // A shared link carries every setting itself; no default under it.
+  if (!pendingPreset && !params.has('v')) pendingPreset = 'readme';
   useGeneratedField(wantedGen || 'rolling', wantedGen ? wantedSeed : 0,
                     wantedGen ? wantedSize : 256);
   console.log('no scene found: showing the starter tileset');
@@ -3469,16 +3790,26 @@ async function loadFirst(names) {
     let b = null, m = null;
     try {
       [b, m] = await Promise.all([
-        fetch(`./data/${name}.splat`).then(r => (r.ok ? r.arrayBuffer() : null)),
+        fetchBuffer(`./data/${name}.splat`, (got, total) => loadProgress(
+          0.05 + 0.85 * got / total,
+          `downloading ${name}: ${(got / 1e6).toFixed(1)} of ${(total / 1e6).toFixed(1)} MB`)),
         fetch(`./data/${name}.json`).then(r => (r.ok ? r.json() : null)).catch(() => null),
       ]);
     } catch (e) { continue; }
     if (!b || splatCount) continue;
     loadedScene = name;
+    loadProgress(0.95, 'building the world…');
+    // Let the note paint before the main thread is busy unpacking.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     load(b, m);
+    loadProgress(1, 'ready');
+    loadDone();
+    // A plain capture may get no height field, so no adoptField to apply
+    // a shared view from; give it one here.
+    if (plainScene) setTimeout(() => applyView(takeView()), 800);
     // With nothing asked for, a tileset opens on the README settings; a
     // plain capture keeps its 'no rule' preset.
-    if (!wanted && !pendingPreset && !plainScene) pendingPreset = 'readme';
+    if (!wanted && !pendingPreset && !plainScene && !params.has('v')) pendingPreset = 'readme';
     loadAtlas(name);
     loadCatalogue();
     // The height field arrives after the splats; the scene shows meanwhile.
@@ -3489,9 +3820,36 @@ async function loadFirst(names) {
   return false;
 }
 
+/** Fetch a file with progress; null if it is not there. */
+async function fetchBuffer(url, onProgress) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const total = +r.headers.get('content-length') || 0;
+  if (!r.body || !total || r.headers.get('content-encoding')) return r.arrayBuffer();
+  const reader = r.body.getReader();
+  const parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    onProgress(got, total);
+  }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const part of parts) { out.set(part, o); o += part.length; }
+  return out.buffer;
+}
+
+loadProgress(0.03, 'looking for the tileset…');
 if (wanted === 'starter') loadStarter();
 else loadFirst(wanted ? [wanted] : DEFAULT_SCENES)
-  .then((ok) => { if (!ok) loadStarter(); });
+  .then((ok) => {
+    if (!ok) loadStarter(wanted
+      ? `There is no tileset called "${wanted}" here, so this is the starter scene: synthetic tiles made in the browser.`
+      : 'The desert tileset did not load, so this is the starter scene: synthetic tiles made in the browser.');
+  });
 
 /** Look for a height field beside a tileset and adopt it if there is one. */
 async function useHeightField(name) {
@@ -3586,6 +3944,9 @@ function adoptField(f) {
     pendingPreset = null;
     setTimeout(() => applyPreset(name), 0);
   }
+  // A shared link's view goes last, over whatever preset came first (if
+  // the presets file is still on its way, loadPresets applies both).
+  if (!pendingPreset) setTimeout(() => applyView(takeView()), 0);
   if (ui.relief && +ui.relief.value <= 0) {
     // With relief at zero a new field is invisible; lift it so it shows.
     ui.relief.value = Math.min(1.0, +ui.relief.max);
@@ -3597,6 +3958,61 @@ function adoptField(f) {
   regenerate();
   console.log(`height field: ${f.describe()}`);
 }
+
+/** Apply a shared link's view: controls first (grid before the rest, as
+ *  presets do), then the camera. */
+function applyView(v) {
+  if (!v) return;
+  const c = v.c || {};
+  if ('grid' in c) setControl('grid', c.grid);
+  for (const [k, val] of Object.entries(c)) if (k !== 'grid') setControl(k, val);
+  const m = v.cam;
+  if (m) {
+    if (m.walk) {
+      setWalk(true);
+      cam.pos = m.walk.slice();
+    } else {
+      setWalk(false);
+      if (cam.fly) { cam.setFly(false); if (ui.freefly) ui.freefly.checked = false; }
+      if (m.t) cam.target = m.t.slice();
+      if (m.d) { cam.distance = m.d; zoomGoal = 0; }
+    }
+    if (m.az != null) cam.azimuth = m.az;
+    if (m.el != null) cam.elevation = m.el;
+    if (m.fov) setControl('fov', m.fov);
+  }
+  console.log('view from the link applied');
+}
+
+const overlayEl = document.getElementById('overlay');
+function introOpen() { return overlayEl && !overlayEl.classList.contains('hidden'); }
+
+/** What the page around the canvas needs to know (ui.js). */
+function viewerState() {
+  const meta = tilesetMeta[loadedScene] || {};
+  const mpp = cam.fly ? 0
+    : 2 * cam.distance * Math.tan(cam.fov * Math.PI / 360) / Math.max(canvas.clientHeight, 1);
+  return {
+    scene: loadedScene || 'scene', splats: splatCount, plain: plainScene,
+    synthetic: !!(loadedManifest && loadedManifest.starter),
+    names: materialNames(), colours: classColours, counts: tileClassCounts,
+    ruleOn: classOn && classCount > 1,
+    collects: tileClassFor(0), exposed: tileClassFor(classCount - 1),
+    tiles: patches.length, tileSize, world: gridN * tileSize,
+    note: meta.note || '', units: meta.units || (loadedManifest && loadedManifest.units) || '',
+    metresPerPixel: mpp,
+    // How many times the height field repeats across the world (mirrored).
+    repeats: field && reliefScale > 0 && reliefScale < gridN ? gridN / reliefScale : 0,
+    ground: field ? field.describe() : 'analytic surface',
+  };
+}
+
+initUI({
+  state: viewerState,
+  camera: () => ({ target: cam.target, azimuth: cam.azimuth, elevation: cam.elevation,
+                   distance: cam.distance, fov: cam.fov, walk: cam.walk, pos: cam.pos }),
+  applyPreset: (name) => applyPreset(name),
+});
 
 paintSliders();
 frame();
