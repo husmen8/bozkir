@@ -20,7 +20,9 @@
     "detailon": true,
     "tints": false,
     "classview": false,
-    "macro": 0.5
+    "macro": 0.5,
+    "decals": true,
+    "decalterrain": true
   },
   "vista": {
     "short": "vista",
@@ -45,7 +47,9 @@
     "detailon": true,
     "tints": false,
     "classview": false,
-    "macro": 0.5
+    "macro": 0.5,
+    "decals": true,
+    "decalterrain": true
   },
   "heights": {
     "short": "by height",

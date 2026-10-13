@@ -657,9 +657,14 @@
                         <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
                         <label><span id="classbalancelbl">share</span><b id="classbalancen">50%</b></label>
                     </div>
+                    <div id="classshares"></div>
                     <div class="s" data-info="rule" data-tip="How much altitude counts against shape. 0: shape only. 1: smoothed height only.">
                         <input type="range" id="classaltitude" min="0" max="1" step="0.05" value="0.4">
                         <label>follows height<b id="classaltituden">40%</b></label>
+                    </div>
+                    <div class="s adv" data-info="rule" data-tip="How far the height where one material gives way to the next wanders across the world: 0 is one contour everywhere; more lets green climb higher here and sand reach lower there, with islands of each. A tileset that measured its capture starts at what the capture shows.">
+                        <input type="range" id="classwander" min="0" max="1" step="0.05" value="0">
+                        <label>height line wanders<b id="classwandern">0%</b></label>
                     </div>
                     <div class="s adv" data-info="rule" data-tip="Width of the undecided band. It cannot move the boundary.">
                         <input type="range" id="classsharp" min="0.5" max="6" step="0.5" value="2">
@@ -671,10 +676,19 @@
                     </div>
                     <label class="c" data-info="share" data-tip="Which material collects in hollows and channels."><input type="checkbox" id="classswap"> swap materials</label>
                     <label class="c adv" data-info="blend" data-tip="Near a tie, dissolve both materials splat by splat."><input type="checkbox" id="classblend"> blend at boundaries</label>
+                    <label class="c adv" data-info="blend" data-tip="Each spot is one material or the other; only a narrow wobbly strip dissolves, where taller splats win. Off: splat by splat."><input type="checkbox" id="blendspots" checked> blend by spot</label>
+                    <label class="c adv" data-info="blend" data-tip="With frames: next to another material a cell takes the centres of its own whose tone lies nearest that one's, so the two meet in their closest shades. The capture's own centres, ordered; nothing tinted."><input type="checkbox" id="tonegrade" checked> tones meet at boundaries</label>
                     <div class="s adv" data-tip="How undecided a cell must be to blend. Wider costs more draw calls.">
                         <input type="range" id="blendwidth" min="0.05" max="1" step="0.05" value="0.35">
                         <label>blend width<b id="blendwidthn">0.35</b></label>
                     </div>
+                    <label class="c" data-info="decals" data-tip="Distinct pieces of the capture, a shrub and its shadow, set into a few plain tiles. Needs a tileset made with scripts/decals.py."><input type="checkbox" id="decals"> decals</label>
+                    <div class="s" data-info="decals" data-tip="At most one decal per block of this many tiles each way; the same decal is never placed near itself.">
+                        <input type="range" id="decalspacing" min="2" max="12" step="1" value="5">
+                        <label>decal spacing<b id="decalspacingn">5 tiles</b></label>
+                    </div>
+                    <label class="c" data-info="decals" data-tip="More decals where the land is turning to the other material, fewer out in the open, and neighbours alike."><input type="checkbox" id="decalterrain"> decals follow the terrain</label>
+                    <div class="out adv" id="decalnote">—</div>
                     <label class="c" data-info="decision" data-tip="Paints the class the rule chose over each cell, grey where it was nearly a tie."><input type="checkbox" id="classview"> show the decision</label>
                     <div class="out adv" id="classnote">—</div>
                 </div>

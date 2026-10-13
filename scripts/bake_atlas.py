@@ -4,8 +4,8 @@
     python scripts/bake_atlas.py desert --res 96
 
 Writes web/data/<name>.atlas.png and .atlas.json, which the viewer's far
-field draws distant ground with. Re-bake after every export: an atlas with
-a different tile count is ignored.
+field draws distant ground with (with frames, the centres too). Re-bake
+after every export: an atlas with a different tile count is ignored.
 """
 
 import argparse
@@ -37,9 +37,11 @@ def main(argv=None):
     img, layout = tile_atlas(m, s, args.res)
     Image.fromarray(img, "RGBA").save(args.dir / f"{args.name}.atlas.png")
     (args.dir / f"{args.name}.atlas.json").write_text(json.dumps(layout))
-    cover = img[..., 3].mean() / 255
-    print(f"  {layout['count']} tiles at {args.res}px, "
-          f"{layout['cols']}x{layout['rows']} atlas, mean coverage {cover:.0%}")
+    extra = layout["count"] - layout["tiles"]
+    print(f"  {layout['tiles']} tiles" + (f" and {extra} centres" if extra else "")
+          + f" at {args.res}px, {layout['cols']}x{layout['rows']} atlas; each laid over "
+          f"its own mean where little covers it, and matched to its colour from "
+          f"{layout['elevation']:g} degrees")
     print(f"  wrote {args.name}.atlas.png and .atlas.json in {args.dir}")
     return 0
 

@@ -145,7 +145,7 @@ def stratified_keep(p, budget, size, up_axis=2):
         keep = np.concatenate([keep, rest[:budget - len(keep)]])
     return np.sort(keep)
 
-def rendered_coverage(p, size, up_axis=2, resolution=80, cap=12_000):
+def rendered_coverage(p, size, up_axis=2, resolution=80, cap=12_000, boost=1.0):
     """Fraction of the tile a top-down render fills.
 
     The cheap estimate (coverage) can be off by 0.14 and let holed patches
@@ -153,21 +153,32 @@ def rendered_coverage(p, size, up_axis=2, resolution=80, cap=12_000):
     random subset of `cap` splats and the density is restored per pixel:
     1 - (1 - alpha)^(1/f) for a fraction f. Per pixel, not on the average,
     which would push empty regions towards full.
+
+    `boost`: the coverage after each opacity is
+    raised to 1 - (1 - a)^k (what fill_opacity does), from one render. Exact
+    per pixel: compositing multiplies the (1 - a) of the splats. A tuple
+    gives a list, one per value, from the same render.
     """
     from .graphcut import render_patch
     n = len(p)
+    one = isinstance(boost, (int, float))
+    ks = (boost,) if one else tuple(boost)
     if not n:
-        return 0.0
+        return 0.0 if one else [0.0] * len(ks)
+    f = 1.0
     if n <= cap:
-        return float(render_patch(p, size, resolution, up_axis)[1].mean())
+        alpha = render_patch(p, size, resolution, up_axis)[1]
+    else:
+        idx = np.sort(np.random.default_rng(0).choice(n, size=cap, replace=False))
+        alpha = render_patch(p.subset(idx), size, resolution, up_axis)[1]
+        f = cap / n
+    keep = 1.0 - np.minimum(alpha, 0.999)
+    out = [float(alpha.mean()) if k / f == 1.0 else float(np.mean(1.0 - keep ** (k / f)))
+           for k in ks]
+    return out[0] if one else out
 
-    idx = np.sort(np.random.default_rng(0).choice(n, size=cap, replace=False))
-    alpha = render_patch(p.subset(idx), size, resolution, up_axis)[1]
-    f = cap / n
-    return float(np.mean(1.0 - (1.0 - np.minimum(alpha, 0.999)) ** (1.0 / f)))
 
-
-def coverage(p, size, up_axis=2, grid=16):
+def coverage(p, size, up_axis=2, grid=16, boost=1.0):
     """Fast estimate of the fraction of the tile a render would fill.
 
     Splat area (opacity-weighted) binned on a grid, and per bin the chance a
@@ -185,8 +196,12 @@ def coverage(p, size, up_axis=2, grid=16):
         return 0.0
 
     sc = np.sort(p.scale[inside], axis=1)
-    # Two-sigma footprint, weighted by how opaque the splat is.
-    area = np.pi * (2 * sc[:, 2]) * (2 * sc[:, 1]) * p.opacity[inside]
+    # Two-sigma footprint, weighted by how opaque the splat is (after a
+    # fill of `boost`, see rendered_coverage).
+    op = p.opacity[inside].astype(np.float64)
+    if boost != 1.0:
+        op = 1.0 - (1.0 - np.minimum(op, 0.999)) ** boost
+    area = np.pi * (2 * sc[:, 2]) * (2 * sc[:, 1]) * op
 
     ij = np.clip(((xy[inside] + half) / size * grid).astype(int), 0, grid - 1)
     binned = np.bincount(ij[:, 0] * grid + ij[:, 1], weights=area,
@@ -249,7 +264,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                  max_tilt=12.0, max_below=0.5, features=False,
                  edge_flat=0.20, edge_margin=0.22, min_separation=1.0,
                  min_cover=0.80, extract_margin=0.35, cover_margin=0.10,
-                 verbose=True, stats=None, progress=None, screen_cap=4_000):
+                 verbose=True, stats=None, progress=None, screen_cap=4_000,
+                 faint_fill=0.0):
     """Search the ground plane for the k best non-overlapping patches.
 
     Candidates are cut larger by `extract_margin`, since levelling a square
@@ -271,7 +287,14 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
           exact       91.0 s        22
 
     Same patches and coverage; 4,000 leaves margin for sparser captures.
+
+    `faint_fill`: judge coverage as it will be after the export's fill of at
+    most this many times the opacity (0 = as captured). A faint but whole
+    layer then passes; real gaps, with no splat to raise, still fail. Holes
+    are recorded as "faint" (the export's full fill, 6x, would cover them)
+    or "gaps" (it would not).
     """
+    full_fill = 6.0
     plane = [i for i in range(3) if i != up_axis]
     lo = np.percentile(s.xyz[:, plane], 2, axis=0)
     hi = np.percentile(s.xyz[:, plane], 98, axis=0)
@@ -287,6 +310,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
     rendered = 0
     rejected = {"sparse": 0, "buried": 0, "tilt": 0, "rim": 0,
                 "holes": 0, "score": 0}
+    where = []          # (x, y, reason) of each rejected position
     total = len(xs) * len(ys)
     done = 0
     index = PlaneIndex(s, up_axis, cell=size / 2.0)
@@ -302,6 +326,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                               recentre=False)
             if len(p) < 2000:
                 rejected["sparse"] += 1
+                where.append((float(x), float(y), "sparse"))
                 continue
             below = mass_below(p, up_axis, ground_level(p.xyz[:, up_axis],
                                                         thickness), thickness)
@@ -313,30 +338,40 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                                & (h_wide <= g_level + thickness))
             if below > max_below:
                 rejected["buried"] += 1
+                where.append((float(x), float(y), "buried"))
                 continue
             tilt = (band_stats(p, up_axis, size, edge_margin)[1] if features
                     else patch_tilt(p, up_axis))
             if tilt > max_tilt:
                 rejected["tilt"] += 1
+                where.append((float(x), float(y), "tilt"))
                 continue
             sc, info = score_patch(p, up_axis, size, features, edge_margin)
             if sc <= 0:
                 rejected["score"] += 1
+                where.append((float(x), float(y), "score"))
                 continue
             # Estimate first to throw out hopeless cases; anything that
             # might pass is rendered.
-            est = coverage(p, size, up_axis)
+            est = coverage(p, size, up_axis, boost=faint_fill or 1.0)
             if est < min_cover - cover_margin:
                 rejected["holes"] += 1
+                full = coverage(p, size, up_axis, boost=full_fill)
+                where.append((float(x), float(y),
+                              "faint" if full >= min_cover else "gaps"))
                 continue
-            info["cover"] = rendered_coverage(p, size, up_axis,
-                                              cap=screen_cap)
+            info["cover"], judged, full = rendered_coverage(
+                p, size, up_axis, cap=screen_cap,
+                boost=(1.0, faint_fill or 1.0, full_fill))
             rendered += 1
-            if info["cover"] < min_cover:
+            if judged < min_cover:
                 rejected["holes"] += 1
+                where.append((float(x), float(y),
+                              "faint" if full >= min_cover else "gaps"))
                 continue
             if features and info["edge_relief"] > edge_flat * size:
                 rejected["rim"] += 1
+                where.append((float(x), float(y), "rim"))
                 continue
             info["ground"] = g
             info["tilt"] = tilt
@@ -353,6 +388,7 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
         stats["viable"] = len(cands)
         stats["rendered"] = rendered
         stats["records"] = records
+        stats["rejected_at"] = where
     # Quiet unless asked (a sweep reports its own trail); the failure
     # message below travels with the exception either way.
     if verbose:
@@ -491,12 +527,14 @@ def save_search(key, cands, stats, cache_dir="data/cache"):
 # `--patches 0,1,2,4` indexes a list only those settings produce.
 SEARCH_KEYS = ("stride", "thickness", "max_tilt", "max_below", "features",
                "edge_flat", "edge_margin", "min_separation", "min_cover",
-               "cover_margin", "extract_margin")
+               "cover_margin", "extract_margin", "faint_fill")
 
 
 def search_kwargs(args, thickness=None):
     """The search settings out of a parsed argparse namespace."""
     kw = {k: getattr(args, k) for k in SEARCH_KEYS if hasattr(args, k)}
+    if not kw.get("faint_fill"):
+        kw.pop("faint_fill", None)       # off: same key as before it existed
     if thickness is not None:
         kw["thickness"] = thickness
     return kw
@@ -552,13 +590,27 @@ def choose(cands, k, size, min_separation=1.0):
     return chosen
 
 
+_RECALLED = {}          # this run's recalled searches, by key
+
+
 def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
-                  cache=True, progress=None, verbose=False):
+                  cache=True, progress=None, verbose=False, where=False):
     """The candidate list for these settings, searched or recalled.
-    Returns (cands, stats, hit)."""
+    Returns (cands, stats, hit). `where`: the stats must say where each
+    rejected position was (older caches do not, and are searched again)."""
     key = search_key(s, size, up_axis, settings)
+    if cache and key in _RECALLED:
+        # Cut once per run: rebuilding 800 candidates took seconds, and one
+        # export asks for the same list three times.
+        cands, stats = _RECALLED[key]
+        if not (where and "rejected_at" not in stats):
+            return list(cands), dict(stats), True
     if cache:
         blob = load_search(key, cache_dir)
+        if blob is not None and where and (
+                "rejected_at" not in blob["stats"]
+                or any(r[2] == "holes" for r in blob["stats"]["rejected_at"])):
+            blob = None                  # no record of where, or holes unsplit
         if blob is not None:
             thickness = settings.get("thickness", size * 0.25)
             cands = rebuild_candidates(
@@ -566,7 +618,8 @@ def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
                 settings.get("extract_margin", 0.35))
             stats = dict(blob["stats"])
             stats["records"] = blob["cands"]
-            return cands, stats, True
+            _RECALLED[key] = (cands, stats)
+            return list(cands), dict(stats), True
 
     stats = {}
     # Ask for everything and let choose() narrow it, so one stored list
@@ -580,7 +633,8 @@ def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
     if cache:
         storable = {k: v for k, v in stats.items() if k != "records"}
         save_search(key, stats.get("records", []), storable, cache_dir)
-    return cands, stats, False
+        _RECALLED[key] = (cands, stats)
+    return list(cands), stats, False
 
 
 def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
@@ -613,8 +667,11 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
                 s, size, up_axis, search, cache_dir=cache_dir, cache=cache,
                 progress=None if label.startswith("separation") else progress)
             chosen = choose(cands, k, size, sep)
+            # The search measured it; a recalled list keeps it. Rendering it
+            # again took most of a minute on desert v1, for nothing new.
             for _, _, p, info in chosen:
-                info["cover"] = rendered_coverage(p, size, up_axis)
+                if "cover" not in info:
+                    info["cover"] = rendered_coverage(p, size, up_axis)
         except SystemExit:
             chosen, stats, hit = [], {}, False
         trail.append((label, dict(settings), stats, len(chosen)))
@@ -855,6 +912,202 @@ def split_classes(cands, classes=2, per_class=4, weight=1.0, seed=0):
             else g for g in groups]
 
 
+def split_materials(cands, classes=3, tries=24, seed=0, peers=6):
+    """Candidates in `classes` groups by colour signature, as
+    split_classes, but robust to a few odd patches: seeding on the
+    furthest-apart pair, as split_classes does, lets three markers become
+    a material of their own. k-means from many seeded starts, keeping the
+    tightest; a group of fewer than `peers` patches (a material needs that
+    many anyway) is set aside as odd and the rest clustered again, and the
+    odd ones join their nearest group at the end. Judged by group size, not
+    by how tightly packed a patch's neighbours are: with 800 positions the
+    sand packed so tightly that all of desert v1's bush counted as odd.
+    Deterministic. Groups largest first, not narrowed."""
+    if len(cands) < classes:
+        return [list(cands)]
+    feats = np.array([appearance(c[2]) for c in cands], dtype=np.float64)
+    sd = feats.std(axis=0)
+    sd = np.maximum(sd, 0.1 * max(sd.max(), 1e-9))
+    everyone = (feats - feats.mean(axis=0)) / sd
+
+    def kmeans(z):
+        rng = np.random.default_rng(seed)
+        best, best_cost = None, np.inf
+        for _ in range(tries):
+            # k-means++ start: each next centre far from those already chosen.
+            centres = [z[rng.integers(len(z))]]
+            while len(centres) < classes:
+                d = np.min([((z - c) ** 2).sum(1) for c in centres], axis=0)
+                centres.append(z[rng.choice(len(z), p=d / max(d.sum(), 1e-12))])
+            centres = np.array(centres)
+            for _ in range(100):
+                labels = np.argmin(((z[:, None, :] - centres[None]) ** 2).sum(-1), axis=1)
+                new = np.array([z[labels == k].mean(0) if (labels == k).any() else centres[k]
+                                for k in range(classes)])
+                if np.allclose(new, centres):
+                    break
+                centres = new
+            cost = float(((z - centres[labels]) ** 2).sum())
+            if cost < best_cost - 1e-9:
+                best, best_cost = centres, cost
+        return best
+
+    use = np.arange(len(everyone))
+    for _ in range(len(everyone)):
+        centres = kmeans(everyone[use])
+        labels = np.argmin(((everyone[use][:, None, :] - centres[None]) ** 2).sum(-1), axis=1)
+        small = np.bincount(labels, minlength=classes) < peers
+        if not small.any() or (~small[labels]).sum() < classes:
+            break
+        use = use[~small[labels]]
+    best = np.argmin(((everyone[:, None, :] - centres[None]) ** 2).sum(-1), axis=1)
+    groups = [[cands[i] for i in np.flatnonzero(best == k)] for k in range(classes)]
+    return sorted([g for g in groups if g], key=len, reverse=True)
+
+
+def thickness_map(p, up_axis=2, cell=0.1):
+    """How thick the layer of splats is at each `cell` square (m): the
+    spread of their heights, weighted by how much each one shows from above
+    (opacity times footprint). Returns (grid, (x0, y0)); NaN where fewer
+    than 3 splats. Ground the photos saw well is a thin crust of splats; a
+    thick haze of see-through ones looks sharp only from afar, as desert
+    v1's bush does."""
+    plane = [i for i in range(3) if i != up_axis]
+    xy = p.xyz[:, plane].astype(np.float64)
+    z = p.xyz[:, up_axis].astype(np.float64)
+    sc = np.sort(p.scale, axis=1).astype(np.float64)
+    w = p.opacity * np.minimum(sc[:, 2] * sc[:, 1], cell * cell)
+    lo = xy.min(axis=0)
+    ij = np.floor((xy - lo) / cell).astype(np.int64)
+    nx, ny = ij.max(axis=0) + 1
+    key = ij[:, 1] * nx + ij[:, 0]
+    W = np.bincount(key, w, nx * ny)
+    m = np.bincount(key, w * z, nx * ny) / np.maximum(W, 1e-12)
+    v = np.bincount(key, w * z * z, nx * ny) / np.maximum(W, 1e-12) - m * m
+    out = np.sqrt(np.maximum(v, 0.0))
+    out[np.bincount(key, minlength=nx * ny) < 3] = np.nan
+    return out.reshape(ny, nx), (lo[0], lo[1])
+
+
+def thickness(p, up_axis=2):
+    """A patch's splat layer thickness (m), the median over its cells."""
+    g = thickness_map(p, up_axis)[0]
+    return float(np.nanmedian(g)) if np.isfinite(g).any() else 0.0
+
+
+def _material_space(groups):
+    """Each group's mean signature and the scale the distances use."""
+    feats = [np.array([appearance(c[2]) for c in g], dtype=np.float64) for g in groups]
+    every = np.concatenate([f for f in feats if len(f)])
+    sd = every.std(axis=0)
+    sd = np.maximum(sd, 0.1 * max(sd.max(), 1e-9))
+    means = np.array([f.mean(axis=0) / sd if len(f) else np.full(6, np.inf) for f in feats])
+    return means, sd
+
+
+def _blurred(log_scale, ok, blur):
+    """Cells whose splats are on average `blur` times the usual size: the
+    capture's smeared rim, seen by few photos. On desert v1 its dark smear
+    counted as bush."""
+    if not ok.any():
+        return np.zeros_like(ok)
+    return log_scale > np.median(log_scale[ok]) + np.log(blur)
+
+
+POORLY_SEEN = ("sparse", "faint", "gaps", "holes")
+
+
+def seen_points(found, stats):
+    """Search positions as (well seen, poorly seen): usable ones and those
+    turned down for their shape (too steep, buried, ...) against those
+    turned down because the photos saw little there (too few splats,
+    faint, gaps). desert v1's hazy rim is the second kind."""
+    where = stats.get("rejected_at", [])
+    good = [c[1] for c in found] + [(x, y) for x, y, r in where if r not in POORLY_SEEN]
+    bad = [(x, y) for x, y, r in where if r in POORLY_SEEN]
+    return good, bad
+
+
+def _well_seen(xy, seen, reach):
+    """Which points of `xy` lie nearer a well-seen search position than a
+    poorly seen one, and within `reach` of it."""
+    from scipy.spatial import cKDTree
+    good, bad = seen
+    if not good:
+        return np.ones(len(xy), dtype=bool)
+    dg = cKDTree(np.asarray(good, dtype=np.float64)).query(xy)[0]
+    db = (cKDTree(np.asarray(bad, dtype=np.float64)).query(xy)[0] if bad
+          else np.full(len(xy), np.inf))
+    return (dg <= db) & (dg <= reach)
+
+
+def material_map(s, groups, size, up_axis=2, step=0.5, min_splats=2000, blur=2.0,
+                 seen=None):
+    """The material every spot of the capture looks like, as class_shares
+    decides it, on a `step` grid: each value judged over the `size` square
+    around it. Returns (labels, (x0, y0)); -1 where too few splats,
+    blurred (see _blurred) or, given `seen` (seen_points), poorly seen."""
+    from scipy.ndimage import uniform_filter
+    means, sd = _material_space(groups)
+    plane = [i for i in range(3) if i != up_axis]
+    xy = s.xyz[:, plane].astype(np.float64)
+    lo = xy.min(axis=0)
+    ij = np.floor((xy - lo) / step).astype(np.int64)
+    w, h = ij.max(axis=0) + 1
+    key = ij[:, 1] * w + ij[:, 0]
+    rgb = s.base_rgb.astype(np.float64)
+    k = max(1, int(round(size / step)))
+    box = lambda v: uniform_filter(np.bincount(key, v, w * h).reshape(h, w), k,
+                                   mode="constant") * k * k
+    n = box(np.ones(len(key)))
+    m = np.stack([box(rgb[:, c]) for c in range(3)], axis=-1) / np.maximum(n, 1)[..., None]
+    m2 = np.stack([box(rgb[:, c] ** 2) for c in range(3)], axis=-1) / np.maximum(n, 1)[..., None]
+    f = np.concatenate([m, np.sqrt(np.maximum(m2 - m * m, 0.0))], axis=-1) / sd
+    labels = np.argmin([np.linalg.norm(f - mu, axis=-1) for mu in means], axis=0)
+    ok = n >= min_splats
+    ls = box(np.log(s.scale.max(axis=1).astype(np.float64))) / np.maximum(n, 1)
+    if seen is not None:
+        gy, gx = np.mgrid[0:h, 0:w]
+        at = np.c_[lo[0] + (gx.ravel() + 0.5) * step, lo[1] + (gy.ravel() + 0.5) * step]
+        ok &= _well_seen(at, seen, size).reshape(h, w)
+    labels[~ok | _blurred(ls, ok, blur)] = -1
+    return labels, (lo[0], lo[1])
+
+
+def class_shares(s, groups, size, up_axis=2, min_splats=2000, blur=2.0, seen=None):
+    """How much of the capture's ground looks like each group: every
+    `size` cell of the scene (on four half-shifted grids) goes to the
+    group whose mean colour signature is nearest, in the units
+    split_classes uses. A material the capture holds little of, a single
+    clump of scrub, scores low however many good patches it gave. The
+    smeared rim (_blurred) is not ground and is not counted, nor, given
+    `seen` (seen_points), ground the photos saw too little of."""
+    means, sd = _material_space(groups)
+    plane = [i for i in range(3) if i != up_axis]
+    xy = s.xyz[:, plane].astype(np.float64)
+    rgb = s.base_rgb.astype(np.float64)
+    logs = np.log(s.scale.max(axis=1).astype(np.float64))
+    counts = np.zeros(len(groups))
+    for shift in ((0, 0), (0.5, 0), (0, 0.5), (0.5, 0.5)):
+        ij = np.floor((xy - xy.min(axis=0)) / size + np.array(shift)).astype(np.int64)
+        key = ij[:, 0] * (ij[:, 1].max() + 1) + ij[:, 1]
+        cells, inv, n = np.unique(key, return_inverse=True, return_counts=True)
+        ok = n >= min_splats
+        ok &= ~_blurred(np.bincount(inv, logs) / n, ok, blur)
+        if seen is not None:
+            at = np.c_[np.bincount(inv, xy[:, 0]) / n, np.bincount(inv, xy[:, 1]) / n]
+            ok &= _well_seen(at, seen, size)
+        if not ok.any():
+            continue
+        m = np.stack([np.bincount(inv, rgb[:, c]) for c in range(3)], axis=1) / n[:, None]
+        m2 = np.stack([np.bincount(inv, rgb[:, c] ** 2) for c in range(3)], axis=1) / n[:, None]
+        f = np.concatenate([m, np.sqrt(np.maximum(m2 - m * m, 0.0))], axis=1)[ok] / sd
+        near = np.argmin([np.linalg.norm(f - mu, axis=1) for mu in means], axis=0)
+        counts += np.bincount(near, minlength=len(groups))
+    total = counts.sum()
+    return (counts / total).tolist() if total else [1.0 / len(groups)] * len(groups)
+
+
 def class_separation(groups):
     """Gap between two groups' mean appearance over the spread within them.
     Below ~1 the split is noise, not two materials."""
@@ -872,6 +1125,160 @@ def class_separation(groups):
     gap = float(np.linalg.norm(means[0] - means[1]))
     within = max(float(np.mean(spreads)), 1e-9)
     return gap / within
+
+
+# Brightness, red against green, yellow against blue.
+OPPONENT = np.array([[0.299, 0.587, 0.114],
+                     [1.0, -1.0, 0.0],
+                     [0.5, 0.5, -1.0]], dtype=np.float64).T
+
+
+def _opponent(p):
+    """A patch's splats in opponent colour (brightness, red-green,
+    yellow-blue) and their weights (opacity)."""
+    return (p.base_rgb.astype(np.float64) @ OPPONENT,
+            np.asarray(p.opacity, dtype=np.float64))
+
+
+def tone_gate(material, core=0.5, pad=0.01, fit_min=0.8, step=0.04, keep=0.9):
+    """A test for one material's patches: do they share its common tone?
+
+    Two parts. The patch's mean cast (red-green and yellow-blue) must lie
+    within the range of the material's core, the most typical half of its
+    positions, widened by `pad`: desert v1's bluish grass had the bush's
+    brightness and passed every other test. A range, not a distance, so a
+    material that varies one way (yellower bush) keeps that variety. And at
+    least `fit_min` of what it shows from above must be colours the core
+    holds (the bins holding `keep` of the core's colour): a shrub in a sand
+    tile is a small part and passes; a tile half of something else does not.
+
+    Returns test(cand) -> (ok, why)."""
+    if len(material) < 4:
+        return lambda c: (True, "")
+    means = []
+    for c in material:
+        o, w = _opponent(c[2])
+        means.append((o * w[:, None]).sum(0) / max(w.sum(), 1e-9))
+    means = np.array(means)
+    mid = np.median(means, axis=0)
+    sd = np.maximum(1.4826 * np.median(np.abs(means - mid), axis=0), 0.01)
+    dist = np.linalg.norm((means - mid) / sd, axis=1)
+    core_ids = np.argsort(dist)[:max(3, int(round(core * len(material))))]
+    lo = means[core_ids, 1:].min(axis=0) - pad
+    hi = means[core_ids, 1:].max(axis=0) + pad
+    # The core's palette: colour bins holding `keep` of its weight.
+    mass = {}
+    for i in core_ids:
+        o, w = _opponent(material[i][2])
+        keys = [tuple(k) for k in np.floor(o / step).astype(np.int64)]
+        w = w / max(w.sum(), 1e-9)
+        for k, v in zip(keys, w):
+            mass[k] = mass.get(k, 0.0) + v
+    order = sorted(mass.values(), reverse=True)
+    total, run, cut = sum(order), 0.0, 0.0
+    for v in order:
+        run += v
+        cut = v
+        if run >= keep * total:
+            break
+    common = {k for k, v in mass.items() if v >= cut}
+
+    def test(c):
+        o, w = _opponent(c[2])
+        m = (o * w[:, None]).sum(0) / max(w.sum(), 1e-9)
+        names = ("redder" if m[1] > hi[0] else "greener" if m[1] < lo[0] else "",
+                 "yellower" if m[2] > hi[1] else "bluer" if m[2] < lo[1] else "")
+        off = [n for n in names if n]
+        if off:
+            return False, " and ".join(off)
+        keys = np.floor(o / step).astype(np.int64)
+        inside = np.array([tuple(k) in common for k in keys])
+        fit = float(w[inside].sum() / max(w.sum(), 1e-9))
+        if fit < fit_min:
+            return False, f"{1 - fit:.0%} of it in other colours"
+        return True, ""
+    return test
+
+
+def cell_colours(p, size, up_axis=2, grid=16, min_count=4, centre=(0.0, 0.0)):
+    """A patch from above as grid x grid cells of opponent colour, NaN
+    where too few splats land. Candidates are cut centred on the origin."""
+    plane = [i for i in range(3) if i != up_axis]
+    xy = p.xyz[:, plane] - (np.asarray(centre, dtype=np.float64) - size / 2.0)
+    ij = np.floor(xy / size * grid).astype(np.int64)
+    inside = np.all((ij >= 0) & (ij < grid), axis=1)
+    cell = ij[inside, 1] * grid + ij[inside, 0]
+    w = np.asarray(p.opacity, dtype=np.float64)[inside]
+    col = p.base_rgb[inside].astype(np.float64) @ OPPONENT
+    count = np.bincount(cell, minlength=grid * grid)
+    wsum = np.bincount(cell, weights=w, minlength=grid * grid)
+    out = np.full((grid * grid, 3), np.nan)
+    ok = (count >= min_count) & (wsum > 0)
+    for c in range(3):
+        out[ok, c] = np.bincount(cell, weights=w * col[:, c],
+                                 minlength=grid * grid)[ok] / wsum[ok]
+    return out.reshape(grid, grid, 3)
+
+
+def odd_spots(cells, centres, size, rare=4.0, k=5):
+    """For patches of one material (cells from cell_colours, centres in the
+    scene), the largest spot in each whose colour the rest of the material
+    does not have: a pale hole in scrub, a marker on sand, one shrub on bare
+    ground. A spot like that repeats in every tile built from its patch.
+
+    Rarity, not distance from an average: ordinary blotches have matches in
+    other patches, an odd spot does not. Each cell is compared with the
+    cells of every patch that does not overlap its own (overlapping patches
+    share the spot), and is odd when its k-th nearest colour there is
+    `rare` times further than is usual between the material's own cells.
+    Returns, per patch, the cell count of its largest odd spot
+    (8-connected)."""
+    from scipy.ndimage import label
+    from scipy.spatial import cKDTree
+    flat = [c.reshape(-1, 3) for c in cells]
+    pool = np.concatenate(flat)
+    pool = pool[np.all(np.isfinite(pool), axis=1)]
+    if len(pool) < 10 * k:
+        return [0] * len(cells)
+    mid = np.median(pool, axis=0)
+    unit = np.maximum(1.4826 * np.median(np.abs(pool - mid), axis=0), 1e-3)
+    flat = [(f - mid) / unit for f in flat]
+    xy = np.asarray(centres, dtype=np.float64)
+    out = []
+    for i, f in enumerate(flat):
+        apart = np.any(np.abs(xy - xy[i]) >= size, axis=1)
+        ref = np.concatenate([flat[j] for j in np.flatnonzero(apart)] or [np.zeros((0, 3))])
+        ref = ref[np.all(np.isfinite(ref), axis=1)]
+        if len(ref) < 10 * k:
+            out.append(0)
+            continue
+        tree = cKDTree(ref)
+        # Every core (the same answer): one query per patch over all the
+        # others' cells is quadratic, 4 minutes for desert v1's 534.
+        usual = float(np.median(tree.query(ref, k + 1, workers=-1)[0][:, -1]))
+        ok = np.all(np.isfinite(f), axis=1)
+        d = np.zeros(len(f))
+        if ok.any():
+            d[ok] = tree.query(f[ok], k, workers=-1)[0][:, -1]
+        odd = (d > rare * max(usual, 1e-6)).reshape(cells[i].shape[:2])
+        lab, n = label(odd, structure=np.ones((3, 3)))
+        out.append(int(np.bincount(lab.ravel())[1:].max()) if n else 0)
+    return out
+
+
+def rank_clean(cands, size, across_cm, up_axis=2, rare=4.0, grid=16):
+    """`cands` (one material) with the patches holding an odd spot at least
+    `across_cm` wide moved to the back, worst last; the order is kept
+    otherwise. Returns (ordered, how many are clean, spot size per patch in
+    cells)."""
+    cell_cm = size * 100.0 / grid
+    min_cells = max(2, int(round(np.pi * (across_cm / 2.0) ** 2 / cell_cm ** 2)))
+    spots = odd_spots([cell_colours(c[2], size, up_axis, grid) for c in cands],
+                      [c[1] for c in cands], size, rare)
+    bad = [s >= min_cells for s in spots]
+    order = sorted(range(len(cands)), key=lambda i: (bad[i], spots[i] if bad[i] else 0))
+    return ([cands[i] for i in order], len(cands) - sum(bad),
+            [spots[i] for i in order])
 
 
 def select_similar(cands, k, weight=1.0):

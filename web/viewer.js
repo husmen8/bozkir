@@ -10,13 +10,17 @@ import { openDrop, describe } from './tileset.js';
 import { Capture } from './capture.js';
 import { generatedField, listCached, loadHeightField, openness, roughnessMask } from './heightfield.js';
 import { Benchmark, report } from './benchmark.js';
-import { classify, sampleGrid } from './landform.js';
+import { classify, sampleGrid, wanderField } from './landform.js';
 import { GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from './terrain.js';
 import { starterTileset } from './starter.js';
+import { decalVariants, placeDecals } from './decals.js';
+import { groundLevel, pickCentre, pickTurn, poolsByClass, turnCosSin, cellHash,
+         ringProfile, toneTerms, partnerClass, spotDraws, SPOT_WARP,
+         gradedPool } from './frames.js';
 import { initUI, loadProgress, loadDone, loadFailed, updateCard, setChapters,
          endChapters, takeView } from './ui.js';
 
-const BUILD = 'bozkir viewer 6.1 (explore/research, story, walk)';
+const BUILD = 'bozkir viewer 6.7 (shares per material, ragged edges)';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
 const STRIDE = 32;        // bytes per splat in the .splat format
@@ -127,8 +131,37 @@ uniform vec2 uCellXY[8];
 // Near a boundary both classes are drawn and each splat survives only if a
 // fixed hash of its index falls on its class's side of the mix - stable
 // frame to frame, and repeated tiles at different mixes keep different
-// splats. uMix < 0 turns it off.
+// splats. uMix < 0 turns it off. The weight varies across the tile from
+// its corners (shared with the neighbours, so the boundary is continuous
+// instead of one level per tile) and is broken up by noise where the rule
+// is undecided, so the boundary wanders (height-blend terrain splatting).
 uniform float uMix;
+uniform vec4 uMixCorners;     // own-class weight at sw, se, nw, ne
+uniform float uMixNoise;      // +1 for the cell's class, -1 for the other
+// Blend by spot (spotShare, spotField in frames.js): each spot is one
+// material or another. Which, from the drawn material's field over the
+// grid around the cell (7 x 7 values at half-cell steps from -1 to 2 cells:
+// 1 inside it, 0.5 where it ties, less where another leads), read where
+// noise moves the point by up to uMixWarp cells, so boundaries wander in
+// and out of both sides; sharpened, so only a narrow strip dissolves,
+// where a splat standing above its ground keeps more of its chance (as in
+// the frames' ring). 0: splat by splat from the corners, as before (two
+// thinned layers, see-through).
+uniform float uSpots;
+uniform vec4 uMixField[13];
+uniform float uMixWarp;
+float mixField(int k) { return uMixField[k >> 2][k & 3]; }
+// Frames (bozkir/frames.py): per slot, how the patch is turned in its cell
+// (cos, sin), what it is (0 a whole tile, 1 a frame, 2 a centre) and the
+// height of its ground; and the ring where frame and centre meet.
+uniform vec2 uSlotTurn[8];
+uniform float uSlotRole[8];
+uniform float uSlotZ0[8];
+// A centre's tint, so its ground meets its frame's along the ring: seven
+// terms per slot (toneTerms in frames.js), carried in as r^k.
+uniform vec3 uSlotTone[56];
+uniform vec4 uRing;           // radius, half width, wobble (world units), shape
+uniform vec2 uProm;           // height over the ground: starts to count, counts fully
 uniform float uRelief;        // height field amplitude
 uniform float uWave;          // height field wavelength, world units
 uniform vec2 uGridRot;        // cos, sin of the grid's rotation
@@ -244,25 +277,104 @@ vec4 fetch(uint i, int slot) {
   return texelFetch(uData, ivec2(t & 2047, t >> 11), 0);
 }
 
+// Distance from the cell's middle as the centre's shape measures it
+// (ringNorm in frames.js): a disc for 2 or less, the p-norm's rounded square.
+float ringNorm(vec2 l, float p) {
+  if (p <= 2.0) return length(l);
+  float m = max(abs(l.x), abs(l.y));
+  if (m <= 0.0) return 0.0;
+  vec2 u = abs(l) / m;
+  return m * pow(pow(u.x, p) + pow(u.y, p), 1.0 / p);
+}
+
+// Frames: whether a splat of a frame (role 1) or a centre (role 2) stays
+// where the two meet. The ring's line wobbles along the ground, the same
+// for both sides; across it each side's share falls off, sharpened so most
+// of the ring is one side or the other (hex-tiling's gamma). A splat
+// standing above its ground and opaque keeps more of its chance, so a tuft
+// near the line is kept whole, not cut (height-based blending). Mirrors
+// centreShare and keepChance in frames.js.
+bool keepInRing(vec4 a, uint sid, float role, float z0, vec2 cellXY) {
+  float r = ringNorm(a.xy, uRing.w);
+  float reach = uRing.y + uRing.z;
+  if (r < uRing.x - reach) return role > 1.5;
+  if (r > uRing.x + reach) return role < 1.5;
+  vec2 dir = a.xy / max(length(a.xy), 1e-6);
+  vec2 g = cellXY + uRing.x * vec2(uGridRot.x * dir.x - uGridRot.y * dir.y,
+                                   uGridRot.y * dir.x + uGridRot.x * dir.y);
+  float t = max(uTileSize, 1e-6);
+  float n = 0.65 * dValue(g / (0.23 * t)) + 0.35 * dValue(g / (0.09 * t) + 17.0) - 0.5;
+  float rho = uRing.x + 2.0 * uRing.z * n;
+  float s = clamp(0.5 - 0.5 * (r - rho) / max(uRing.y, 1e-6), 0.0, 1.0);
+  float s3 = s * s * s, o3 = (1.0 - s) * (1.0 - s) * (1.0 - s);
+  float share = s3 / max(s3 + o3, 1e-6);
+  if (role < 1.5) share = 1.0 - share;
+  float prom = clamp((a.z - z0 - uProm.x) / max(uProm.y - uProm.x, 1e-6), 0.0, 1.0)
+             * smoothstep(0.15, 0.5, a.w);
+  float keep = pow(share, 1.0 / (1.0 + 3.0 * prom));
+  uint h = (sid ^ 0x68E31DA4u) * 747796405u + 2891336453u;
+  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+  return float((h >> 22u) ^ h) / 4294967296.0 < keep;
+}
+
 void main() {
   uint slot = aIndex >> 29u;
   uint sid = aIndex & 0x1FFFFFFFu;
-  vec2 cellXY = uCellXY[int(slot)];
+  int si = int(slot);
+  vec2 cellXY = uCellXY[si];
 
+  vec4 a = fetch(sid, 0);     // position.xyz, opacity
+  // A centre is turned in its cell; everything else has turn (1, 0).
+  vec2 turn = uSlotTurn[si];
+  a.xy = vec2(turn.x * a.x - turn.y * a.y, turn.y * a.x + turn.x * a.y);
+  float role = uSlotRole[si];
+  if (role > 0.5 && !keepInRing(a, sid, role, uSlotZ0[si], cellXY)) {
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+    return;
+  }
   if (uMix >= 0.0) {
+    vec2 t = clamp(a.xy / max(uTileSize, 1e-6) + 0.5, 0.0, 1.0);
+    float w = mix(mix(uMixCorners.x, uMixCorners.y, t.x),
+                  mix(uMixCorners.z, uMixCorners.w, t.x), t.y);
+    vec2 g = cellXY + vec2(uGridRot.x * a.x - uGridRot.y * a.y,
+                           uGridRot.y * a.x + uGridRot.x * a.y);
+    if (uSpots > 0.5) {
+      // The same world point moves the same way from either cell.
+      float T = max(uTileSize, 1e-6);
+      // Three scales, down to a sixth of a tile, so the line is ragged.
+      vec2 d = vec2(0.55 * dValue(g / (1.1 * T)) + 0.3 * dValue(g / (0.4 * T) + 5.0)
+                      + 0.15 * dValue(g / (0.15 * T) + 9.0),
+                    0.55 * dValue(g / (1.1 * T) + 41.0) + 0.3 * dValue(g / (0.4 * T) + 77.0)
+                      + 0.15 * dValue(g / (0.15 * T) + 23.0))
+             - 0.5;
+      vec2 u = (clamp(a.xy / T + 0.5 + 2.0 * uMixWarp * d, -1.0, 2.0) + 1.0) * 2.0;
+      vec2 f0 = min(floor(u), vec2(5.0)), fr = u - f0;
+      int k = int(f0.y) * 7 + int(f0.x);
+      w = mix(mix(mixField(k), mixField(k + 1), fr.x),
+              mix(mixField(k + 7), mixField(k + 8), fr.x), fr.y);
+    } else {
+      float n = 0.65 * dValue(g * 1.3) + 0.35 * dValue(g * 3.1 + 17.0) - 0.5;
+      // Complementary for the other class: 1 - w exactly, noise and all.
+      w = clamp(w + uMixNoise * n * 4.0 * w * (1.0 - w), 0.0, 1.0);
+    }
     // Fixed hash of the index, flat enough that the threshold means what it says.
     uint h = sid * 747796405u + 2891336453u;
     h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
     float r = float((h >> 22u) ^ h) / 4294967296.0;
-    if (r > uMix) {
+    if (uSpots > 0.5) {
+      float s = clamp(0.5 + (w - 0.5) * 4.0, 0.0, 1.0);
+      float s3 = s * s * s, o3 = (1.0 - s) * (1.0 - s) * (1.0 - s);
+      float prom = clamp((a.z - uSlotZ0[si] - uProm.x) / max(uProm.y - uProm.x, 1e-6), 0.0, 1.0)
+                 * smoothstep(0.15, 0.5, a.w);
+      w = pow(s3 / max(s3 + o3, 1e-6), 1.0 / (1.0 + 3.0 * prom));
+    }
+    if (r > w) {
       // Behind the camera: cheaper than a discard, keeps the fragment
       // shader branch-free.
       gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
       return;
     }
   }
-
-  vec4 a = fetch(sid, 0);     // position.xyz, opacity
   vec4 b = fetch(sid, 1);     // scale.xyz
   vec4 q = fetch(sid, 2);     // rotation w,x,y,z
 
@@ -276,7 +388,8 @@ void main() {
                     a.z);
   mat3 spin = mat3(uGridRot.x, uGridRot.y, 0.0,
                    -uGridRot.y, uGridRot.x, 0.0,
-                   0.0, 0.0, 1.0);
+                   0.0, 0.0, 1.0)
+           * mat3(turn.x, turn.y, 0.0, -turn.y, turn.x, 0.0, 0.0, 0.0, 1.0);
 
   vec2 anchorLocal;
   if (uSubdiv <= 0) {
@@ -350,6 +463,20 @@ void main() {
   int ci = int(sid);
   vec4 col = texelFetch(uColour, ivec2(ci & 2047, ci >> 11), 0);
   vec3 rgb = col.rgb;
+  if (role > 1.5) {
+    // The harmonic extension of the ring's tone difference (toneAt).
+    int k = si * 7;
+    float r = length(a.xy);
+    float q = clamp(ringNorm(a.xy, uRing.w) / max(uRing.x, 1e-6), 0.0, 1.0);
+    vec2 e1 = r > 1e-6 ? a.xy / r : vec2(1.0, 0.0);
+    vec2 e2 = vec2(e1.x * e1.x - e1.y * e1.y, 2.0 * e1.x * e1.y);
+    vec2 e3 = vec2(e2.x * e1.x - e2.y * e1.y, e2.x * e1.y + e2.y * e1.x);
+    vec3 off = uSlotTone[k]
+             + q * (uSlotTone[k + 1] * e1.x + uSlotTone[k + 2] * e1.y)
+             + q * q * (uSlotTone[k + 3] * e2.x + uSlotTone[k + 4] * e2.y)
+             + q * q * q * (uSlotTone[k + 5] * e3.x + uSlotTone[k + 6] * e3.y);
+    rgb = clamp(rgb + clamp(off, -0.12, 0.12), 0.0, 1.0);
+  }
 
   if (uEdgeMark > 0.0 && uTileSize > 0.0) {
     // Edge bands in their code colour, interior washed out, as in the GSWT
@@ -479,6 +606,20 @@ uniform sampler2D uTileInfo;   // row 0 gain, row 1 mean colour, per tile
 uniform float uHasTileInfo;
 uniform vec3 uClassRGB[4];
 uniform float uMacro;
+uniform float uBlend;          // 1: dissolve material borders as near tiles do
+// Frames: per cell, its centre's atlas entry (r + 256 g) and turn (b, in
+// 256ths of a turn), a > 0 if it has one; and the ring: radius, wobble.
+uniform sampler2D uCentres;
+uniform sampler2D uCentreTone;  // per cell: the centre's mean tint, rgb 0.5 + 2 x
+uniform float uHasCentres;
+uniform vec3 uRingFar;        // radius, wobble, shape
+float ringNorm(vec2 l, float p) {      // as in the splat shader
+  if (p <= 2.0) return length(l);
+  float m = max(abs(l.x), abs(l.y));
+  if (m <= 0.0) return 0.0;
+  vec2 u = abs(l) / m;
+  return m * pow(pow(u.x, p) + pow(u.y, p), 1.0 / p);
+}
 in vec2 vXY;
 in float vDepth;
 in float vOpen;
@@ -521,16 +662,78 @@ void main() {
   if (a < doorway(gl_FragCoord.xy)) discard;
   vec2 fr = clamp(g - ij, 0.01, 0.99);   // east, north fraction in the cell
   vec4 t = texelFetch(uCells, ivec2(ij), 0);
+  ivec2 from = ivec2(ij);         // the cell whose tile this pixel shows
+  if (uBlend > 0.5) {
+    // The near tiles' border blend, here too: this cell's material weight at
+    // each corner is its share of the four cells there, bilinear inside,
+    // with value noise where it is undecided. Below one half the pixel is
+    // drawn from the nearest neighbour of the other material. Without it
+    // the far ground stepped by whole tiles at every border.
+    ivec2 c0 = ivec2(ij);
+    int mine = (int(floor(t.b * 255.0 + 0.5)) >> 2) & 3;
+    float same[9];
+    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+      ivec2 q = c0 + ivec2(dx, dy);
+      bool inside = q.x >= 0 && q.y >= 0 && q.x < int(uGridN) && q.y < int(uGridN);
+      int k = inside ? (int(floor(texelFetch(uCells, q, 0).b * 255.0 + 0.5)) >> 2) & 3 : mine;
+      same[(dy + 1) * 3 + dx + 1] = k == mine ? 1.0 : 0.0;
+    }
+    float sw = 0.25 * (same[0] + same[1] + same[3] + same[4]);
+    float se = 0.25 * (same[1] + same[2] + same[4] + same[5]);
+    float nw = 0.25 * (same[3] + same[4] + same[6] + same[7]);
+    float ne = 0.25 * (same[4] + same[5] + same[7] + same[8]);
+    float w = mix(mix(sw, se, fr.x), mix(nw, ne, fr.x), fr.y);
+    if (w < 0.999) {
+      float n = 0.65 * mValue(g * 1.3) + 0.35 * mValue(g * 3.1 + 17.0) - 0.5;
+      if (w + n * 4.0 * w * (1.0 - w) < 0.5) {
+        ivec2 sx = ivec2(fr.x < 0.5 ? -1 : 1, 0), sy = ivec2(0, fr.y < 0.5 ? -1 : 1);
+        bool xFirst = min(fr.x, 1.0 - fr.x) < min(fr.y, 1.0 - fr.y);
+        ivec2 tries[3] = ivec2[3](xFirst ? sx : sy, xFirst ? sy : sx, sx + sy);
+        for (int i = 0; i < 3; i++) {
+          ivec2 q = c0 + tries[i];
+          if (q.x < 0 || q.y < 0 || q.x >= int(uGridN) || q.y >= int(uGridN)) continue;
+          vec4 o = texelFetch(uCells, q, 0);
+          if (((int(floor(o.b * 255.0 + 0.5)) >> 2) & 3) != mine) { t = o; from = q; break; }
+        }
+      }
+    }
+  }
   float idx = floor(t.r * 255.0 + 0.5) + 256.0 * floor(t.g * 255.0 + 0.5);
+  // Derivatives from the continuous cell coordinate: uv jumps at cell
+  // borders, which the GPU reads as extreme minification (a blurry line
+  // along every border).
+  vec2 gx = dFdx(g), gy = dFdy(g);
+  vec3 tint = vec3(0.0);
+  float cellIdx = idx;              // the cell's tile, before a centre takes over
+  if (uHasCentres > 0.5) {
+    // Inside the ring the cell's centre, turned as the splats turn it.
+    vec4 cc = texelFetch(uCentres, from, 0);
+    vec2 l = (fr - 0.5) * uTileSize;
+    float r = ringNorm(l, uRingFar.z);
+    if (cc.a > 0.5 && r < uRingFar.x + uRingFar.y) {
+      vec2 dir = l / max(length(l), 1e-6);
+      vec2 mid = (ij + 0.5 - uGridN * 0.5) * uTileSize;
+      vec2 ring = mid + uRingFar.x * dir;
+      vec2 w = vec2(uRot.x * ring.x - uRot.y * ring.y, uRot.y * ring.x + uRot.x * ring.y);
+      float n = 0.65 * mValue(w / (0.23 * uTileSize))
+              + 0.35 * mValue(w / (0.09 * uTileSize) + 17.0) - 0.5;
+      if (r < uRingFar.x + 2.0 * uRingFar.y * n) {
+        float a = floor(cc.b * 255.0 + 0.5) * 6.28318530718 / 256.0;
+        vec2 cs = vec2(cos(a), sin(a));
+        vec2 p = vec2(cs.x * l.x + cs.y * l.y, -cs.y * l.x + cs.x * l.y);
+        fr = clamp(p / uTileSize + 0.5, 0.01, 0.99);
+        gx = vec2(cs.x * gx.x + cs.y * gx.y, -cs.y * gx.x + cs.x * gx.y);
+        gy = vec2(cs.x * gy.x + cs.y * gy.y, -cs.y * gy.x + cs.x * gy.y);
+        idx = floor(cc.r * 255.0 + 0.5) + 256.0 * floor(cc.g * 255.0 + 0.5);
+        tint = (texelFetch(uCentreTone, from, 0).rgb - 0.5) * 0.5;
+      }
+    }
+  }
   float col = mod(idx, uAtlasGrid.x);
   float row = floor(idx / uAtlasGrid.x);
   // Atlas tiles are rendered north up.
   vec2 uv = vec2((col + fr.x) / uAtlasGrid.x,
                  (row + 1.0 - fr.y) / uAtlasGrid.y);
-  // Derivatives from the continuous cell coordinate: uv jumps at cell
-  // borders, which the GPU reads as extreme minification (a blurry line
-  // along every border).
-  vec2 gx = dFdx(g), gy = dFdy(g);
   vec2 k = vec2(1.0 / uAtlasGrid.x, -1.0 / uAtlasGrid.y);
   vec4 tex = textureGrad(uAtlas, uv, gx * k, gy * k);
   vec3 rgb = tex.rgb;
@@ -542,10 +745,13 @@ void main() {
     // Fade part-way to the tile mean with distance, as terrain renderers do.
     // Fading fully to the material mean (tried 2026-09-28) made distant
     // ground a flat third look next to the splats and the near atlas.
-    vec3 mean = texelFetch(uTileInfo, ivec2(ti, 1), 0).rgb;
+    // The cell's tile's, centre or not: a centre fading to its own mean
+    // showed as a dark square in every bush cell far off (desert13).
+    vec3 mean = texelFetch(uTileInfo, ivec2(int(cellIdx), 1), 0).rgb;
     float far = smoothstep(uFarStart * 1.5, uFarStart * 5.0, vDepth);
     rgb = mix(rgb, mean, 0.75 * far);
   }
+  rgb = clamp(rgb + clamp(tint, -0.12, 0.12), 0.0, 1.0);    // a centre's, as near
   // Same macro variation as the splats (macroAt there).
   if (uMacro > 0.0) {
     vec2 w = vXY / uTileSize;
@@ -667,10 +873,12 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'capframesn', 'capcentre', 'caparc', 'caparcn',
                   'capstepn', 'fieldnote', 'bench', 'benchout',
                   'classrule', 'classsharp', 'classsharpn',
-                  'classnote', 'classblend', 'blendwidth',
+                  'classnote', 'classblend', 'blendspots', 'tonegrade', 'blendwidth',
                   'blendwidthn', 'classbalance', 'classbalancen',
+                  'decals', 'decalspacing', 'decalspacingn', 'decalnote',
+                  'decalterrain',
                   'classcoherence', 'classcoherencen',
-                  'classaltitude', 'classaltituden']) {
+                  'classaltitude', 'classaltituden', 'classwander', 'classwandern']) {
   ui[id] = document.getElementById(id);
 }
 
@@ -856,6 +1064,8 @@ function unpack(buffer) {
   return { n, positions, data, colour };
 }
 
+const splatTex = [null, null];
+
 function makeTexture(unit, internal, w, h, format, type, pixels) {
   const t = gl.createTexture();
   gl.activeTexture(gl.TEXTURE0 + unit);
@@ -945,16 +1155,19 @@ const splatU = uniforms(splatProg,
    'focal', 'viewport', 'gain', 'near',
    'data', 'colour', 'tileSize', 'edgeMark', 'fade',
    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
+   'mixCorners', 'mixNoise', 'spots', 'mixField', 'mixWarp',
    'field', 'fieldSize', 'fieldExtent', 'hasField',
    'open', 'hasOpen', 'shade', 'exposure', 'saturation',
    'farOn', 'farStart', 'farBand', 'detail', 'detailFreq', 'macro',
-   'edgeN', 'edgeE', 'edgeS', 'edgeW']);
+   'edgeN', 'edgeE', 'edgeS', 'edgeW',
+   'slotTurn', 'slotRole', 'slotZ0', 'slotTone', 'ring', 'prom']);
 const farU = uniforms(farProg,
   ['view', 'eye', 'focal', 'viewport', 'relief', 'wave', 'hasField', 'field',
    'fieldSize', 'fieldExtent', 'atlas', 'cells', 'atlasGrid', 'tileSize',
    'gridN', 'rot', 'farStart', 'farBand', 'fogColour', 'fogDensity',
    'exposure', 'shade', 'saturation', 'open', 'hasOpen', 'debug', 'classRGB',
-   'tileInfo', 'hasTileInfo', 'detail', 'detailFreq', 'macro']);
+   'tileInfo', 'hasTileInfo', 'detail', 'detailFreq', 'macro', 'blend',
+   'centres', 'centreTone', 'hasCentres', 'ringFar']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -1016,6 +1229,31 @@ let splatCount = 0;
 let patches = [{ start: 0, count: 0 }];
 let identityOrder = null;
 let wangCodes = null;
+// Decal copies (scripts/decals.py): the plain tile each copy was made from,
+// -1 for plain tiles. Copies are never laid directly, only swapped in.
+let variantOf = null;
+let decalCopies = null;
+let decalsOn = false;
+let decalSpacing = 5;
+let decalTerrain = false;
+let decalCount = 0;
+// Frames (export_wang.py --frames): the manifest's ring and turn rules, the
+// centres ({start, count, levels, class, z0}, decal copies with `base`),
+// each class's pool of centre indices, and each tile's ground height.
+let frameInfo = null;
+let centres = null;
+let centrePools = null;
+let centreCopies = null;
+let tileZ0 = null;
+let tileRing = null, centreRing = null;     // ground colour around the ring
+// Live orders of turned centres: one buffer, `spunAt` maps a centre's
+// level range and turn to where its order starts.
+const spunBuf = gl.createBuffer();
+let spunAt = new Map();
+// Per sorted range, how many of its splats come before its middle: a frame
+// is drawn in two parts with its centre between. `rangeIndex` maps a
+// range's start to its place in the worker's list.
+let rangeIndex = new Map(), liveBehind = null, cacheBehind = null;
 // Class of each tile and how many classes; all zeros with one class.
 let tileClass = null;
 let classCount = 1;
@@ -1024,14 +1262,24 @@ let classSharp = 2.0;
 // Share of the grid for the first class. Left to itself the rule gave ~27%
 // on every scene; balance decides how much, the rule decides where.
 let classBalance = 0.5;
+// The capture's own share of each material, when the tileset measured it
+// (export_wang --min-share); the share slider and presets start from it.
+let captureShares = null;
+const snapShare = (x) => Math.min(0.95, Math.max(0.05, Math.round(x * 20) / 20));
 // Patch size in tiles, so the result is regions, not a scatter of single tiles.
 let classCoherence = 2;
 // How much altitude counts against shape (without it a hollow on a summit
 // read the same as one in a valley).
 let classAltitude = 0.4;
+// How far the height line between materials wanders (wanderField): 0 one
+// contour across the world, as before; a tileset that measured its capture
+// (export --height-order) starts at what the capture shows.
+let classWander = 0;
 // Off by default: it doubles draw calls near class boundaries.
 let classBlend = false;
 let blendWidth = 0.35;
+let blendSpots = true;    // each spot one material (uSpots), not splat by splat
+let toneGrade = true;     // near another material, centres of the nearest tones
 let cellMix = null;
 let cellAlt = null;        // the class each cell would take instead
 // Swap which tile class plays which role in the rule. Class order from the
@@ -1071,7 +1319,10 @@ let shotWanted = false;
 let farOn = true;
 let farStartTiles = 14;          // splats out to here, atlas beyond
 let atlas = null;                // { tex, cols, rows }
+let atlasTex = null;             // the GPU copy, freed when replaced
 let cellTex = null;
+let centreTex = null;     // frames: per cell, its centre and turn
+let centreToneTex = null; // and its mean tint
 let tileInfoTex = null;   // per tile: colour gain, mean colour
 let farVAO = null, farCount = 0;
 // A scene that is not a Wang tileset is shown as the capture itself: no
@@ -1097,9 +1348,61 @@ function materialNames() {
 
 /** The share slider names the material it sets: the one that collects. */
 function updateShareLabel() {
+  const names = materialNames();
+  names.forEach((name, m) => {
+    const lbl = document.getElementById(`classshare${m}lbl`);
+    if (lbl) lbl.textContent = `${name} share`;
+  });
   const el = document.getElementById('classbalancelbl');
   if (!el) return;
-  el.textContent = classCount > 1 ? `${materialNames()[tileClassFor(0)]} share` : 'share';
+  el.textContent = classCount > 1 ? `${names[tileClassFor(0)]} share` : 'share';
+}
+
+// Three or more materials: one share slider each (the one slider sets the
+// first material's and splits the rest as the capture does). Moving one
+// keeps the others' proportions and the total at 100%. Per material, so
+// the shares follow their materials through a swap. Two: as before.
+let shareByMat = null;
+function buildShareSliders() {
+  const box = document.getElementById('classshares');
+  const one = document.getElementById('classbalance');
+  const oneRow = one && one.closest('.s');
+  shareByMat = null;
+  if (box) box.textContent = '';
+  if (oneRow) oneRow.style.display = classCount >= 3 ? 'none' : '';
+  if (!box || classCount < 3) return;
+  const byPos = classShares(classCount);           // where the one slider would start
+  shareByMat = new Array(classCount).fill(0);
+  byPos.forEach((v, k) => { shareByMat[tileClassFor(k)] = v; });
+  for (let m = 0; m < classCount; m++) {
+    const row = document.createElement('div');
+    row.className = 's';
+    row.dataset.info = 'share';
+    row.innerHTML = `<input type="range" id="classshare${m}" min="0.02" max="0.96" step="0.01">`
+      + `<label><span id="classshare${m}lbl"></span><b id="classshare${m}n"></b></label>`;
+    box.appendChild(row);
+    const input = row.querySelector('input');
+    input.value = String(shareByMat[m]);
+    input.addEventListener('input', (e) => setShare(m, +e.target.value));
+  }
+  showShares();
+  updateShareLabel();
+}
+function showShares() {
+  shareByMat.forEach((v, m) => {
+    const input = document.getElementById(`classshare${m}`);
+    if (input && Math.abs(+input.value - v) > 0.005) input.value = String(v);
+    const n = document.getElementById(`classshare${m}n`);
+    if (n) n.textContent = `${Math.round(v * 100)}%`;
+  });
+}
+function setShare(m, v) {
+  const rest = shareByMat.reduce((a, s, i) => (i === m ? a : a + s), 0);
+  const n = shareByMat.length;
+  shareByMat = shareByMat.map((s, i) => (i === m ? v
+    : rest > 0 ? s * (1 - v) / rest : (1 - v) / (n - 1)));
+  showShares();
+  scheduleRegenerate();
 }
 
 // Auto quality, the way games keep a frame budget.
@@ -1365,17 +1668,25 @@ function lodFor(distance) {
 }
 let drawnSplats = 0, drawCalls = 0;
 let frames = 0, fpsTime = performance.now();
+// Frame pacing: ?fps=30 lowers the cap (default 60); idle after WAKE_FRAMES
+// frames with nothing changed.
+const MAX_FPS = Math.max(10, Math.min(240,
+  +new URLSearchParams(location.search).get('fps') || 60));
+const WAKE_FRAMES = 90;
+let wakeFrames = WAKE_FRAMES, lastFrameKey = '', lastDrawAt = 0;
 
 console.log('starting sort worker');
 const worker = new Worker('./sort-worker.js');
 worker.onmessage = (e) => {
   const m = e.data;
+  wakeFrames = WAKE_FRAMES;
 
   if (m.type === 'cached') {
     cacheDirs = m.dirs;
     cacheBuf = new Uint32Array(m.order);
     cacheStride = m.stride;
     cacheMs = m.ms;
+    cacheBehind = new Uint32Array(m.behind);
     cacheReady = true;
     // One buffer holding every order; a cell binds the slice it needs.
     gl.bindVertexArray(splatVAO);
@@ -1401,6 +1712,13 @@ worker.onmessage = (e) => {
   gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
   lastOrder = new Uint32Array(m.order);
   gl.bufferData(gl.ARRAY_BUFFER, lastOrder, gl.DYNAMIC_DRAW);
+  liveBehind = m.behind ? new Uint32Array(m.behind) : null;
+  spunAt = new Map();
+  if (m.keys && m.keys.length) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, spunBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Uint32Array(m.spun), gl.DYNAMIC_DRAW);
+    m.keys.forEach((k, i) => spunAt.set(k, m.offsets[i]));
+  }
   gl.bindVertexArray(null);
   sortMs = m.ms;
   sortedReady = true;
@@ -1412,13 +1730,38 @@ worker.onmessage = (e) => {
 /** Share of the grid per class: the slider sets the first class, the rest
  *  split what is left evenly. */
 function classShares(count) {
+  // Three or more: each material's own slider (shareByMat).
+  if (shareByMat && shareByMat.length === count) {
+    return Array.from({ length: count }, (_, k) => shareByMat[tileClassFor(k)]);
+  }
   const first = Math.min(0.95, Math.max(0.05, classBalance));
-  const rest = (1 - first) / Math.max(1, count - 1);
-  return Array.from({ length: count }, (_, k) => (k === 0 ? first : rest));
+  // The rest keep the capture's proportions between them when known.
+  // Shares belong to materials, so they follow them through a swap.
+  const cs = captureShares && captureShares.length === count
+    ? Array.from({ length: count }, (_, k) => captureShares[tileClassFor(k)]) : null;
+  const others = cs ? cs.slice(1).reduce((a, b) => a + b, 0) : 0;
+  return Array.from({ length: count }, (_, k) => {
+    if (k === 0) return first;
+    return cs && others > 0 ? (1 - first) * cs[k] / others
+      : (1 - first) / Math.max(1, count - 1);
+  });
 }
 
 /** A tile with the same edge code in another class, to blend against.
  *  Every class carries every code, so swapping cannot break the matching. */
+/** The tile of material `cls` with the same edges as tile `t` (each
+ *  material has every edge code), -1 if none. */
+function tileOfClass(t, cls) {
+  if (!wangCodes || !tileClass) return -1;
+  const code = wangCodes[t];
+  for (let k = 0; k < wangCodes.length; k++) {
+    if (tileClass[k] !== cls || (variantOf && variantOf[k] >= 0)) continue;
+    const o = wangCodes[k];
+    if (o[0] === code[0] && o[1] === code[1] && o[2] === code[2] && o[3] === code[3]) return k;
+  }
+  return -1;
+}
+
 function alternateTile(c, p) {
   if (!wangCodes || !tileClass) return -1;
   const code = wangCodes[c.patch];
@@ -1426,11 +1769,26 @@ function alternateTile(c, p) {
   for (let k = 0; k < wangCodes.length; k++) {
     if (c.alt != null && tileClass[k] !== tileClassFor(c.alt)) continue;
     if (tileClass[k] === tileClass[c.patch]) continue;
+    if (variantOf && variantOf[k] >= 0) continue;
     const o = wangCodes[k];
     if (o[0] === code[0] && o[1] === code[1]
         && o[2] === code[2] && o[3] === code[3]) return k;
   }
   return -1;
+}
+
+/** `g` from mergeGroups with the cells marked in `alone` made singletons. */
+function splitOut(g, alone) {
+  if (!alone.some(Boolean)) return g;
+  const groups = [];
+  for (const x of g.groups) {
+    const keep = x.filter((k) => !alone[k]);
+    if (keep.length) groups.push(keep);
+    for (const k of x) if (alone[k]) groups.push([k]);
+  }
+  const groupOf = new Int32Array(alone.length);
+  groups.forEach((x, gi) => { for (const k of x) groupOf[k] = gi; });
+  return { ...g, groups, groupOf };
 }
 
 /** Lay out gridN x gridN cells.
@@ -1470,6 +1828,10 @@ function buildGrid() {
                        { spacing: tileSize, sharpness: classSharp,
                          coherence: classCoherence,
                          altitude: classAltitude,
+                         heightShift: classWander > 0
+                           ? wanderField(gridN, classWander, seed,
+                                         Math.max(4, Math.min(gridN, reliefScale / 3)))
+                           : null,
                          sediment: sed,
                          balance: classCount === 2 ? classBalance
                            : classShares(classCount) });
@@ -1493,6 +1855,7 @@ function buildGrid() {
         const south = j > 0 ? wangCodes[chosen[(j - 1) * gridN + i]][0] : -1;
         const fits = [];
         for (let k = 0; k < wangCodes.length; k++) {
+          if (variantOf && variantOf[k] >= 0) continue;
           const c = wangCodes[k];
           if (west >= 0 && c[3] !== west) continue;
           if (south >= 0 && c[2] !== south) continue;
@@ -1506,6 +1869,14 @@ function buildGrid() {
           const ofClass = fits.filter(k => tileClass[k] === want);
           if (ofClass.length) pool = ofClass;
           else if (classStats) classStats.missed = (classStats.missed || 0) + 1;
+        }
+        // Not the tile beside or below again where the codes allow another:
+        // with two tiles per edge pair a row of three alike was common.
+        if (captureShares && pool.length > 1) {
+          const left = i > 0 ? chosen[j * gridN + i - 1] : -1;
+          const below = j > 0 ? chosen[(j - 1) * gridN + i] : -1;
+          const fresh = pool.filter(k => k !== left && k !== below);
+          if (fresh.length) pool = fresh;
         }
         pick = pool.length ? pool[Math.floor(rand() * pool.length) % pool.length] : 0;
       } else {
@@ -1523,6 +1894,68 @@ function buildGrid() {
                    alt: cellAlt ? cellAlt[cellIdx] : null,
                    mix: cellMix ? cellMix[cellIdx] : 1 });
     }
+  }
+  // Decals last, over the finished layout: a copy has its tile's edges and
+  // class, so swapping it in changes neither the matching nor the rule.
+  decalCount = 0;
+  if (decalsOn && decalCopies && wangCodes) {
+    // Following the terrain: more where the rule was undecided (the edge
+    // of the other material, where plants thin out into sand), fewer out
+    // in the open; neighbours alike.
+    const undecided = decalTerrain && cellMix && classCount > 1
+      ? (k) => (1 - cellMix[k]) / (1 - 1 / classCount) : null;
+    const placed = placeDecals((k) => cells[k].patch, gridN, decalCopies,
+                               decalSpacing, seed,
+                               { weight: undecided, groups: decalTerrain });
+    for (const p of placed) cells[p.cell].patch = p.tile;
+    decalCount = placed.length;
+  }
+  // Frames: each cell's centre from its material's pool (not the one left
+  // of it or below where the pool has others) and its turn within the
+  // material's rule, on streams of their own so the tiles do not move.
+  if (frameInfo && centrePools) {
+    // Tones that meet (the tone-ordered pool): near another material a cell
+    // takes the centres of its own whose colour lies nearest that one's.
+    const classAt = (i, j) => (i < 0 || j < 0 || i >= gridN || j >= gridN ? -1
+      : tileClass ? tileClass[cells[j * gridN + i].patch] || 0 : 0);
+    const graded = (cls, c) => {
+      const pool = centrePools[cls];
+      if (!toneGrade || classCount < 2 || !tileClass) return pool;
+      for (const step of [1, 2]) {
+        const other = partnerClass(classAt, c.i, c.j, step);
+        if (other < 0) continue;
+        const own = classColours[cls], axis = classColours[other].map((v, q) => v - own[q]);
+        const tone = (k) => centres[k].mean.reduce((t, v, q) => t + (v - own[q]) * axis[q], 0);
+        return gradedPool(pool, tone, step);
+      }
+      return pool;
+    };
+    for (const c of cells) {
+      const cls = Math.min(tileClass ? tileClass[c.patch] || 0 : 0, centrePools.length - 1);
+      const avoid = [];
+      if (c.i > 0) avoid.push(cells[c.j * gridN + c.i - 1].centre);
+      if (c.j > 0) avoid.push(cells[(c.j - 1) * gridN + c.i].centre);
+      c.centre = pickCentre(graded(cls, c), c.i, c.j, seed, avoid);
+      c.turn = pickTurn(frameInfo.turns && frameInfo.turns[cls], c.i, c.j, seed, 2,
+                        frameInfo.shape > 2);
+    }
+    if (decalsOn && centreCopies) {
+      // Decals live in centres here: a copy of a pool centre with a decal.
+      const undecided = decalTerrain && cellMix && classCount > 1
+        ? (k) => (1 - cellMix[k]) / (1 - 1 / classCount) : null;
+      const placed = placeDecals((k) => cells[k].centre, gridN, centreCopies,
+                                 decalSpacing, seed,
+                                 { weight: undecided, groups: decalTerrain });
+      for (const p of placed) cells[p.cell].centre = p.tile;
+      decalCount = placed.length;
+    }
+    for (const c of cells) c.tone = toneFor(c.patch, c.centre, c.turn);
+  }
+  if (ui.decalnote) {
+    const copies = decalCopies || centreCopies;
+    ui.decalnote.textContent = !copies ? 'this tileset has no decals'
+      : `${decalCount} placed, ${new Set([...copies.values()].flat()
+          .map(v => v.decal)).size} kinds`;
   }
   tileClassCounts = new Array(classCount).fill(0);
   if (tileClass) for (const c of cells) tileClassCounts[Math.min(classCount - 1, tileClass[c.patch] || 0)]++;
@@ -1731,7 +2164,9 @@ async function loadAtlas(name) {
 let bakedAtlas = null;
 function bakeAtlas(positions, data, colour) {
   if (!wangCodes || !tileSize || patches.length < 2) return null;
-  const count = patches.length, res = 48;
+  // With frames, the centres after the tiles (the far field turns them).
+  const entries = patches.concat(centres || []);
+  const count = entries.length, res = 48;
   const cols = Math.ceil(Math.sqrt(count)), rows = Math.ceil(count / cols);
   const cv = document.createElement('canvas');
   cv.width = cols * res; cv.height = rows * res;
@@ -1740,7 +2175,7 @@ function bakeAtlas(positions, data, colour) {
   const px = res / tileSize;
   for (let k = 0; k < count; k++) {
     acc.fill(0);
-    const p = patches[k];
+    const p = entries[k];
     // The coarsest level that still has a few thousand splats.
     let [start, n] = p.levels[0];
     for (const [s2, n2] of p.levels) if (n2 >= 3000) { start = s2; n = n2; }
@@ -1763,7 +2198,8 @@ function bakeAtlas(positions, data, colour) {
       }
     }
     const q0 = (k % cols) * res, r0 = Math.floor(k / cols) * res;
-    const mean = tileMeans && tileMeans[k] ? tileMeans[k].map((v) => v * 255) : [128, 128, 128];
+    const m = k < patches.length ? tileMeans && tileMeans[k] : p.mean;
+    const mean = m ? m.map((v) => v * 255) : [128, 128, 128];
     for (let yy = 0; yy < res; yy++) {
       for (let xx = 0; xx < res; xx++) {
         const o = 4 * (yy * res + xx), w = acc[o + 3];
@@ -1774,7 +2210,7 @@ function bakeAtlas(positions, data, colour) {
     }
   }
   cv.getContext('2d').putImageData(img, 0, 0);
-  return { img: cv, lay: { cols, rows, count, res }, baked: true };
+  return { img: cv, lay: { cols, rows, count, res, tiles: patches.length }, baked: true };
 }
 
 /** Upload an atlas (a file's or one baked here) and turn the far field on. */
@@ -1782,10 +2218,13 @@ function adoptAtlas(source) {
   if (!source) { atlas = null; return; }
   try {
     const { img, lay } = source;
-    // Per-tile colour gain: the atlas is seen from straight above, the
-    // splats at a grazing angle, so each atlas tile is scaled to its own
-    // splats' mean (removes most of the colour step at the hand-over).
-    // Row 0: gain (0..2 as 0..1). Row 1: tile mean, what far ground fades to.
+    // Per entry, a colour gain and the colour far ground fades to. The atlas
+    // is seen from straight above, the splats from low down; bake_atlas.py
+    // measures each entry from 20 degrees (`seen`), and the gain matches the
+    // atlas to it, which removes most of the colour step at the hand-over.
+    // Without it, none: the splats' plain mean (every layer, hidden or not)
+    // washed far ground out, bush the most.
+    // Row 0: gain (0..2 as 0..1). Row 1: what far ground fades to.
     const cv = document.createElement('canvas');
     cv.width = img.width; cv.height = img.height;
     const c2 = cv.getContext('2d', { willReadFrequently: true });
@@ -1804,7 +2243,7 @@ function adoptAtlas(source) {
         }
       }
       const am = sw > 0 ? [sr / sw / 255, sg / sw / 255, sb / sw / 255] : [0.5, 0.5, 0.5];
-      const sm = tileMeans && tileMeans[k] ? tileMeans[k] : am;
+      const sm = lay.seen && lay.seen[k] ? lay.seen[k] : am;
       for (let c = 0; c < 3; c++) {
         const gain = Math.max(0.5, Math.min(2.0, sm[c] / Math.max(am[c], 1e-3)));
         info[4 * k + c] = Math.round(127.5 * gain);
@@ -1821,7 +2260,8 @@ function adoptAtlas(source) {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lay.count, 2, 0, gl.RGBA,
                   gl.UNSIGNED_BYTE, info);
-    const tex = gl.createTexture();
+    if (atlasTex) gl.deleteTexture(atlasTex);
+    const tex = atlasTex = gl.createTexture();
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
@@ -1847,9 +2287,10 @@ function adoptAtlas(source) {
 function buildFarField() {
   if (!atlas || !cells.length) return;
   // An atlas baked from an older export would paint the wrong tiles.
-  if (wangCodes && atlas.count !== wangCodes.length) {
-    console.warn(`far field off: atlas has ${atlas.count} tiles, the tileset `
-                 + `${wangCodes.length}. Re-run scripts/bake_atlas.py.`);
+  const want = wangCodes ? wangCodes.length + (centres ? centres.length : 0) : atlas.count;
+  if (atlas.count !== want) {
+    console.warn(`far field off: atlas has ${atlas.count} entries, the tileset `
+                 + `${want}. Re-run scripts/bake_atlas.py.`);
     atlas = null;
     return;
   }
@@ -1874,6 +2315,33 @@ function buildFarField() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, idx);
+  if (frameInfo && centres) {
+    // Each cell's centre (its atlas entry, after the tiles) and turn.
+    const cen = new Uint8Array(n * n * 4);
+    for (const c of cells) {
+      if (c.centre == null || c.centre < 0) continue;
+      const k = 4 * (c.j * n + c.i), e = patches.length + c.centre;
+      cen[k] = e & 255; cen[k + 1] = (e >> 8) & 255;
+      cen[k + 2] = (c.turn || 0) & 255; cen[k + 3] = 255;
+    }
+    const tone = new Uint8Array(n * n * 4).fill(128);
+    for (const c of cells) {
+      if (!c.tone) continue;
+      const k = 4 * (c.j * n + c.i);
+      for (let q = 0; q < 3; q++) {
+        tone[k + q] = Math.round(255 * Math.min(1, Math.max(0, 0.5 + 2 * c.tone[q])));
+      }
+    }
+    if (!centreTex) centreTex = gl.createTexture();
+    if (!centreToneTex) centreToneTex = gl.createTexture();
+    for (const [unit, tex, px] of [[8, centreTex, cen], [9, centreToneTex, tone]]) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, n, n, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    }
+  }
   buildFarMesh();
 }
 
@@ -1926,7 +2394,11 @@ function buildFarMesh() {
   farCount = ix.length;
 }
 
-function regenerate() { buildGrid(); buildOverlay(); reportSeams(); buildFarField(); }
+function regenerate() {
+  buildGrid(); buildOverlay(); reportSeams(); buildFarField();
+  // New centres and turns need their own live orders.
+  if (frameInfo) lastSortKey = '';
+}
 
 /** Rebuild after a control moves. The rebuild blocks the main thread (a
  *  second or more at hundreds of tiles), so the note is painted first, two
@@ -1964,11 +2436,40 @@ function load(buffer, manifest) {
     wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
     plainScene = !manifest.wang;
     tileClass = manifest.tiles.map(t => t.class || 0);
+    variantOf = manifest.tiles.map(t => (t.base != null ? t.base : -1));
+    decalCopies = decalVariants(manifest.tiles);
     classCount = Math.max(1, manifest.classes || 1);
     classColours = meanClassColours(colour, manifest.tiles, classCount);
+    captureShares = Array.isArray(manifest.shares) ? manifest.shares : null;
+    // Out of height order in the capture: 0 strict, 0.5 none (export
+    // --height-order); twice that is how far the line wanders. 0 without.
+    classWander = typeof manifest.height_order === 'number'
+      ? Math.min(1, Math.max(0, 2 * manifest.height_order)) : 0;
+    {
+      const el = document.getElementById('classwander');
+      if (el) el.value = String(classWander);
+      if (ui.classwandern) ui.classwandern.textContent = `${Math.round(classWander * 100)}%`;
+    }
+    if (captureShares && classCount >= 2) {
+      classBalance = snapShare(captureShares[tileClassFor(0)]);
+      const el = document.getElementById('classbalance');
+      if (el) el.value = String(classBalance);
+      if (ui.classbalancen) ui.classbalancen.textContent = `${Math.round(classBalance * 100)}%`;
+      // Measured materials meet in the capture's own way: dissolved, not
+      // along tile edges.
+      classBlend = true;
+      if (ui.classblend) ui.classblend.checked = true;
+    }
     // Each tile's own mean, for matching the far field to it.
     tileMeans = manifest.tiles.map((t) =>
       meanClassColours(colour, [{ start: t.start, count: t.count }], 1)[0]);
+    frameInfo = manifest.wang && manifest.frames && Array.isArray(manifest.centres)
+      && manifest.centres.length ? manifest.frames : null;
+    centres = frameInfo ? manifest.centres.map((c) => ({
+      start: c.start, count: c.count, levels: c.levels || [[c.start, c.count]],
+      class: c.class || 0, base: c.base, decal: c.decal,
+      mean: meanClassColours(colour, [{ start: c.start, count: c.count }], 1)[0],
+    })) : null;
   } else {
     patches = [{ start: 0, count: n, levels: [[0, n]] }];
     lodLevels = 1;
@@ -1976,9 +2477,29 @@ function load(buffer, manifest) {
     wangCodes = null;
     plainScene = true;
     tileClass = null;
+    variantOf = null;
+    decalCopies = null;
     classColours = meanClassColours(colour, [{ start: 0, count: n }], 1);
     classCount = 1;
+    captureShares = null;
+    frameInfo = null;
+    centres = null;
   }
+  // Frames: ground heights (a splat above its ground wins the ring), each
+  // material's pool, and the centres' decal copies.
+  tileZ0 = patches.map((p) => groundLevel(positions, p.start, p.count));
+  if (centres) for (const c of centres) c.z0 = groundLevel(positions, c.start, c.count);
+  centrePools = centres ? poolsByClass(centres, classCount) : null;
+  centreCopies = centres ? decalVariants(centres) : null;
+  tileRing = centreRing = null;
+  if (centres) {
+    const ring = (p, z0) => ringProfile(positions, colour, p.start, p.count, frameInfo.radius,
+                                        frameInfo.ring / 2, z0, frameInfo.prominence[0], 16,
+                                        frameInfo.shape || 2);
+    tileRing = patches.map((p, k) => ring(p, tileZ0[k]));
+    centreRing = centres.map((c) => ring(c, c.z0));
+  }
+  spunAt = new Map();
   usedPatches = patches.length;
   atlas = null;
   bakedAtlas = null;
@@ -1989,11 +2510,14 @@ function load(buffer, manifest) {
   const h = Math.ceil(n * 3 / w);
   const padded = new Float32Array(w * h * 4);
   padded.set(data.subarray(0, Math.min(data.length, padded.length)));
-  makeTexture(0, gl.RGBA32F, w, h, gl.RGBA, gl.FLOAT, padded);
+  // The last tileset's textures go first: each load left ~50 MB of GPU
+  // memory behind, and switching tilesets filled the card.
+  for (const t of splatTex) if (t) gl.deleteTexture(t);
+  splatTex[0] = makeTexture(0, gl.RGBA32F, w, h, gl.RGBA, gl.FLOAT, padded);
   const ch = Math.ceil(n / w);
   const cpad = new Uint8Array(w * ch * 4);
   cpad.set(colour);
-  makeTexture(1, gl.RGBA8, w, ch, gl.RGBA, gl.UNSIGNED_BYTE, cpad);
+  splatTex[1] = makeTexture(1, gl.RGBA8, w, ch, gl.RGBA, gl.UNSIGNED_BYTE, cpad);
 
   // Median long axis, so seam gaps can be quoted in splat widths.
   const sizes = [];
@@ -2033,9 +2557,11 @@ function load(buffer, manifest) {
   const pos = positions.slice();
   // Each LOD level holds different splats, so each is sorted on its own.
   const ranges = [];
-  for (const p of patches) {
+  for (const p of patches.concat(centres || [])) {
     for (const [start, count] of p.levels) ranges.push({ start, count });
   }
+  rangeIndex = new Map(ranges.map((r, k) => [r.start, k]));
+  liveBehind = cacheBehind = null;
   worker.postMessage({ type: 'init', positions: pos.buffer, patches: ranges },
                      [pos.buffer]);
   cacheReady = false;
@@ -2048,10 +2574,15 @@ function load(buffer, manifest) {
   if (ui.used) ui.used.max = patches.length;
   if (ui.used) ui.used.value = patches.length;
   if (ui.usedn) ui.usedn.textContent = `${patches.length} of ${patches.length}`;
+  const copies = variantOf ? variantOf.filter(b => b >= 0).length : 0;
   if (ui.wangnote) ui.wangnote.textContent = wangCodes
-    ? `wang, ${patches.length} tiles, ${manifest.colours || 2} colours/axis`
+    ? `wang, ${patches.length - copies} ${frameInfo ? 'frames' : 'tiles'}, `
+      + `${manifest.colours || 2} colours/axis`
+      + (copies ? ` + ${copies} with decals` : '')
+      + (centres ? ` + ${centres.length} centres` : '')
     : (tileSize ? 'random placement, edges do not match' : 'single scene');
 
+  buildShareSliders();
   regenerate();
   updateShareLabel();
   console.log(`loaded ${n} splats, ${patches.length} patches, ` +
@@ -2155,6 +2686,126 @@ function measurePop() {
   if (popRate > popPeak) { popPeak = popRate; popPeakAge = 0; }
 }
 
+// ---------------------------------------------------------------- frames
+// Per draw, slot 0 says how its patch sits in the cell; a merged group
+// fills one slot per frame or centre.
+const slotTurn = new Float32Array(2 * MAX_GROUP);
+const slotRole = new Float32Array(MAX_GROUP);
+const slotZ0 = new Float32Array(MAX_GROUP);
+const slotTone = new Float32Array(21 * MAX_GROUP);
+const NO_TONE = new Float32Array(21);
+const ROLE_TILE = 0, ROLE_FRAME = 1, ROLE_CENTRE = 2;
+
+function setSlot(i, turnQ, role, z0, tone) {
+  const [cs, sn] = turnQ ? turnCosSin(turnQ) : [1, 0];
+  slotTurn[2 * i] = cs; slotTurn[2 * i + 1] = sn;
+  slotRole[i] = role; slotZ0[i] = z0 || 0;
+  slotTone.set(tone || NO_TONE, 21 * i);
+}
+/** Upload the first `n` slots (a single cell's draw uses only slot 0). */
+function flushSlots(n = MAX_GROUP) {
+  gl.uniform2fv(splatU.slotTurn, slotTurn.subarray(0, 2 * n));
+  gl.uniform1fv(splatU.slotRole, slotRole.subarray(0, n));
+  gl.uniform1fv(splatU.slotZ0, slotZ0.subarray(0, n));
+  gl.uniform3fv(splatU.slotTone, slotTone.subarray(0, 21 * n));
+}
+
+/** The tint for centre `k` turned by `turnQ` in a cell holding tile `t`. */
+function toneFor(t, k, turnQ) {
+  return tileRing && centreRing && k >= 0 ? toneTerms(tileRing[t], centreRing[k], turnQ) : null;
+}
+
+/** A centre for a cell drawn in another class (the class blend), and its
+ *  turn: seeded per cell, like its own. */
+function partnerCentre(c, cls) {
+  const pool = centrePools[Math.min(cls, centrePools.length - 1)];
+  if (!pool || !pool.length) return [-1, 0];
+  const k = pool[Math.floor(cellHash(c.i, c.j, seed, 5) * pool.length) % pool.length];
+  return [k, pickTurn(frameInfo.turns && frameInfo.turns[cls], c.i, c.j, seed, 9,
+                      frameInfo.shape > 2)];
+}
+
+/** The cached order nearest the view direction as a cell's patch sees it:
+ *  in the cell's frame, and turned back by the patch's own turn. */
+function nearestCached(c, forward, turnQ) {
+  const W = c.warp, f = forward;
+  let l = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
+           W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
+           W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
+  if (turnQ) {
+    const [cs, sn] = turnCosSin(turnQ);
+    l = [cs * l[0] + sn * l[1], -sn * l[0] + cs * l[1], l[2]];
+  }
+  let best = 0, bestDot = -2;
+  for (let k = 0; k < cacheDirs.length; k++) {
+    const d = cacheDirs[k][0] * l[0] + cacheDirs[k][1] * l[1] + cacheDirs[k][2] * l[2];
+    if (d > bestDot) { bestDot = d; best = k; }
+  }
+  return best;
+}
+
+/** Bind the sorted order for one level range of a cell's patch: returns
+ *  its byte offset and how many of its splats come before the patch's
+ *  middle (null when not known). A turned centre takes its own live order
+ *  when the worker made one, else the cached order nearest its turned view. */
+function bindOrder(range, turnQ, c, forward) {
+  const start = range[0], k = rangeIndex.get(start);
+  if (turnQ) {
+    const at = sortMode === 'live' ? spunAt.get(`${start},${turnQ}`) : undefined;
+    if (at != null) { gl.bindBuffer(gl.ARRAY_BUFFER, spunBuf); return { at: at * 4, behind: null }; }
+  }
+  if ((turnQ || sortMode === 'cached') && cacheReady) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, cacheIndexBuf);
+    const d = nearestCached(c, forward, turnQ);
+    return { at: (d * cacheStride + start) * 4,
+             behind: cacheBehind && k != null ? cacheBehind[d * rangeIndex.size + k] : null };
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
+  return { at: start * 4, behind: liveBehind && k != null ? liveBehind[k] : null };
+}
+
+/** Draw one level range of a cell's patch in the order bound for it:
+ *  whole, or with `span` 'back' the splats before its middle in that order
+ *  and 'front' the rest (a frame's two parts; without a split known, the
+ *  back part is all of it). Returns how many were drawn. */
+function drawSpan(c, range, turnQ, span, forward) {
+  const o = bindOrder(range, turnQ, c, forward);
+  let from = 0, n = range[1];
+  if (span) {
+    const k = o.behind == null ? (span === 'back' ? n : 0) : Math.min(o.behind, n);
+    if (span === 'back') n = k; else { from = k; n -= k; }
+  }
+  if (n <= 0) return 0;
+  gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0, o.at + 4 * from);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+  drawnSplats += n; drawCalls++;
+  return n;
+}
+
+/** The turned centres near enough for their order to show (the first two
+ *  levels), as one live sort each: [{start, count, c, s, key}]. */
+function turnedNear(b) {
+  if (!frameInfo || !centres || !cells.length) return [];
+  const out = new Map();
+  const reach = lodBase * 2 * (tileSize || 1);
+  const ga = gridAngle * Math.PI / 180;
+  for (const c of cells) {
+    if (c.centre == null || c.centre < 0 || !c.turn) continue;
+    const dx = c.x - b.eye[0], dy = c.y - b.eye[1], dz = c.z - b.eye[2];
+    if (dx * b.forward[0] + dy * b.forward[1] + dz * b.forward[2] < -2 * tileSize) continue;
+    if (Math.hypot(dx, dy, dz) > reach) continue;
+    const [cs, sn] = turnCosSin(c.turn);
+    // The live sort runs along the world direction; the grid turns too.
+    const ca = Math.cos(ga) * cs - Math.sin(ga) * sn, sa = Math.sin(ga) * cs + Math.cos(ga) * sn;
+    for (const [start, count] of centres[c.centre].levels.slice(0, 2)) {
+      const key = `${start},${c.turn}`;
+      if (count && !out.has(key)) out.set(key, { start, count, c: ca, s: sa, key });
+    }
+    if (out.size >= 256) break;
+  }
+  return [...out.values()];
+}
+
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   // Rendered smaller under auto quality; the browser scales it up.
@@ -2168,10 +2819,26 @@ function resize() {
 }
 
 function frame() {
-  // Frame time for the benchmark and auto quality (performance.now, not the
-  // rAF timestamp, so throttling reads the same).
+  // Draw only when something changed, and at most MAX_FPS times a second.
+  // Drawn flat out (120 fps, millions of splats), a large world took the
+  // whole GPU and a video in another window stuttered and stopped.
   {
     const t = performance.now();
+    const bb = cam.basis();
+    const key = [...bb.forward, ...bb.eye, canvas.clientWidth, canvas.clientHeight, cam.fov]
+      .map((v) => v.toFixed(4)).join(',');
+    const busy = orbiting || held.size || zoomGoal || camVel[0] || camVel[1] || camVel[2]
+      || capture.active || bench.active || sortPending || regenPending || shotWanted
+      || (mergeOn && mergeKey !== '' && mergeHaveKey !== mergeKey);
+    if (busy || key !== lastFrameKey) { lastFrameKey = key; wakeFrames = WAKE_FRAMES; }
+    const measuring = capture.active || bench.active;
+    const due = measuring || t - lastDrawAt >= 1000 / MAX_FPS - 1;
+    const heartbeat = t - lastDrawAt > 1000;         // anything a poke missed
+    if (!due || (wakeFrames <= 0 && !heartbeat)) { requestAnimationFrame(frame); return; }
+    wakeFrames--;
+    lastDrawAt = t;
+    // Frame time for the benchmark and auto quality (performance.now, not the
+    // rAF timestamp, so throttling reads the same).
     if (benchPrev) benchDt = t - benchPrev;
     benchPrev = t;
   }
@@ -2192,7 +2859,8 @@ function frame() {
     if (key !== lastSortKey) {
       lastSortKey = key;
       sortPending = true;
-      worker.postMessage({ type: 'sort', forward: b.forward, eye: b.eye });
+      worker.postMessage({ type: 'sort', forward: b.forward, eye: b.eye,
+                           spins: sortMode === 'live' ? turnedNear(b) : [] });
     }
   }
 
@@ -2258,6 +2926,7 @@ function frame() {
     gl.uniform1f(farU.shade, groundShade);
     gl.uniform1f(farU.saturation, saturation);
     gl.uniform1f(farU.macro, macro);
+    gl.uniform1f(farU.blend, classBlend && classCount > 1 ? 1.0 : 0.0);
     gl.uniform1i(farU.open, 4);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, field && openTex ? openTex : null);
@@ -2271,6 +2940,16 @@ function frame() {
     gl.activeTexture(gl.TEXTURE7);
     gl.bindTexture(gl.TEXTURE_2D, tileInfoTex);
     gl.uniform1f(farU.hasTileInfo, tileInfoTex ? 1.0 : 0.0);
+    const ringed = !!(frameInfo && centres && centreTex);
+    gl.uniform1i(farU.centres, 8);
+    gl.activeTexture(gl.TEXTURE8);
+    gl.bindTexture(gl.TEXTURE_2D, ringed ? centreTex : null);
+    gl.uniform1i(farU.centreTone, 9);
+    gl.activeTexture(gl.TEXTURE9);
+    gl.bindTexture(gl.TEXTURE_2D, ringed ? centreToneTex : null);
+    gl.uniform1f(farU.hasCentres, ringed ? 1.0 : 0.0);
+    gl.uniform3f(farU.ringFar, ringed ? frameInfo.radius : 0, ringed ? frameInfo.wobble : 0,
+                 ringed ? frameInfo.shape || 2 : 2);
     gl.drawElements(gl.TRIANGLES, farCount, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
     gl.disable(gl.DEPTH_TEST);
@@ -2387,41 +3066,111 @@ function frame() {
     // (threshold in tiles) and ask the worker for one stream per group.
     // Merged cells draw at level 0 without cross-fade: merging only happens
     // right at the camera, where level 0 is used anyway.
-    let groupOf = null, groups = null;
+    // Each cell's own-class weight, for the blend's corners. A corner is
+    // shared by four cells, so its weight is theirs averaged: neighbours
+    // agree along the edge and the boundary does not step by tiles.
+    let blendGrid = null;
+    const spotMode = classBlend && blendSpots && classCount > 1 && !!tileClass && cells.length > 1;
+    if (classBlend && !blendSpots && classCount > 1 && tileClass && cells.length) {
+      blendGrid = new Map();
+      for (const c of cells) {
+        const w = c.mix == null || c.mix >= blendWidth ? 1
+          : 0.5 + 0.5 * (c.mix / Math.max(blendWidth, 1e-6));
+        blendGrid.set(c.j * gridN + c.i, { cls: c.cls, alt: c.alt, w });
+      }
+    }
+    const weightOf = (cls, n) => (n.cls === cls ? n.w : (n.alt === cls || n.alt == null ? 1 - n.w : 0));
+    const blendCorners = (c) => [[0, 0], [1, 0], [0, 1], [1, 1]].map(([di, dj]) => {
+      let sum = 0, k = 0;
+      for (const [ox, oy] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
+        const i = c.i + di + ox, j = c.j + dj + oy;
+        if (i < 0 || j < 0 || i >= gridN || j >= gridN) continue;
+        const n = blendGrid.get(j * gridN + i);
+        if (n) { sum += weightOf(c.cls, n); k++; }
+      }
+      return k ? sum / k : 1;
+    });
+    // By spot: a cell next to other materials draws those whose field
+    // reaches into it (spotDraws in frames.js), each with its own field; kept
+    // on the cell until the grid is rebuilt.
+    const classAt = (i, j) => (i < 0 || j < 0 || i >= gridN || j >= gridN ? -1
+      : tileClass[cells[j * gridN + i].patch]);
+    const padded = (f) => { const a = new Float32Array(52); a.set(f); return a; };
+    const spotOf = (c) => {
+      if (c.spot === undefined) {
+        const draws = spotDraws(classAt, c.i, c.j);
+        const mates = draws.slice(1).map((d) => ({ tile: tileOfClass(c.patch, d.cls),
+                                                    field: padded(d.field) }))
+          .filter((m) => m.tile >= 0);
+        c.spot = mates.length ? { field: padded(draws[0].field), mates } : null;
+      }
+      return c.spot;
+    };
+    // A cell dissolving into the other class draws twice with its own
+    // uniforms, so it stays out of merged streams.
+    const blends = (c) => (spotMode ? !!spotOf(c)
+      : !!blendGrid && c.mix != null && Math.min(...blendCorners(c)) < 0.999);
+
+    // With frames each cell draws a frame and a centre; a merged group gives
+    // each its own slot, so it holds half as many cells.
+    const framed = !!(frameInfo && centres);
+    const hasCentre = (c) => framed && c.centre != null && c.centre >= 0;
+    const cellParts = (c) => (hasCentre(c)
+      ? [{ range: patches[c.patch].levels[0], turn: 0, role: ROLE_FRAME, z0: tileZ0[c.patch] },
+         { range: centres[c.centre].levels[0], turn: c.turn, role: ROLE_CENTRE,
+           z0: centres[c.centre].z0, tone: c.tone }]
+      : [{ range: patches[c.patch].levels[0], turn: 0, role: ROLE_TILE, z0: tileZ0[c.patch] }]);
+    for (let i = 0; i < MAX_GROUP; i++) setSlot(i, 0, ROLE_TILE, 0);
+    gl.uniform4f(splatU.ring, framed ? frameInfo.radius : 0, framed ? frameInfo.ring / 2 : 0,
+                 framed ? frameInfo.wobble : 0, framed ? frameInfo.shape || 2 : 2);
+    const prom = framed && frameInfo.prominence ? frameInfo.prominence
+      : [0.02 * (tileSize || 1.5), 0.08 * (tileSize || 1.5)];
+    gl.uniform2f(splatU.prom, prom[0], prom[1]);
+    gl.uniform1f(splatU.spots, blendSpots ? 1.0 : 0.0);
+    gl.uniform1f(splatU.mixWarp, SPOT_WARP);
+
+    let groupOf = null, groups = null, groupParts = null;
     if (mergeOn && tileSize && visible.length > 1) {
       const vc = visible.map((v) => v.c);
       const ar = gridAngle * Math.PI / 180;
       const ga = { c: Math.cos(ar), s: Math.sin(ar) };
-      const g = mergeGroups(vc, b.eye, { threshold: tileSize * mergeThreshold });
+      const g = splitOut(mergeGroups(vc, b.eye, { threshold: tileSize * mergeThreshold,
+                                                  cap: framed ? MAX_GROUP / 2 : MAX_GROUP }),
+                         vc.map(blends));
       const multi = g.groups.filter((x) => x.length > 1);
       if (multi.length) {
         groupOf = g.groupOf; groups = g.groups;
+        // One entry per slot: the cell (index into visible) and what it draws.
+        groupParts = groups.map((x) => x.flatMap((k) => cellParts(vc[k]).map((e) => ({ k, ...e }))));
         mergeStats.groups = multi.length;
         mergeStats.cells = multi.reduce((t, x) => t + x.length, 0);
 
-        // What a returned stream must match: the cells, the groups and the
-        // rough heading (or a stream for the opposite heading draws back
-        // to front).
+        // What a returned stream must match: the cells and what they hold,
+        // the groups and the rough heading (or a stream for the opposite
+        // heading draws back to front).
         const dir = b.forward.map((v) => Math.round(v * 24)).join(',');
-        const key = dir + '|' + groups.map((x) => x.map(
-          (k) => `${vc[k].i}.${vc[k].j}`).join('+')).join('/');
+        const key = dir + '|' + groups.map((x) => x.map((k) => {
+          const c = vc[k];
+          return `${c.i}.${c.j}.${c.patch}` + (hasCentre(c) ? `.${c.centre}.${c.turn}` : '');
+        }).join('+')).join('/');
         if (key !== mergeKey) {
           mergeKey = key;
           mergeSeq++;
           worker.postMessage({
             type: 'mergeGroups', eye: [0, 0, 0], seq: mergeSeq,
             // View direction in the tile frame (positions are tile-local and
-            // the grid may be rotated); world offsets go in `shift`.
+            // the grid may be rotated); world offsets go in `shift`, a
+            // centre's turn in `spin`.
             forward: [ ga.c * b.forward[0] + ga.s * b.forward[1],
                       -ga.s * b.forward[0] + ga.c * b.forward[1],
                        b.forward[2] ],
-            groups: groups.map((x) => x.map((k) => {
-              const c = vc[k], pp = patches[c.patch];
-              const [start, count] = pp.levels[0];
+            groups: groupParts.map((parts) => parts.map((e) => {
+              const c = vc[e.k];
               const shift = (c.x - b.eye[0]) * b.forward[0]
                           + (c.y - b.eye[1]) * b.forward[1]
                           + (c.z - b.eye[2]) * b.forward[2];
-              return { patch: c.patch, start, count, shift };
+              return { start: e.range[0], count: e.range[1], shift,
+                       ...(e.turn ? { spin: turnCosSin(e.turn) } : {}) };
             })),
           });
         }
@@ -2455,11 +3204,13 @@ function frame() {
           const stream = mergeHave[gi];
           if (stream && stream.length) {
             cellXYArr.fill(0);
-            groups[gi].forEach((k, slot) => {
+            groupParts[gi].forEach((e, slot) => {
               if (slot >= MAX_GROUP) return;
-              cellXYArr[2 * slot] = visible[k].c.x;
-              cellXYArr[2 * slot + 1] = visible[k].c.y;
+              cellXYArr[2 * slot] = visible[e.k].c.x;
+              cellXYArr[2 * slot + 1] = visible[e.k].c.y;
+              setSlot(slot, e.turn, e.role, e.z0, e.tone);
             });
+            flushSlots();
             gl.uniform2fv(splatU.cellXY, cellXYArr);
             gl.uniform1f(splatU.mix, -1.0);    // merged groups never blend
             gl.uniform1f(splatU.fade, 1.0);
@@ -2481,13 +3232,20 @@ function frame() {
       // so the class boundary wanders at splat scale instead of stepping by
       // tiles. c.mix is the decision margin (0 = coin toss); below
       // blendWidth the second draw is worth it.
-      let mix = -1, other = -1;
-      if (classBlend && classCount > 1 && tileClass && c.mix != null) {
-        if (c.mix < blendWidth) {
-          // Half and half at a tie, all its own class at the band's edge.
-          mix = 0.5 + 0.5 * (c.mix / Math.max(blendWidth, 1e-6));
+      let mix = -1, other = -1, corners = null, spot = null;
+      if (spotMode) {
+        spot = spotOf(c);
+        if (spot) mix = 0.5;
+      } else if (blendGrid && c.mix != null) {
+        corners = blendCorners(c);
+        if (Math.min(...corners) < 0.999) {
           other = alternateTile(c, p);
+          if (other >= 0) mix = 0.5;
         }
+      }
+      if (mix >= 0) {
+        if (corners) gl.uniform4f(splatU.mixCorners, corners[0], corners[1], corners[2], corners[3]);
+        gl.uniform1f(splatU.mixNoise, 1.0);
       }
 
       cellXYArr[0] = c.x; cellXYArr[1] = c.y;
@@ -2527,55 +3285,70 @@ function frame() {
       const [lvl, wA, wB] = lodFor(dist);
       lodCounts[lvl]++;
 
-      // Live: one order along the world view direction (right only for
-      // unwarped tiles). Cached: the order for the view direction in the
-      // cell's own frame (W^T v), which is what a warped tile sees.
-      let buf = indexBuf, base = 0;
-      if (sortMode === 'cached' && cacheReady) {
-        const W = c.warp, f = b.forward;
-        const local = [W[0] * f[0] + W[1] * f[1] + W[2] * f[2],
-                       W[3] * f[0] + W[4] * f[1] + W[5] * f[2],
-                       W[6] * f[0] + W[7] * f[1] + W[8] * f[2]];
-        let best = 0, bestDot = -2;
-        for (let k = 0; k < cacheDirs.length; k++) {
-          const d2 = cacheDirs[k][0] * local[0] + cacheDirs[k][1] * local[1]
-                   + cacheDirs[k][2] * local[2];
-          if (d2 > bestDot) { bestDot = d2; best = k; }
-        }
-        buf = cacheIndexBuf;
-        base = best * cacheStride;
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      for (const [li, w] of [[lvl, wA], [lvl + 1, wB]]) {
-        if (w <= 0.001 || li >= p.levels.length) continue;
-        const [start, count] = p.levels[li];
-        if (!count) continue;
-        gl.uniform1f(splatU.fade, w);
-        // Only set the tint when this view owns it (zeroing it here once
-        // broke the tile-identity view).
-        if (showLodColours) {
-          const c2 = LOD_RGB[li % LOD_RGB.length];
-          gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
-          gl.uniform1f(splatU.tintAmount, 0.6);
-        }
-        gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0,
-                                (base + start) * 4);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
-        drawnSplats += count; drawCalls++;
-
-        // The other class, with the complementary dissolve, so each spot
-        // ends up with one splat rather than two or none.
-        if (other >= 0 && patches[other]
-            && li < patches[other].levels.length) {
-          const [os, oc] = patches[other].levels[li];
-          if (oc) {
-            gl.uniform1f(splatU.mix, 1.0 - mix);
-            gl.vertexAttribIPointer(aIndex, 1, gl.UNSIGNED_INT, 0,
-                                    (base + os) * 4);
-            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, oc);
-            drawnSplats += oc; drawCalls++;
-            blendedCells++;
-            gl.uniform1f(splatU.mix, mix);
+      // What the cell draws, in order: its tile; or with frames the part of
+      // its frame before its middle in the sorted order, then its centre,
+      // then the rest, so the centre lies between them. Each is sorted on
+      // its own: live along the world view direction (right for unwarped
+      // tiles), or cached for the view direction in the cell's frame (W^T v);
+      // a turned centre along the view turned back by its turn. A cell in
+      // two classes draws the other class's after all of its own, as with
+      // whole tiles: the dissolve's other half on top everywhere (step by
+      // step, its centre was buried between the two parts of a ripple tile
+      // and showed as a disc). A class with whole tiles has no centre, and
+      // its tile is drawn whole (in the same two parts).
+      const own = { tile: c.patch, centre: hasCentre(c) ? c.centre : -1,
+                    turn: c.turn || 0, tone: c.tone, mate: false };
+      const mateOf = (tile, field) => {
+        const [k, t] = framed ? partnerCentre(c, tileClass[tile]) : [-1, 0];
+        return { tile, centre: k, turn: t, tone: k >= 0 ? toneFor(tile, k, t) : null,
+                 mate: true, field };
+      };
+      if (spot) own.field = spot.field;
+      const mates = spot ? spot.mates.map((m) => mateOf(m.tile, m.field))
+        : other >= 0 ? [mateOf(other, null)] : [];
+      const split = own.centre >= 0 || mates.some((m) => m.centre >= 0);
+      for (const who of [own, ...mates]) {
+        if (who.field) gl.uniform4fv(splatU.mixField, who.field);
+        for (const phase of split ? ['back', 'centre', 'front'] : [null]) {
+          const isCentre = phase === 'centre';
+          if (isCentre && who.centre < 0) continue;
+          const src = isCentre ? centres[who.centre] : patches[who.tile];
+          const role = isCentre ? ROLE_CENTRE : who.centre >= 0 ? ROLE_FRAME : ROLE_TILE;
+          const z0 = isCentre ? src.z0 : tileZ0[who.tile];
+          const turn = isCentre ? who.turn : 0;
+          if (who.mate) {
+            // The complementary dissolve, so each spot ends up with one
+            // splat rather than two or none.
+            if (corners) {
+              gl.uniform4f(splatU.mixCorners, 1 - corners[0], 1 - corners[1],
+                           1 - corners[2], 1 - corners[3]);
+            }
+            gl.uniform1f(splatU.mixNoise, -1.0);
+          }
+          if (showIdentity) {
+            const c2 = tileRGB(isCentre ? patches.length + who.centre : c.patch);
+            gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
+          }
+          for (const [li, w] of [[lvl, wA], [lvl + 1, wB]]) {
+            if (w <= 0.001 || li >= src.levels.length) continue;
+            const [start, count] = src.levels[li];
+            if (!count) continue;
+            gl.uniform1f(splatU.fade, w);
+            // Only set the tint when this view owns it (zeroing it here once
+            // broke the tile-identity view).
+            if (showLodColours) {
+              const c2 = LOD_RGB[li % LOD_RGB.length];
+              gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
+              gl.uniform1f(splatU.tintAmount, 0.6);
+            }
+            setSlot(0, turn, role, z0, isCentre ? who.tone : null);
+            flushSlots(1);
+            const n = drawSpan(c, [start, count], turn, isCentre ? null : phase, b.forward);
+            if (who.mate && n) blendedCells++;
+          }
+          if (who.mate) {
+            if (corners) gl.uniform4f(splatU.mixCorners, corners[0], corners[1], corners[2], corners[3]);
+            gl.uniform1f(splatU.mixNoise, 1.0);
           }
         }
       }
@@ -2809,6 +3582,12 @@ let zoomGoal = 0;
 const held = new Set();
 addEventListener('keydown', (e) => held.add(e.key.toLowerCase()));
 addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
+addEventListener('blur', () => held.clear());
+// Any input keeps the frames coming for a moment (see frame()).
+for (const ev of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup',
+                  'input', 'change', 'resize', 'visibilitychange']) {
+  addEventListener(ev, () => { wakeFrames = WAKE_FRAMES; }, { capture: true, passive: true });
+}
 // Movement runs in the frame loop with a velocity that eases in and out
 // (~0.1 s). The old fixed step on its own timer drifted against the frames
 // and read as judder.
@@ -3251,7 +4030,18 @@ on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
 on('classrule', 'change', (e) => { classOn = e.target.checked; scheduleRegenerate(); });
 on('classswap', 'change', (e) => {
   classSwap = e.target.checked;
+  // Swapping changes where each material goes, not how much of it there
+  // is: a measured share stays with its material (with three, the bush
+  // took the sand's 50%).
+  if (captureShares && classCount >= 2) {
+    setControl('classbalance', snapShare(captureShares[tileClassFor(0)]));
+  }
   updateShareLabel();
+  scheduleRegenerate();
+});
+on('classwander', 'input', (e) => {
+  classWander = +e.target.value;
+  ui.classwandern.textContent = `${Math.round(classWander * 100)}%`;
   scheduleRegenerate();
 });
 on('classaltitude', 'input', (e) => {
@@ -3270,6 +4060,15 @@ on('classbalance', 'input', (e) => {
   scheduleRegenerate();
 });
 on('classblend', 'change', (e) => { classBlend = e.target.checked; });
+on('blendspots', 'change', (e) => { blendSpots = e.target.checked; });
+on('tonegrade', 'change', (e) => { toneGrade = e.target.checked; scheduleRegenerate(); });
+on('decals', 'change', (e) => { decalsOn = e.target.checked; scheduleRegenerate(); });
+on('decalterrain', 'change', (e) => { decalTerrain = e.target.checked; scheduleRegenerate(); });
+on('decalspacing', 'input', (e) => {
+  decalSpacing = +e.target.value;
+  ui.decalspacingn.textContent = `${decalSpacing} tiles`;
+  scheduleRegenerate();
+});
 on('blendwidth', 'input', (e) => {
   blendWidth = +e.target.value;
   ui.blendwidthn.textContent = blendWidth.toFixed(2);
@@ -3463,7 +4262,7 @@ const DEFAULT_SCENES = ['scene', 'desert'];
 async function loadCatalogue() {
   let index = {};
   try {
-    const r = await fetch('./data/index.json');
+    const r = await fetch('./data/index.json', { cache: 'no-cache' });
     if (r.ok) index = await r.json();
   } catch (e) { /* no index: the defaults are still looked for */ }
 
@@ -3733,6 +4532,12 @@ function applyPreset(name) {
   if ('grid' in p) setControl('grid', p.grid);
   for (const [k, v] of Object.entries(p)) {
     if (PRESET_META.has(k) || k === 'grid') continue;
+    // A tileset that measured its capture keeps the capture's share.
+    if (k === 'classbalance' && captureShares && classCount >= 2) {
+      setControl(k, snapShare(captureShares[tileClassFor(0)]));
+      continue;
+    }
+    if (k === 'classblend' && captureShares && classCount >= 2) continue;
     setControl(k, k === 'reliefscale' && v === 'grid' ? gridN : v);
   }
   if (p.view) document.getElementById(p.view)?.click();
@@ -3998,7 +4803,8 @@ function viewerState() {
     names: materialNames(), colours: classColours, counts: tileClassCounts,
     ruleOn: classOn && classCount > 1,
     collects: tileClassFor(0), exposed: tileClassFor(classCount - 1),
-    tiles: patches.length, tileSize, world: gridN * tileSize,
+    tiles: patches.length - (variantOf ? variantOf.filter(b => b >= 0).length : 0),
+    tileSize, world: gridN * tileSize,
     note: meta.note || '', units: meta.units || (loadedManifest && loadedManifest.units) || '',
     metresPerPixel: mpp,
     // How many times the height field repeats across the world (mirrored).

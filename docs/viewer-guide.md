@@ -14,6 +14,7 @@ control). Edit the JSON, not this page.
 - [The material rule](#rule)
 - [Share and swap](#share)
 - [Blending](#blend)
+- [Decals](#decals)
 - [Show the decision](#decision)
 - [Settings](#presets)
 - [Camera](#camera)
@@ -36,12 +37,13 @@ control). Edit the JSON, not this page.
 
 *Captured splat ground cut into Wang tiles and laid over terrain, with each material placed by the shape of the land.*
 
-Hybrid GSWT chooses which material goes where from a coverage map a person paints. Here that map is computed from the terrain: drainage or sediment, topographic position, slope and altitude. The tiling, ordering and merging reimplement GSWT so the rule can be tested at scale.
+In Hybrid GSWT a person paints which material goes where (a class map, painted with a brush beside a separately painted height map). Here it is derived from the terrain itself: drainage or sediment, topographic position, slope and altitude. The tiling, ordering and merging reimplement GSWT so the rule can be tested at scale.
 
 Limits: lighting is baked into the capture; the desert scrub comes from about 4 × 5 m of capture; the rule's one validation so far was null.
 
 - Zeng, Ma, Sander. GSWT: Gaussian Splatting Wang Tiles. SIGGRAPH Asia 2025.
 - Zeng, Ma, Sander. Hybrid Gaussian Wang Tiles for Class-aware Authoring and Rendering. SIGGRAPH 2026.
+- Desert tiles: OpenDroneMap COPR dataset (Coal Oil Point Reserve; Tobias and Mandel 2009), CC BY-SA 4.0.
 - See also: [The material rule](#rule), [Wang tiles](#tiles)
 
 <a id="tileset"></a>
@@ -139,6 +141,21 @@ Swap chooses which material collects. The exporter's material order is arbitrary
 Avoids the staircase of whole-tile boundaries, as Hybrid GSWT's per-Gaussian priority does. Costs a second draw call in the band.
 
 - See also: [The material rule](#rule)
+
+<a id="decals"></a>
+## Decals
+
+*Distinct pieces of the capture, set into a few plain tiles.*
+
+Tiles have to be the plainest ground a capture holds, or every repeat shows; that leaves out what makes the capture look real, such as a shrub and its shadow. scripts/decals.py finds such pieces and bakes each into copies of plain tiles, inside a disc clear of the edges, so a copy meets its neighbours exactly as its tile does.
+
+The layout lays plain tiles first, then swaps a copy in at most once per block of 'decal spacing' tiles each way, and never the same decal within two blocks of itself. Too dense, and a handful of decals reads as clutter and as repetition. Each tile has two copies, each with a different decal at a different spot in it, so decals do not sit on a grid. Decals are not turned, so their shadows fall the way the capture's do, and they keep their height: the flattening that removes spikes from bare ground is not applied to them.
+
+With 'decals follow the terrain', the rule leads: each block tries a few cells and keeps the one nearest the edge of the other material, where plants thin out into sand; out in the open most blocks stay bare. Decals are numbered in colour order, and a smooth field over the map picks which part of that order grows where, so neighbours look alike without repeating.
+
+- Glanville. Texture Bombing. GPU Gems, 2004: scattering features over a tiled texture.
+- In the code: `bozkir/decals.py`, `scripts/decals.py`, `web/decals.js`
+- See also: [Wang tiles](#tiles), [Repetition and busyness](#repetition)
 
 <a id="decision"></a>
 ## Show the decision

@@ -266,6 +266,43 @@ function quantile(values, q) {
  *  opts: spacing, radius, sediment, sharpness (width of the undecided
  *  band), altitude (height against shape, 0..1), coherence (median radius),
  *  balance (share of class 0 with two classes, or an array of shares). */
+/** Per cell, how far the height line between materials moves there:
+ *  smooth noise from `large` cells across (the hills: the line climbs and
+ *  dips) down to two cells (ragged edges, stray patches), each scale half
+ *  as strong as the one above, as natural boundaries are (fractal; a few
+ *  smooth scales gave rounded blobs), within +-amount/2 of the map's
+ *  height range. Zero everywhere for amount 0. Seeded, so a layout is the
+ *  same each time. */
+export function wanderField(n, amount, seed = 0, large = 8) {
+  const out = new Float64Array(n * n);
+  if (!(amount > 0)) return out;
+  const hash = (i, j, salt) => {
+    let v = (i * 374761393 + j * 668265263 + seed * 2246822519 + salt * 3266489917) | 0;
+    v = Math.imul(v ^ (v >>> 15), 2246822507);
+    v = Math.imul(v ^ (v >>> 13), 3266489909);
+    return ((v ^ (v >>> 16)) >>> 0) / 4294967296;
+  };
+  const noise = (x, y, s, salt) => {
+    const u = x / s, v = y / s, i = Math.floor(u), j = Math.floor(v);
+    const fx = u - i, fy = v - j, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const a = hash(i, j, salt), b = hash(i + 1, j, salt);
+    const c = hash(i, j + 1, salt), d = hash(i + 1, j + 1, salt);
+    return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy;
+  };
+  const scales = [];
+  for (let s = large, w = 1; s >= 2 && scales.length < 6; s /= 2.2, w /= 2) scales.push([s, w]);
+  if (!scales.length) scales.push([2, 1]);
+  const total = scales.reduce((t, [, w]) => t + w, 0);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      let v = 0;
+      scales.forEach(([s, w], o) => { v += w * noise(i, j, s, o + 1); });
+      out[j * n + i] = amount * (v / total - 0.5);
+    }
+  }
+  return out;
+}
+
 export function classify(z, n, classes, opts = {}) {
   // Analysis at the finer sampling, then brought down to cells: at one
   // sample per tile the maps alias, and channels narrower than a cell vanish.
@@ -278,7 +315,11 @@ export function classify(z, n, classes, opts = {}) {
   const raw = flow(z, m);
   const f = unit(downsample(raw.map(Math.log1p), m, n, 'max'));
   // Altitude: without it a hollow on a summit read the same as one in a valley.
-  const e = unit(downsample(z, m, n));
+  // `heightShift` (per cell, optional): where the height at which one
+  // material gives way to the next is moved (wanderField), so the line
+  // between them is not one contour across the world. None by default.
+  const e0 = unit(downsample(z, m, n));
+  const e = opts.heightShift ? e0.map((v, i) => v + opts.heightShift[i]) : e0;
 
   // Sediment, when the generator recorded it: where erosion actually left
   // material, rather than where drainage suggests it would. Max-pooled like

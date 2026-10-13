@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ORDER = ['about', 'tileset', 'tiles', 'terrain', 'world', 'relief', 'detail',
-         'rule', 'share', 'blend', 'decision', 'presets', 'camera', 'walk',
+         'rule', 'share', 'blend', 'decals', 'decision', 'presets', 'camera', 'walk',
          'look', 'lighting', 'macro', 'renderer', 'farfield', 'quality',
          'warp', 'lod', 'ordering', 'merging', 'measure', 'repetition']
 

@@ -3,7 +3,7 @@
   "desert": {
     "names": ["sand", "scrub"],
     "units": "m",
-    "note": "one drone capture; the scrub comes from about 4 × 5 m of it"
+    "note": "OpenDroneMap COPR dataset (Tobias and Mandel 2009, CC BY-SA 4.0); the scrub comes from about 4 × 5 m of it"
   },
   "starter": {
     "units": "m",

@@ -5,6 +5,12 @@
 //   node tests/test_web.mjs
 
 import { starterTileset } from '../web/starter.js';
+import { decalVariants, placeDecals } from '../web/decals.js';
+import {
+  TURN_STEPS, cellHash, poolsByClass, pickCentre, pickTurn, turnCosSin, groundLevel,
+  centreShare, keepChance, spotShare, ringNorm, ringProfile, toneTerms, toneAt,
+  partnerClass, spotField, spotDraws, fieldAt, fieldReaches, SPOT_WARP, gradedPool,
+} from '../web/frames.js';
 import { readFileSync } from 'node:fs';
 import {
   boundarySign, constraints, drawOrder, violations,
@@ -12,7 +18,7 @@ import {
 import { readZip, pickTileset, describe, writeZip } from '../web/tileset.js';
 import { HeightField, openness } from '../web/heightfield.js';
 import { report } from '../web/benchmark.js';
-import { classify, cueWeights, flow, sampleGrid, slope, tpi } from '../web/landform.js';
+import { classify, cueWeights, flow, sampleGrid, slope, tpi, wanderField } from '../web/landform.js';
 import { generate as generateTerrain, GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from '../web/terrain.js';
 import {
   SLOT_BITS, MAX_GROUP, INDEX_BITS, INDEX_MASK,
@@ -1321,6 +1327,286 @@ test('the starter tileset is a valid Wang set whose shared edges match', () => {
       ok(d < 6, `class ${cls} colour ${code}: east and west edges differ by ${d.toFixed(1)}`);
     }
   }
+});
+
+// ------------------------------------------------------------------ decals
+
+test('decals: spaced out, never the same one nearby, plain layout untouched', () => {
+  // 18 plain tiles, one copy each, 6 decals taken in turn (as decals.py does).
+  const tiles = [];
+  for (let k = 0; k < 18; k++) tiles.push({ class: 0 });
+  for (let k = 0; k < 18; k++) tiles.push({ class: 0, base: k, decal: k % 6 });
+  const v = decalVariants(tiles);
+  eq(v.size, 18, 'every plain tile has its copy');
+  ok(decalVariants([{ class: 0 }, { class: 1 }]) === null, 'no copies, no map');
+  const N = 48, S = 5;
+  const laid = Array.from({ length: N * N }, (_, k) => (k * 7) % 18);
+  const before = laid.slice();
+  const placed = placeDecals((k) => laid[k], N, v, S, 3);
+  eq(laid, before, 'placing only reports, it does not touch the layout');
+  ok(placed.length > 0, 'nothing placed');
+  ok(placed.length <= Math.ceil(N / S) ** 2, 'more than one per block');
+  for (const p of placed) eq(tiles[p.tile].base, laid[p.cell], 'a copy of another tile');
+  for (let a = 0; a < placed.length; a++) {
+    for (let b = a + 1; b < placed.length; b++) {
+      const p = placed[a], q = placed[b];
+      if (p.decal !== q.decal) continue;
+      const di = Math.abs((p.cell % N) - (q.cell % N));
+      const dj = Math.abs(Math.floor(p.cell / N) - Math.floor(q.cell / N));
+      ok(di >= 2 * S || dj >= 2 * S, `decal ${p.decal} twice within ${2 * S} tiles`);
+    }
+  }
+  eq(placeDecals((k) => laid[k], N, v, S, 3), placed, 'same seed, same decals');
+  ok(placeDecals((k) => laid[k], N, v, 12, 3).length < placed.length,
+     'wider spacing should place fewer');
+  eq(placeDecals((k) => laid[k], N, null, S, 3), [], 'no copies, nothing placed');
+});
+
+test('decals following the terrain: fewer in the open, neighbours alike', () => {
+  const tiles = [];
+  for (let k = 0; k < 18; k++) tiles.push({ class: 0 });
+  for (let k = 0; k < 18; k++) for (let c = 0; c < 2; c++) {
+    tiles.push({ class: 0, base: k, decal: (k * 2 + c) % 10 });
+  }
+  const v = decalVariants(tiles);
+  const N = 96, S = 4;
+  const laid = Array.from({ length: N * N }, (_, k) => (k * 7) % 18);
+  const plain = placeDecals((k) => laid[k], N, v, S, 5);
+  const open = placeDecals((k) => laid[k], N, v, S, 5, { weight: () => 0 });
+  const edge = placeDecals((k) => laid[k], N, v, S, 5, { weight: () => 1 });
+  ok(open.length < 0.4 * plain.length, `open ground kept ${open.length} of ${plain.length}`);
+  ok(edge.length > 0.8 * plain.length, `full weight kept ${edge.length} of ${plain.length}`);
+  // The weight picks where in a block: the left half wins when it is weighted.
+  const left = placeDecals((k) => laid[k], N, v, S, 5,
+                           { weight: (k) => ((k % N) % S < S / 2 ? 1 : 0) });
+  const inLeft = left.filter((p) => (p.cell % N) % S < S / 2).length;
+  ok(inLeft > 0.8 * left.length, `only ${inLeft} of ${left.length} on the weighted side`);
+  // Grouped: next-door decals are nearer in colour order than at random.
+  const gap = (list) => {
+    let sum = 0, n = 0;
+    for (const p of list) for (const q of list) {
+      if (p === q) continue;
+      const d = Math.hypot((p.cell % N) - (q.cell % N),
+                           Math.floor(p.cell / N) - Math.floor(q.cell / N));
+      if (d <= 2.5 * S) { sum += Math.abs(p.decal - q.decal); n++; }
+    }
+    return sum / Math.max(n, 1);
+  };
+  const grouped = placeDecals((k) => laid[k], N, v, S, 5, { groups: true });
+  ok(gap(grouped) < gap(plain), `grouped ${gap(grouped).toFixed(2)} vs ${gap(plain).toFixed(2)}`);
+  for (const list of [grouped, edge]) {
+    for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) {
+      const p = list[a], q = list[b];
+      if (p.decal !== q.decal) continue;
+      ok(Math.abs((p.cell % N) - (q.cell % N)) >= 2 * S
+         || Math.abs(Math.floor(p.cell / N) - Math.floor(q.cell / N)) >= 2 * S,
+         'the same decal twice nearby');
+    }
+  }
+});
+
+// ------------------------------------------------------------------ frames.js
+
+test('a centre turns only as far as its material allows', () => {
+  const deg = (q) => q / TURN_STEPS * 360;
+  const off = (d, to) => Math.abs(((d - to) % 360 + 540) % 360 - 180);
+  const any = [], ripple = [], lit = [];
+  for (let i = 0; i < 40; i++) for (let j = 0; j < 40; j++) {
+    any.push(deg(pickTurn({ any: true }, i, j, 3)));
+    ripple.push(deg(pickTurn({ any: false, half: true, spread: 10 }, i, j, 3)));
+    lit.push(deg(pickTurn({ any: false, half: false, spread: 10 }, i, j, 3)));
+  }
+  ok(ripple.every((d) => Math.min(off(d, 0), off(d, 180)) <= 10.8), 'a ripple turned too far');
+  ok(ripple.some((d) => off(d, 180) <= 10.8) && ripple.some((d) => off(d, 0) <= 10.8),
+     'ripples never half turned');
+  ok(lit.every((d) => off(d, 0) <= 10.8), 'a lopsided texture was half turned');
+  const quarters = [0, 0, 0, 0];
+  for (const d of any) quarters[Math.floor(d / 90) % 4]++;
+  ok(Math.min(...quarters) > any.length / 6, `turns bunched: ${quarters}`);
+  eq(pickTurn({ any: true }, 5, 7, 3), pickTurn({ any: true }, 5, 7, 3), 'not repeatable');
+  const [c, s] = turnCosSin(TURN_STEPS / 4);
+  close(c, 0, 1e-12); close(s, 1, 1e-12);
+});
+
+test('cells pick centres from their own pool, not their neighbours\'', () => {
+  const centres = [{ class: 0 }, { class: 1 }, { class: 0 }, { class: 0, base: 0 }, { class: 1 }];
+  eq(poolsByClass(centres, 2), [[0, 2], [1, 4]], 'decal copies are not picked');
+  for (let i = 0; i < 30; i++) {
+    const avoid = [0];
+    ok(pickCentre([0, 2], i, 1, 9, avoid) === 2, 'took the neighbour\'s centre');
+  }
+  ok(pickCentre([0], 3, 3, 9, [0]) === 0, 'a pool of one must still give one');
+  eq(pickCentre([], 1, 1, 1), -1);
+  const seen = new Set();
+  for (let i = 0; i < 50; i++) seen.add(pickCentre([0, 2, 5, 7], i, 2 * i, 4));
+  eq(seen.size, 4, 'some centres never picked');
+  ok(cellHash(1, 2, 3) !== cellHash(1, 2, 3, 1), 'salt ignored');
+});
+
+test('frame and centre share the ring, and a tuft stays whole', () => {
+  for (const r of [0.30, 0.40, 0.45, 0.50, 0.60]) {
+    close(centreShare(r, 0.45, 0.075) + (1 - centreShare(r, 0.45, 0.075)), 1, 1e-12);
+  }
+  close(centreShare(0.45, 0.45, 0.075), 0.5, 1e-12);
+  eq(centreShare(0.30, 0.45, 0.075), 1); eq(centreShare(0.60, 0.45, 0.075), 0);
+  ok(centreShare(0.43, 0.45, 0.075) > 0.6, 'not sharpened');
+  const flat = keepChance(0.2, 0), tall = keepChance(0.2, 1);
+  close(flat, 0.2, 1e-12);
+  ok(tall > 0.6, `a tall splat kept only ${tall}`);
+});
+
+test('a rounded-square centre: its norm, and quarter turns only', () => {
+  close(ringNorm(0.3, 0.4), 0.5, 1e-12);
+  close(ringNorm(0.5, 0, 6), 0.5, 1e-12);
+  close(ringNorm(0.5, 0.5, 6), 0.5 * 2 ** (1 / 6), 1e-12);
+  ok(ringNorm(0.5, 0.5, 6) < Math.hypot(0.5, 0.5), 'not squarer than a disc');
+  const seen = new Set();
+  for (let i = 0; i < 40; i++) seen.add(pickTurn({ any: true }, i, 3, 7, 2, true));
+  eq([...seen].sort((a, b) => a - b).join(), '0,64,128,192');
+  const dir = new Set();
+  for (let i = 0; i < 40; i++) dir.add(pickTurn({ any: false, half: true, spread: 9 }, i, 3, 7, 2, true));
+  eq([...dir].sort((a, b) => a - b).join(), '0,128');
+});
+
+test('blend by spot: each spot one material, the two sides complementary', () => {
+  for (const w of [0, 0.2, 0.4, 0.5, 0.55, 0.8, 1]) close(spotShare(w) + spotShare(1 - w), 1, 1e-12);
+  eq(spotShare(0.3), 0); eq(spotShare(0.7), 1);       // outside the strip: one material
+  close(spotShare(0.5), 0.5, 1e-12);
+  ok(spotShare(0.45, 1) > spotShare(0.45, 0) + 0.2, 'a tall splat keeps no more of its chance');
+});
+
+test('the height line wanders: none at 0, bounded, seeded, and it moves the line', () => {
+  const n = 24;
+  ok(wanderField(n, 0, 3).every((v) => v === 0), 'something at 0');
+  const w = wanderField(n, 0.6, 3, 8);
+  ok(Math.max(...w) <= 0.3 && Math.min(...w) >= -0.3, 'beyond amount/2');
+  ok(Math.max(...w) - Math.min(...w) > 0.15, 'barely moves');
+  eq(wanderField(n, 0.6, 3, 8).join(), w.join(), 'not seeded');
+  ok(wanderField(n, 0.6, 4, 8).join() !== w.join(), 'the seed ignored');
+  // A plain slope, by height only: one straight line, unless it wanders.
+  const over = 2, m = n * over, z = new Float64Array(m * m);
+  for (let j = 0; j < m; j++) for (let i = 0; i < m; i++) z[j * m + i] = i / m;
+  const opts = { altitude: 1, coherence: 0, balance: 0.5 };
+  const flat = classify(z, n, 2, opts).cls;
+  const moved = classify(z, n, 2, { ...opts, heightShift: wanderField(n, 1, 3, 8) }).cls;
+  const changed = flat.reduce((t, v, k) => t + (v !== moved[k]), 0);
+  ok(changed > n && changed < n * n / 2, `cells changed: ${changed}`);
+});
+
+test('tones meet: near another material, the centres nearest its tone', () => {
+  const tone = (k) => [0.1, 0.9, 0.5, 0.3, 0.7, 0.2][k];   // towards the other
+  const pool = [0, 1, 2, 3, 4, 5];
+  eq(gradedPool(pool, tone, 1).join(), '1,4,2');
+  eq(gradedPool(pool, tone, 2).join(), '1,4,2,3,5');
+  eq(gradedPool(pool, tone, 3), pool);
+  eq(gradedPool([7], tone, 1).join(), '7');
+  const at = (i, j) => (i < 0 || j < 0 || i >= 6 || j >= 6 ? -1 : i < 3 ? 0 : 1);
+  eq(partnerClass(at, 1, 0, 2), 1); eq(partnerClass(at, 0, 0, 2), -1);
+});
+
+test('blend by spot: neighbours\' materials, as far in as out', () => {
+  // Material 0 on the left (i < 4), 1 on the right, 2 in one cell at (6, 6)
+  // and a corner of three at (4, 0): 2 below-right of the boundary.
+  const n = 8;
+  const at = (i, j) => (i < 0 || j < 0 || i >= n || j >= n ? -1
+    : (i === 6 && j === 6) || (i === 4 && j === 0) ? 2 : i < 4 ? 0 : 1);
+  eq(partnerClass(at, 3, 2), 1); eq(partnerClass(at, 1, 1), -1);
+  // The two sides of a boundary read complementary values at a point.
+  const a = spotField(at, 3, 3, 0), b = spotField(at, 4, 3, 1);
+  for (const [x, y] of [[0.9, 0.3], [1.0, 0.5], [1.3, 0.8], [1.6, -0.2]]) {
+    close(fieldAt(a, x, y) + fieldAt(b, x - 1, y), 1, 1e-6);
+  }
+  close(fieldAt(a, 1, 0.5), 0.5, 1e-6);            // the boundary on the edge
+  close(fieldAt(a, 0.5, 0.5), 1, 1e-6); close(fieldAt(a, 1.5, 0.5), 0, 1e-6);
+  eq(spotDraws(at, 3, 3).map((d) => d.cls).join(), '0,1', 'both sides reach across');
+  eq(spotDraws(at, 4, 3).map((d) => d.cls).join(), '1,0');
+  eq(spotDraws(at, 1, 3).length, 1, 'blends too far from the boundary');
+  ok(SPOT_WARP < 1, 'the field only reaches one cell out');
+  // Where three meet, each draws every one that reaches it.
+  eq(spotDraws(at, 3, 0).map((d) => d.cls).join(), '0,1,2');
+  // A lone cell keeps a patch of its own around its middle.
+  const lone = spotField(at, 6, 6, 2);
+  close(fieldAt(lone, 0.5, 0.5), 1, 1e-6);
+  close(fieldAt(lone, 0.5, 1.0), 0.5, 1e-6);
+  ok(fieldAt(lone, 0.95, 0.95) < 0.5, 'its corners go to the neighbours');
+  ok(fieldReaches(spotField(at, 6, 5, 2)), 'the lone cell reaches into the one below');
+});
+
+test('the ground height and the ring\'s colours come from the splats', () => {
+  const n = 4000, pos = new Float32Array(3 * n), col = new Uint8Array(4 * n);
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * 2 * Math.PI, r = 0.45;
+    pos[3 * i] = r * Math.cos(a); pos[3 * i + 1] = r * Math.sin(a);
+    pos[3 * i + 2] = i % 10 === 0 ? 0.3 : 0.0;            // one in ten a tuft
+    col[4 * i] = pos[3 * i] > 0 ? 200 : 100; col[4 * i + 1] = 120;
+    col[4 * i + 2] = i % 10 === 0 ? 0 : 80; col[4 * i + 3] = 255;
+  }
+  close(groundLevel(pos, 0, n), 0, 1e-9);
+  const prof = ringProfile(pos, col, 0, n, 0.45, 0.05, 0, 0.03, 16);
+  close(prof[0], 200 / 255, 1e-6);                         // east is bright
+  close(prof[3 * 8], 100 / 255, 1e-6);                     // west is dark
+  close(prof[2], 80 / 255, 1e-6);                          // tufts left out
+});
+
+test('a turned centre is tinted to meet its frame along the ring', () => {
+  const n = 16, F = new Float32Array(48), C = new Float32Array(48);
+  for (let k = 0; k < n; k++) {
+    const phi = (k + 0.5) / n * 2 * Math.PI;
+    F[3 * k] = 0.5 + 0.04 * Math.cos(phi); F[3 * k + 1] = 0.5; F[3 * k + 2] = 0.4;
+    C[3 * k] = 0.46 + 0.03 * Math.sin(phi); C[3 * k + 1] = 0.5; C[3 * k + 2] = 0.44;
+  }
+  for (const q of [0, 64, 101]) {
+    const t = toneTerms(F, C, q);
+    for (let k = 0; k < n; k++) {
+      const phi = (k + 0.5) / n * 2 * Math.PI;
+      // The centre's own angle under this tile angle, before its turn.
+      const own = phi - q / TURN_STEPS * 2 * Math.PI;
+      const want = 0.5 + 0.04 * Math.cos(phi) - (0.46 + 0.03 * Math.sin(own));
+      close(toneAt(t, 1, phi)[0], want, 0.006, `turn ${q}, sector ${k}`);
+      close(toneAt(t, 1, phi)[2], -0.04, 1e-6);
+    }
+    close(toneAt(t, 0, 1.0)[0], 0.04, 1e-6, 'the middle takes the mean difference');
+  }
+  ok(toneAt(toneTerms(F.map(() => 1), C, 0), 1, 0)[0] <= 0.12, 'not capped');
+});
+
+wtest('a turned centre is sorted along the view turned back', async () => {
+  const w = await loadWorker();
+  const { pos, patches } = scene(6000, 2);
+  await w.send({ type: 'init', positions: pos.buffer.slice(0), patches });
+  const fwd = [0.6, 0.8, 0], a = 0.7, c = Math.cos(a), s = Math.sin(a);
+  const p = patches[1];
+  const r = await w.send({ type: 'sort', forward: fwd, eye: [0, 0, 0],
+                           spins: [{ start: p.start, count: p.count, c, s, key: 'k' }] });
+  eq(r.keys, ['k']);
+  eq(r.offsets, [0]);
+  // How many come before each patch's middle: a frame's back part.
+  const behind = new Uint32Array(r.behind), live = new Uint32Array(r.order);
+  patches.forEach((q, j) => {
+    let want = 0;
+    for (let i = q.start; i < q.start + q.count; i++) {
+      if (pos[3 * i] * fwd[0] + pos[3 * i + 1] * fwd[1] > 0) want++;
+    }
+    eq(behind[j], want, `patch ${j}`);
+    for (let k = q.start; k < q.start + behind[j]; k++) {
+      const i = live[k];
+      ok(pos[3 * i] * fwd[0] + pos[3 * i + 1] * fwd[1] > -1e-3, 'a front splat in the back part');
+    }
+  });
+  const spun = new Uint32Array(r.spun);
+  eq(spun.length, p.count);
+  // The patch turned by a, seen along fwd: depth of the turned position.
+  const depth = (i) => (c * pos[3 * i] - s * pos[3 * i + 1]) * fwd[0]
+                     + (s * pos[3 * i] + c * pos[3 * i + 1]) * fwd[1];
+  let prev = Infinity, bad = 0;
+  for (const i of spun) { const d = depth(i); if (d > prev + 1e-4) bad++; prev = d; }
+  eq(bad, 0, 'not far to near once turned');
+  const g = await w.send({ type: 'mergeGroups', forward: fwd, eye: [0, 0, 0], seq: 1,
+    groups: [[{ start: p.start, count: p.count, shift: 0, spin: [c, s] }]] });
+  const order = new Uint32Array(g.orders[0]);
+  prev = Infinity; bad = 0;
+  for (const v of order) { const d = depth(unpackIndex(v)); if (d > prev + 1e-4) bad++; prev = d; }
+  eq(bad, 0, 'a merged turned centre is out of order');
 });
 
 // ------------------------------------------------------------------ report

@@ -10,6 +10,8 @@
 //           cell picks the one nearest the view direction in its own frame,
 //           which is what a warped tile sees (GSWT 3.4 uses nine).
 // A tile whose frame varies per splat (smooth warp) is exact in neither.
+// A turned centre (frames) is sorted along the view direction turned into
+// its own frame: `spins` in a live sort, `spin` in a merged group.
 
 let positions = null;   // Float32Array, 3 per splat
 let patches = null;     // [{start, count}, ...]
@@ -44,15 +46,24 @@ function directions(k, margin = 0.25) {
     return out;
 }
 
+/** The direction `dir` as seen from a patch turned by (cos, sin) about the
+ *  vertical: the inverse turn. */
+function unturn(dir, c, s) {
+    return [c * dir[0] + s * dir[1], -s * dir[0] + c * dir[1], dir[2]];
+}
+
 /** Counting sort of one patch along one direction into `out`, far to near
- *  (the renderer blends with 'over'). */
+ *  (the renderer blends with 'over'). Returns how many come before the
+ *  patch's middle (the origin): a frame is drawn in two parts, its centre
+ *  between them. */
 function sortPatch(p, dir, eye, out) {
     const [fx, fy, fz] = dir;
     const [ex, ey, ez] = eye;
     const a = p.start, b = p.start + p.count;
-    if (b <= a) return;
+    if (b <= a) return 0;
 
-    let min = Infinity, max = -Infinity;
+    let min = Infinity, max = -Infinity, behind = 0;
+    const middle = -(ex * fx + ey * fy + ez * fz);
     for (let i = a; i < b; i++) {
         const d = (positions[3 * i] - ex) * fx
             + (positions[3 * i + 1] - ey) * fy
@@ -60,6 +71,7 @@ function sortPatch(p, dir, eye, out) {
         dist[i] = d;
         if (d < min) min = d;
         if (d > max) max = d;
+        if (d > middle) behind++;
     }
 
     const scale = max > min ? 65535 / (max - min) : 0;
@@ -72,6 +84,7 @@ function sortPatch(p, dir, eye, out) {
     starts[65535] = a;
     for (let q = 65535; q > 0; q--) starts[q - 1] = starts[q] + counts[q];
     for (let i = a; i < b; i++) out[starts[depths[i]]++] = i;
+    return behind;
 }
 
 /** One sorted stream for a merged group of cells (GSWT 3.4).
@@ -111,11 +124,13 @@ function sortGroup(cells, dir, eye) {
         const c = cells[s];
         const shift = typeof c.shift === 'number' ? c.shift
             : c.offset[0] * fx + c.offset[1] * fy + c.offset[2] * fz;
+        // A turned centre's splats are in its own frame.
+        const [gx, gy, gz] = c.spin ? unturn(dir, c.spin[0], c.spin[1]) : dir;
         const a = c.start, b = c.start + c.count;
         for (let i = a; i < b; i++) {
-            const d = (positions[3 * i] - eye[0]) * fx
-                + (positions[3 * i + 1] - eye[1]) * fy
-                + (positions[3 * i + 2] - eye[2]) * fz + shift;
+            const d = (positions[3 * i] - eye[0]) * gx
+                + (positions[3 * i + 1] - eye[1]) * gy
+                + (positions[3 * i + 2] - eye[2]) * gz + shift;
             groupDepth[w] = d;
             groupSlot[w] = s;
             groupLocal[w] = i;
@@ -164,14 +179,17 @@ self.onmessage = (e) => {
         const t0 = performance.now();
         const all = new Uint32Array(n * dirs.length);
         const scratch = new Uint32Array(n);
+        const behind = new Uint32Array(dirs.length * patches.length);
         for (let k = 0; k < dirs.length; k++) {
-            for (const p of patches) sortPatch(p, dirs[k], [0, 0, 0], scratch);
+            patches.forEach((p, j) => {
+                behind[k * patches.length + j] = sortPatch(p, dirs[k], [0, 0, 0], scratch);
+            });
             all.set(scratch, k * n);
         }
         self.postMessage({
             type: 'cached', views: dirs.length, dirs, stride: n,
-            order: all.buffer, ms: performance.now() - t0,
-        }, [all.buffer]);
+            order: all.buffer, behind: behind.buffer, ms: performance.now() - t0,
+        }, [all.buffer, behind.buffer]);
         return;
     }
 
@@ -191,10 +209,26 @@ self.onmessage = (e) => {
     if (msg.type === 'sort') {
         if (!positions) return;
         const t0 = performance.now();
-        for (const p of patches) sortPatch(p, msg.forward, msg.eye, order);
+        const behind = new Uint32Array(patches.length);
+        patches.forEach((p, j) => { behind[j] = sortPatch(p, msg.forward, msg.eye, order); });
         const out = order.slice();
+        // Turned centres, one order each, end to end (offsets in order).
+        const spins = msg.spins || [];
+        let total = 0;
+        for (const r of spins) total += r.count;
+        const spun = new Uint32Array(total);
+        const offsets = [];
+        let at = 0;
+        for (const r of spins) {
+            sortPatch(r, unturn(msg.forward, r.c, r.s), [0, 0, 0], order);
+            spun.set(order.subarray(r.start, r.start + r.count), at);
+            offsets.push(at);
+            at += r.count;
+        }
         self.postMessage(
-            { type: 'sorted', order: out.buffer, ms: performance.now() - t0 },
-            [out.buffer]);
+            { type: 'sorted', order: out.buffer, ms: performance.now() - t0,
+              behind: behind.buffer, spun: spun.buffer, offsets,
+              keys: spins.map((r) => r.key) },
+            [out.buffer, behind.buffer, spun.buffer]);
     }
 };

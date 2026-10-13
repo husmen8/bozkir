@@ -19,6 +19,10 @@ out/
 scenes/
 downloads/
 
+# Copies of tilesets taken before re-exporting, and saved patches. Local
+# safety nets, not part of the project.
+/backup/
+
 # Exported tilesets and height fields.
 #
 # Only the desert tileset is public: its splats, manifest, height field,

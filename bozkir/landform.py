@@ -241,7 +241,7 @@ def cue_weights(altitude=0.4):
 
 def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
              sharpness=2.0, altitude=0.4, coherence=2, balance=None,
-             rules=None):
+             rules=None, height_shift=None):
     """A class per cell, from the shape of the ground. Mirrors `classify`.
 
     `z` is the height sampled on an (n*over)^2 grid, flat, row-major -
@@ -260,6 +260,8 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     t = unit(downsample(tpi(z, m, radius or max(2, m >> 4)), m, n))
     f = unit(downsample(np.log1p(flow(z, m)), m, n, "max"))
     e = unit(downsample(z, m, n))
+    if height_shift is not None:          # the viewer's wanderField, per cell
+        e = e + np.asarray(height_shift, np.float64).ravel()
     sed = (unit(downsample(np.asarray(sediment, np.float64).ravel(), m, n, "max"))
            if sediment is not None else None)
     drive = sed if sed is not None else f

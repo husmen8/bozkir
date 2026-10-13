@@ -23,7 +23,8 @@ The verdicts above are what the numbers allowed. Looked at as tilesets,
 only desert held up, so it is the only one used and the only one published;
 the others stay as screening cases.
 
-desert is the owner's own drone capture: aligned in RealityScan, trained in
+desert is OpenDroneMap's COPR dataset (Coal Oil Point Reserve, California;
+Michele M. Tobias and Alex Mandel, 2009; CC BY-SA 4.0): aligned in RealityScan, trained in
 Brush (SH degree 3), with an OpenDroneMap DTM and orthophoto of the same plot
 used for the rule validation.
 

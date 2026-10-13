@@ -2253,6 +2253,83 @@ def _():
         assert img[..., 3].mean() > 100, 'atlas tiles came out empty'
 
 
+@test('export_wang --frames writes frames, a centre pool and an atlas of both')
+def _():
+    import json
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    from bozkir.ply import Splats, SH_C0, save_ply
+    from bozkir.pack import read_splat
+    root = Path(__file__).resolve().parents[1]
+    r = np.random.default_rng(1)
+    n = 120000
+    xy = r.random((n, 2)) * 7.2 - 3.6
+    rgb = np.clip(0.5 + r.normal(0, 0.06, (n, 3)), 0, 1)
+    scene = Splats(xyz=np.c_[xy, r.normal(0, 0.008, n)],
+                   opacity=np.full(n, 0.95),
+                   scale=np.c_[np.full((n, 2), 0.05), np.full(n, 0.008)],
+                   rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+                   sh_dc=(rgb - 0.5) / SH_C0, sh_rest=np.zeros((n, 0, 3)),
+                   sh_degree=0)
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        save_ply(scene, d / 'fr.ply')
+        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'fr.ply'),
+                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
+                            '--level-tone', '-o', str(d / 'fr.splat')],
+                           cwd=root, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
+        assert 'turns: ' in p.stdout and 'quiet edges: ' in p.stdout, p.stdout[-800:]
+        m, s = read_splat(d / 'fr.splat', d / 'fr.json')
+        f, cs = m['frames'], m['centres']
+        assert cs and len(f['turns']) == m['classes'], f
+        rad = lambda a, c: np.hypot(*s.xyz[a:a + c, :2].T)
+        for t in m['tiles']:
+            assert rad(*t['levels'][0]).min() >= f['inner'] - 1e-6
+        for c in cs:
+            assert rad(*c['levels'][0]).max() <= f['outer'] + 1e-6
+            assert c['levels'][-1][0] + c['levels'][-1][1] <= m['total']
+        p = subprocess.run([sys.executable, 'scripts/bake_atlas.py', 'fr', '--dir', str(d),
+                            '--res', '16'], cwd=root, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-400:] + p.stderr[-400:]
+        a = json.loads((d / 'fr.atlas.json').read_text())
+        assert a['count'] == len(m['tiles']) + len(cs) and a['tiles'] == len(m['tiles'])
+        assert len(a['seen']) == a['count']
+        # Ripples: a turned centre would meet them out of step, so whole tiles.
+        u = (xy[:, 0] * np.cos(0.5) + xy[:, 1] * np.sin(0.5)) / 0.25
+        rgb = np.clip(0.5 + 0.12 * np.sin(2 * np.pi * u)[:, None]
+                      + r.normal(0, 0.02, (n, 3)), 0, 1)
+        scene.sh_dc = (rgb - 0.5) / SH_C0
+        save_ply(scene, d / 'rip.ply')
+        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'rip.ply'),
+                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
+                            '-o', str(d / 'rip.splat')],
+                           cwd=root, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
+        assert 'centres: no, whole tiles kept' in p.stdout, p.stdout[-1200:]
+        m, s = read_splat(d / 'rip.splat', d / 'rip.json')
+        assert m['centres'] == [] and not m['frames']['turns'][0]['any']
+        assert rad(*m['tiles'][0]['levels'][0]).min() < m['frames']['inner']
+        # desert13's way: patches on their edges, large rounded-square centres.
+        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'fr.ply'),
+                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
+                            '--diamonds', '--centre-shape', '6', '--centre-size', '0',
+                            '--pool-share', '0.5', '-o', str(d / 'sq.splat')],
+                           cwd=root, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
+        assert 'rounded squares' in p.stdout and 'quarter turns' in p.stdout, p.stdout[-1200:]
+        m, s = read_splat(d / 'sq.splat', d / 'sq.json')
+        f, cs = m['frames'], m['centres']
+        assert cs and f['shape'] == 6 and f['outer'] <= 0.44 * m['size'] + 1e-6, f
+        sq = lambda a, c: (np.abs(s.xyz[a:a + c, :2]) ** 6).sum(1) ** (1 / 6)
+        for t in m['tiles']:
+            assert sq(*t['levels'][0]).min() >= f['inner'] - 1e-6
+        for c in cs:
+            assert sq(*c['levels'][0]).max() <= f['outer'] + 1e-6
+
+
 SECTION = 'viewer guide'
 
 

@@ -23,7 +23,7 @@ from bozkir.graphcut import render_patch  # noqa: E402
 from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
                             cached_search, choose, class_separation,
                             describe_trail, level_patch, rendered_coverage,
-                            search_kwargs, split_classes)
+                            search_kwargs, split_classes, rank_clean)
 from bozkir import presets as presets_mod  # noqa: E402
 
 
@@ -66,6 +66,11 @@ def main():
                     help="candidate indices to drop, as 0,3,7. The same "
                          "flag export_wang takes, so a marker spotted in "
                          "these thumbnails can be excluded there")
+    ap.add_argument("--odd-spots", type=float, default=0.0, metavar="CM",
+                    help="cross out patches holding a spot at least this wide "
+                         "(cm) whose colour the rest of their material does "
+                         "not have; export_wang leaves them out with the same "
+                         "flag (0 = off)")
     ap.add_argument("--classes", type=int, default=1,
                     help="split the candidates into this many groups that "
                          "look unlike each other, each internally alike. "
@@ -192,10 +197,21 @@ def main():
     print("  four patches that look alike tile into ground; four that do "
           "not tile into patchwork.")
 
+    index_of = {id(c): i for i, c in enumerate(cands)}
     if args.exclude.strip():
         drop = {int(x) for x in args.exclude.replace(",", " ").split()}
         cands = [c for i, c in enumerate(cands) if i not in drop]
         print(f"\n  excluded {sorted(drop)}, {len(cands)} candidates left")
+
+    odd = set()
+    if args.odd_spots > 0 and cands:
+        groups = (split_classes(cands, classes=args.classes, per_class=10 ** 9)
+                  if args.classes > 1 else [cands])
+        for gi, g in enumerate(groups):
+            ordered, clean, _ = rank_clean(g, args.size, args.odd_spots, up)
+            odd |= {index_of[id(c)] for c in ordered[clean:]}
+        print(f"\n  odd spots ({args.odd_spots:g} cm or more, crossed out): "
+              f"{', '.join(map(str, sorted(odd))) or 'none'}")
 
     if args.classes > 1:
         groups = split_classes(cands, classes=args.classes,
@@ -235,9 +251,14 @@ def main():
         a.axis("off")
     for k, (img, r) in enumerate(zip(thumbs, rows)):
         ax[k].imshow(img)
+        if r[0] in odd:
+            h, w = img.shape[:2]
+            ax[k].plot([0, w - 1], [0, h - 1], color="#d62728", lw=2)
+            ax[k].plot([0, w - 1], [h - 1, 0], color="#d62728", lw=2)
         # Salience flags what the eye will find repeating: a landmark in
         # a patch lands in the same place in every tile made from it.
         flag = "  LANDMARK" if r[11] > 8 else ""
+        flag = "  ODD SPOT" if r[0] in odd else flag
         ax[k].set_title(f"{r[0]}   rim {r[9]:.2f}  mid {r[10]:.2f}  "
                         f"sal {r[11]:.0f}{flag}", fontsize=8,
                         color="#b03a2e" if flag else "black")

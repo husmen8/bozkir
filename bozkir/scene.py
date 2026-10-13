@@ -12,7 +12,8 @@ import numpy as np
 
 from .ply import load_ply, save_ply
 from .transform import align_to_ground, ground_normal, recentre
-from .select import crop_cylinder, remove_large, remove_floaters
+from .select import (crop_cylinder, remove_large, remove_floaters, min_size,
+                     cap_height)
 
 CACHE_DIR = Path("data/cache")
 
@@ -177,6 +178,14 @@ def add_scene_args(parser):
     g.add_argument("--flip", action="store_true",
                    help="invert the detected up direction; use when a scene "
                         "comes out upside down")
+    g.add_argument("--max-height", type=float, default=0.0,
+                   help="cm; flatten splats taller than this instead of "
+                        "deleting them: unchanged from above, no spikes from "
+                        "the side (0 = off; pair with --max-extent-pct 99.9 "
+                        "so the size cut keeps them)")
+    g.add_argument("--min-splat", type=float, default=0.0,
+                   help="cm; widen every splat to at least this, the blur "
+                        "training gave it (0 = off)")
     g.add_argument("--no-cache", action="store_true")
     return parser
 
@@ -197,5 +206,15 @@ def config_from_args(args):
 
 def scene_from_args(args, verbose=True):
     """The one line every script needs."""
-    return prepare(args.path, config_from_args(args),
-                   cache=not args.no_cache, verbose=verbose)
+    s = prepare(args.path, config_from_args(args),
+                cache=not args.no_cache, verbose=verbose)
+    # After the cache, so the cached scene stays the plain one.
+    if getattr(args, "max_height", 0) > 0:
+        s = cap_height(s, args.max_height / 100.0, args.up_axis)
+        if verbose:
+            print(f"  splats flattened to at most {args.max_height:g} cm tall")
+    if getattr(args, "min_splat", 0) > 0:
+        s = min_size(s, args.min_splat / 100.0)
+        if verbose:
+            print(f"  splats widened to at least {args.min_splat:g} cm")
+    return s

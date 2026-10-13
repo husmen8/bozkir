@@ -133,7 +133,7 @@ def hard_regions(u, v):
 
 
 def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
-                centre_hold=0.05, verbose=False):
+                centre_hold=0.05, verbose=False, cover=None):
     """Which patch each pixel of a tile comes from.
 
     From the four hard triangles, each diagonal in turn moves to where its
@@ -142,6 +142,9 @@ def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
     everything outside a band round the diagonal (so cuts cannot collide).
 
     `images`: four RGB arrays (north, east, south, west) on a common grid.
+    `cover`: optionally four boolean arrays, where each patch has ground (a
+    patch set on its edge covers half the tile); a cut only moves a pixel
+    between two patches that both cover it.
     """
     imgs = [np.asarray(im, dtype=np.float64) for im in images]
     r = imgs[0].shape[0]
@@ -165,6 +168,8 @@ def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
             continue
         pair = (labels == la) | (labels == lb)
         free = near & pair
+        if cover is not None:
+            free &= cover[la] & cover[lb]
         take_a = ((labels == la) & ~free) | ~pair
         take_b = (labels == lb) & ~free
         if not take_a.any() or not take_b.any():
@@ -174,6 +179,21 @@ def tile_labels(images, size=1.0, band=0.12, edge_margin=0.06,
         if verbose:
             print(f"    diagonal {la}-{lb}: {free.sum():,} pixels free")
     return labels
+
+
+def centre_labels(tile_img, centre_img, frame=0.06, band=0.10):
+    """Where a tile takes its centre patch (True) instead of its Wang
+    assembly: forced inside, never in the frame along the edges (so edges
+    still match), and in between a closed seam where the two agree (the
+    tile as a centre patch plus four boundary strips, DAV-GSWT 3.4; a
+    closed curve instead of a cross, as omega-tiles)."""
+    r = tile_img.shape[0]
+    u, v = tile_uv(r)
+    m = np.maximum(np.abs(u), np.abs(v))
+    take_a = m >= 0.5 - frame
+    take_b = m < 0.5 - frame - band
+    return two_label_cut(tile_img, centre_img, take_a, take_b,
+                         free=~(take_a | take_b))
 
 
 def label_at(patch, labels, size, up_axis=2):

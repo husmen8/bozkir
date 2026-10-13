@@ -1061,6 +1061,51 @@ def test_graph_cut_tiles_still_match_at_their_edges():
                 assert np.array_equal(g[0], other), edge
 
 
+def _source_patch(cx, cy, size=1.0, n=12_000):
+    """A patch cut from one big ground at (cx, cy), each splat carrying
+    where it lay in the ground in its colour (sh_dc x, y)."""
+    xy = RNG.uniform(-size / 2, size / 2, (n, 2))
+    s = scene(np.concatenate([xy, np.zeros((n, 1))], 1).astype(np.float32),
+              opacity=np.full(n, 0.7, np.float32), scale=np.full((n, 3), 0.01, np.float32))
+    s.sh_dc[:, 0], s.sh_dc[:, 1] = xy[:, 0] + cx, xy[:, 1] + cy
+    return s
+
+
+def _gap_across_edges(tiles, codes, size):
+    """Median distance in the ground between splats just below a north
+    edge and just above it, in the neighbour with that south colour: how
+    far apart the ground on the two sides of an edge came from."""
+    from scipy.spatial import cKDTree
+    gaps = []
+    for c in {k[0] for k in codes}:
+        lo = tiles[next(i for i, k in enumerate(codes) if k[0] == c)]
+        hi = tiles[next(i for i, k in enumerate(codes) if k[2] == c)]
+        y_lo, y_hi = lo.xyz[:, 1] - size / 2, hi.xyz[:, 1] + size / 2
+        a = lo.sh_dc[(y_lo > -0.03) & (y_lo <= 0) & (np.abs(lo.xyz[:, 0]) < 0.3)][:, :2]
+        b = hi.sh_dc[(y_hi < 0.03) & (y_hi >= 0) & (np.abs(hi.xyz[:, 0]) < 0.3)][:, :2]
+        gaps.append(np.median(cKDTree(a).query(b)[0]))
+    return float(np.median(gaps))
+
+
+def test_diamonds_let_the_ground_run_on_across_an_edge():
+    """Cohen's diamond sits on its edge: the ground just above an edge
+    continues the ground just below it. Centred on the tile instead, the
+    two sides are a tile apart in the ground (the bug --diamonds fixes)."""
+    h = [_source_patch(0, 0), _source_patch(5, 0)]
+    v = [_source_patch(0, 5), _source_patch(5, 5)]
+    for cut in (False, True):
+        old, _ = build_tile_set(h, v, 1.0, cut=cut, resolution=64)
+        new, codes = build_tile_set(h, v, 1.0, cut=cut, resolution=64, diamonds=True)
+        assert _gap_across_edges(old, codes, 1.0) > 0.8, cut
+        assert _gap_across_edges(new, codes, 1.0) < 0.03, cut
+        for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+            groups = {}
+            for t, c in zip(new, codes):
+                groups.setdefault(c[col], []).append(edge_gaussians(t, 1.0, edge=edge))
+            for g in groups.values():
+                assert all(np.array_equal(g[0], o) for o in g), (cut, edge)
+
+
 # ---------------------------------------------------------------- pack.py
 
 def test_stratified_keep_respects_its_budget_and_spreads():
@@ -1307,6 +1352,92 @@ def test_presets_save_replay_and_yield_to_explicit_flags():
             pass
 
 
+def test_presets_stack():
+    """A preset names its base and lists only changes; --preset a,b puts
+    b over a; the command line still wins."""
+    import argparse
+    import json
+    import tempfile
+    from bozkir.presets import add_preset_args, apply as apply_preset
+
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.json"
+        f.write_text(json.dumps({
+            "base": {"size": 1.5, "lod": 4, "cut": True},
+            "child": {"base": "base", "lod": 3},
+            "extra": {"cut": False},
+            "loop": {"base": "loop"}}))
+
+        def run(*argv):
+            ap = argparse.ArgumentParser()
+            ap.add_argument("path")
+            ap.add_argument("--size", type=float, default=1.0)
+            ap.add_argument("--lod", type=int, default=1)
+            ap.add_argument("--cut", action="store_true")
+            add_preset_args(ap, path=f)
+            return apply_preset(ap, ["x.ply", *argv], path=f)
+
+        a = run("--preset", "child")
+        assert (a.size, a.lod, a.cut) == (1.5, 3, True)
+        b = run("--preset", "child,extra")
+        assert (b.size, b.lod, b.cut) == (1.5, 3, False)
+        c = run("--preset", "child,extra", "--lod", "2")
+        assert c.lod == 2
+        try:
+            run("--preset", "loop")
+            raise AssertionError("a preset that is its own base should fail")
+        except SystemExit:
+            pass
+
+
+def test_desert4_is_desert3_plus_todays_flags():
+    """desert3 stays as it was, so v1 rebuilds exactly."""
+    from bozkir.presets import load_all, resolve
+    p = load_all()
+    d3, d4 = resolve(p, ["desert3"]), resolve(p, ["desert4"])
+    assert "base" not in d4
+    assert {k: d4[k] for k in d3} == d3
+    assert d4["odd_spots"] > 0 and d4["decal_auto"] > 0
+    # desert6: both materials, more and varied sand patches, decals off
+    # until markers are told apart on the real capture.
+    d6 = resolve(p, ["desert6"])
+    assert d6["classes"] == 2 and d6["varied"]
+    assert d6["decal_auto"] == 0
+    # desert7: the missing layer instead of fill opacity, decals back.
+    d7 = resolve(p, ["desert7"])
+    assert d7["missing_layer"] and d7["fill_opacity"] == 0 and d7["decal_auto"] > 0
+    # desert8: dense and alike (alike hides the triangles), no missing
+    # layer (seen from the side it showed the capture's haze as sheets).
+    d8 = resolve(p, ["desert8"])
+    assert d8["dense"] and not d8["varied"] and not d8["missing_layer"]
+    assert d8["fill_opacity"] > 0 and d8["decal_auto"] > 0
+    # desert9: the capture's own materials in its own shares, centre patches.
+    d9 = resolve(p, ["desert9"])
+    assert d9["classes"] == 3 and d9["min_share"] > 0 and d9["centres"] and d9["cut"]
+    assert len(d9["class_rotations"].split(",")) == d9["classes"]
+    assert d9["flatten_bare"] > 0 and not d9["flatten_classes"]
+    # desert10: the count chosen with reasons, the haze weighed down.
+    d10 = resolve(p, ["desert10"])
+    assert d10["classes"] == "auto" and 0 < d10["quality_weight"] <= 1
+    assert 1 < d10["faint_fill"] <= 6                      # gentle, under the fill's own 6
+    assert d10["tone_order"] and d10["seen_shares"] and d10["decal_class"] == -1
+    # ground: everything decided by the capture, one preset for any of them.
+    g = p["ground"]
+    assert "base" not in g and g["class_scale"] == "auto" and g["pure_share"] > 0
+    assert g["classes"] == "auto" and resolve(p, ["desert11"]) == g
+    # desert12: the same, with frames and levels true to their tiles.
+    d12 = resolve(p, ["desert12"])
+    assert d12["frames"] and d12["level_tone"] and not g.get("frames")
+    assert {k: v for k, v in d12.items() if k not in ("frames", "level_tone")} == g
+    # desert13: edge patches on their edges, centres as large rounded squares.
+    d13 = resolve(p, ["desert13"])
+    assert d13["diamonds"] and d13["centre_shape"] > 2 and d13["centre_size"] == 0
+    assert 0 < d13["pool_share"] < 1
+    assert {k: v for k, v in d13.items()
+            if k not in ("diamonds", "centre_shape", "centre_size", "pool_share",
+                         "height_order", "pool_sharpness", "fill_spare_haze")} == d12
+
+
 def test_preset_keys_a_script_lacks_are_skipped():
     """One preset per scene has to work with every script."""
     import argparse
@@ -1366,6 +1497,7 @@ def test_every_script_declares_the_flags_it_reads():
         # Flags the shared helpers attach.
         declared |= {"raw", "clean", "radius_pct", "floater_std",
                      "max_extent_pct", "sh", "up_axis", "flip", "no_cache",
+                     "min_splat", "max_height",
                      "preset", "save_preset", "list_presets"}
 
         used = {n.attr for n in _ast.walk(tree)
@@ -1375,6 +1507,1097 @@ def test_every_script_declares_the_flags_it_reads():
         if missing:
             problems.append(f"{path.name}: {', '.join(missing)}")
     assert not problems, "flags read but never declared -> " + "; ".join(problems)
+
+
+def test_min_size_widens_thin_splats_only():
+    from bozkir.select import min_size
+    from bozkir.ply import Splats
+    n = 3
+    s = Splats(xyz=np.zeros((n, 3), np.float32), opacity=np.full(n, 0.5, np.float32),
+               scale=np.float32([[0.003, 0.02, 0.0], [0.1, 0.1, 0.1], [0.0, 0.0, 0.0]]),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=np.zeros((n, 3), np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    out = min_size(s, 0.01)
+    assert np.all(out.scale >= 0.01 - 1e-7)
+    assert abs(out.scale[1, 0] - 0.1) < 0.001          # wide splats barely change
+    assert np.allclose(out.opacity, s.opacity)          # nothing else touched
+    assert np.allclose(s.scale[0, 0], 0.003)            # the input is not modified
+
+
+def test_cap_height_keeps_the_view_from_above():
+    from bozkir.select import cap_height, _matrix_to_quat
+    from bozkir.ply import Splats, quat_to_matrix
+    r = np.random.default_rng(0)
+    n = 200
+    q = r.normal(size=(n, 4)).astype(np.float32)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    # quaternion -> matrix -> quaternion round trip (up to sign)
+    back = _matrix_to_quat(quat_to_matrix(q))
+    assert np.allclose(np.abs((back * q).sum(axis=1)), 1.0, atol=1e-5)
+    s = Splats(xyz=np.zeros((n, 3), np.float32), opacity=np.full(n, 0.5, np.float32),
+               scale=r.uniform(0.002, 0.2, (n, 3)).astype(np.float32), rot=q,
+               sh_dc=np.zeros((n, 3), np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    out = cap_height(s, 0.01)
+    a, b = s.covariance(), out.covariance()
+    assert np.allclose(a[:, :2, :2], b[:, :2, :2], atol=1e-6)     # same from above
+    assert np.all(b[:, 2, 2] <= 0.01 ** 2 + 1e-7)                   # no taller than 1 cm
+    low = a[:, 2, 2] <= 0.01 ** 2
+    assert np.allclose(a[low], b[low], atol=1e-7)                   # short ones untouched
+    assert np.allclose(out.opacity, s.opacity)
+
+
+def test_fill_opacity_makes_a_thin_layer_solid_without_adding_splats():
+    from bozkir.tile import fill_opacity
+    from bozkir.graphcut import render_patch
+    from bozkir.ply import Splats
+    r = np.random.default_rng(0)
+    n = 3000
+    t = Splats(xyz=np.c_[r.random((n, 2)) * 1.5 - 0.75, np.zeros(n)].astype(np.float32),
+               opacity=np.full(n, 0.15, np.float32),        # a see-through layer
+               scale=np.tile(np.float32([0.03, 0.03, 0.003]), (n, 1)),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=np.zeros((n, 3), np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    _, a0 = render_patch(t, 1.5, 48)
+    f = fill_opacity(t, 1.5)
+    _, a1 = render_patch(f, 1.5, 48)
+    assert a0.mean() < 0.85 and a1.mean() > 0.95, (a0.mean(), a1.mean())
+    assert len(f) == len(t) and np.array_equal(f.xyz, t.xyz)
+    assert np.array_equal(f.scale, t.scale) and np.all(f.opacity >= t.opacity)
+
+
+def _shrub_scene():
+    from bozkir.ply import Splats, SH_C0
+    # Thin needles at about the desert's density (2,800 per m^2, uneven
+    # opacity): a scene of big opaque discs once hid a cover test that
+    # found nothing on the real capture.
+    r = np.random.default_rng(3)
+    n = 100000
+    xy = r.random((n, 2)) * 6.0 - 3.0
+    z = r.normal(0, 0.004, n)
+    rgb = np.clip([0.55, 0.5, 0.44] + r.normal(0, 0.08, (n, 3)), 0, 1)
+    shrub = np.hypot(xy[:, 0] - 1.0, xy[:, 1] + 0.5) < 0.25
+    rgb[shrub] = [0.22, 0.28, 0.14]
+    z[shrub] += 0.1
+    marker = (np.abs(xy[:, 0] + 1.5) < 0.12) & (np.abs(xy[:, 1] - 1.0) < 0.12)
+    rgb[marker] = 0.97
+    return Splats(xyz=np.c_[xy, z].astype(np.float32),
+                  opacity=r.uniform(0.2, 0.9, n).astype(np.float32),
+                  scale=np.c_[np.full(n, 0.02), np.full(n, 0.003), np.full(n, 0.003)].astype(np.float32),
+                  rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+                  sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+                  sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+
+
+def _material_patch(seed, base, grey=None, marker=False, n=20000):
+    """A 1.5 m patch of one material with blotches, centred on the origin
+    (as candidates are), optionally with a pale grey hole or a marker."""
+    from scipy.ndimage import zoom
+    r = np.random.default_rng(seed)
+    xy = r.random((n, 2)) * 1.5 - 0.75
+    field = zoom(r.normal(0, 1, (8, 8)), 25, order=3)[:200, :200]
+    ij = np.clip(((xy + 0.75) / 1.5 * 200).astype(int), 0, 199)
+    rgb = np.clip(np.float64(base) + 0.1 * field[ij[:, 1], ij[:, 0]][:, None]
+                  + r.normal(0, 0.05, (n, 3)), 0, 1)
+    if grey is not None:
+        rgb[np.hypot(xy[:, 0] - grey[0], xy[:, 1] - grey[1]) < 0.15] = 0.4
+    if marker:
+        sq = np.all(np.abs(xy - [0.3, -0.2]) < 0.15, axis=1)
+        rgb[sq] = 0.04
+        rgb[sq & np.any(np.abs(xy - [0.3, -0.2]) < 0.025, axis=1)] = [0.8, 0.85, 0.95]
+    s = Splats(xyz=np.c_[xy, np.zeros(n)].astype(np.float32),
+               opacity=np.full(n, 0.9, np.float32),
+               scale=np.full((n, 3), 0.02, np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    return (1.0, (seed * 2.0, 0.0), s, {})
+
+
+def test_odd_spots_find_the_hole_and_the_marker_not_blotches():
+    from bozkir.patches import rank_clean
+    bush = [_material_patch(i, [0.19, 0.2, 0.15]) for i in range(8)]
+    bush.append(_material_patch(8, [0.19, 0.2, 0.15], grey=(0.2, 0.1)))
+    ordered, clean, _ = rank_clean(bush, 1.5, 25)
+    assert clean == 8 and ordered[-1] is bush[-1], "the grey hole was not found"
+    sand = [_material_patch(20 + i, [0.42, 0.36, 0.28]) for i in range(8)]
+    sand.append(_material_patch(40, [0.42, 0.36, 0.28], marker=True))
+    ordered, clean, _ = rank_clean(sand, 1.5, 25)
+    assert clean == 8 and ordered[-1] is sand[-1], "the marker was not found"
+    # A patch overlapping another is not its own evidence: two shifted
+    # copies of one hole must both be found.
+    a = _material_patch(8, [0.19, 0.2, 0.15], grey=(0.2, 0.1))
+    b = (1.0, (16.5, 0.0), a[2], {})
+    ordered, clean, _ = rank_clean(bush[:8] + [a, b], 1.5, 25)
+    assert clean == 8
+
+
+def _field_scene(markers=8, seed=5, size=12.0):
+    """A 12 m field like desert v1: thin needles on sand, a dark bush strip,
+    a dozen shrubs, and survey markers (black squares with a blue or white
+    cross, all alike, as on the real capture)."""
+    r = np.random.default_rng(seed)
+    n = int(2800 * size * size)
+    xy = r.random((n, 2)) * size - size / 2
+    z = r.normal(0, 0.004, n)
+    rgb = np.clip([0.55, 0.5, 0.44] + r.normal(0, 0.08, (n, 3)), 0, 1)
+    bush = xy[:, 0] > size / 2 - 3
+    rgb[bush] = np.clip([0.2, 0.22, 0.14] + r.normal(0, 0.06, (bush.sum(), 3)), 0, 1)
+    shrubs = r.random((12, 2)) * [size - 5, size - 2] - [size / 2 - 1, size / 2 - 1]
+    for c in shrubs:
+        d = np.hypot(*(xy - c).T)
+        m = (d < 0.25) & ~bush
+        rgb[m] = np.clip([0.24, 0.29, 0.14] + r.normal(0, 0.05, (m.sum(), 3)), 0, 1)
+        z[m] += 0.1 * (1 - d[m] / 0.25)
+    marks = r.random((markers, 2)) * [size - 5, size - 2] - [size / 2 - 1, size / 2 - 1]
+    for k, c in enumerate(marks):
+        sq = np.all(np.abs(xy - c) < 0.15, axis=1)
+        rgb[sq] = 0.03
+        rgb[sq & np.any(np.abs(xy - c) < 0.025, axis=1)] = \
+            [0.45, 0.55, 0.92] if k % 2 == 0 else [0.85, 0.87, 0.92]
+    s = Splats(xyz=np.c_[xy, z].astype(np.float32),
+               opacity=r.uniform(0.2, 0.9, n).astype(np.float32),
+               scale=np.c_[np.full(n, 0.02), np.full(n, 0.003), np.full(n, 0.003)].astype(np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    return s, shrubs, marks
+
+
+def test_decals_find_the_shrubs_not_the_markers():
+    """Markers stand out more than any shrub, so they topped every sheet
+    (6 of 12 automatic picks on desert v1, then 3 of 12 with a test of
+    colour rarity); no test of brightness caught them. Measured on two real
+    markers and a shrub: a blue cast, and black right beside it."""
+    from bozkir.decals import find
+    for markers, seed in [(0, 4), (8, 5), (24, 8)]:
+        s, shrubs, marks = _field_scene(markers, seed)
+        found = find(s, 0.45, count=12)
+        for x, y, _ in found:
+            assert not len(marks) or np.hypot(*(marks - [x, y]).T).min() > 0.5, \
+                f"a marker at ({x:.2f}, {y:.2f}) was offered as a decal"
+        near = [np.hypot(*(shrubs - [x, y]).T).min() < 0.3 for x, y, _ in found[:8]]
+        assert all(near), f"the best eight are not all shrubs: {near}"
+
+
+def test_build_sorts_flags_and_backs_up():
+    import importlib.util
+    import tempfile
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("build", root / "scripts" / "build.py")
+    b = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(b)
+    exp, dec = b.split_flags(["--odd-spots", "30", "--decals", "8",
+                              "--exclude-at=-1.5,2", "--decal-seed", "4", "--cut"])
+    assert exp == ["--odd-spots", "30", "--exclude-at=-1.5,2", "--cut"]
+    assert dec == ["--decals", "8", "--decal-seed", "4"]
+    with tempfile.TemporaryDirectory() as d:
+        stem = Path(d) / "t"
+        for s in (".splat", ".json"):
+            (Path(d) / ("t" + s)).write_text("x")
+        moved = b.back_up(stem)
+        assert moved and sorted(p.name for p in moved.iterdir()) == ["t.json", "t.splat"]
+        assert not (Path(d) / "t.splat").exists()
+        assert b.back_up(stem) is None
+
+
+def test_apart_keeps_a_materials_patches_off_shared_ground():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    # Best first: a tight cluster, then patches further out.
+    cands = [(0, (x, y), None, {}) for x, y in
+             [(0, 0), (0.6, 0), (0, 0.6), (3, 0), (1.2, 1.2), (0, 3), (3, 3)]]
+    got = [c[1] for c in ew.apart(cands, 4, 1.5)]
+    assert got == [(0, 0), (3, 0), (0, 3), (3, 3)], got
+    # Too few apart: overlapping ones fill in, best first.
+    got = [c[1] for c in ew.apart(cands[:3], 3, 1.5)]
+    assert got == [(0, 0), (0.6, 0), (0, 0.6)], got
+
+
+def test_dense_first_leaves_thin_patches_out():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    sizes = [25723, 6836, 22027, 5852, 20000, 5043, 15644, 6245]   # desert6's sand
+    cands = [(0, (i * 2.0, 0.0), np.zeros(n), {}) for i, n in enumerate(sizes)]
+    got = [len(c[2]) for c in ew.dense_first(cands, 3)]
+    assert got == [25723, 22027, 20000, 15644], got
+    # Too few dense ones: the densest thin ones fill in.
+    got = [len(c[2]) for c in ew.dense_first(cands, 6)]
+    assert got == [25723, 22027, 20000, 15644, 6836, 6245], got
+
+
+def test_missing_layer_adds_only_what_the_capture_shows():
+    from bozkir.tile import missing_layer, merge
+    from bozkir.graphcut import render_patch
+    r = np.random.default_rng(0)
+    xy = r.random((8000, 2)) * 1.5 - 0.75
+    xy = xy[np.hypot(xy[:, 0] - 0.2, xy[:, 1] + 0.1) > 0.25]      # a hole
+    n = len(xy)
+
+    def splats(xy, z, op, sc, rgb):
+        k = len(xy)
+        return Splats(xyz=np.c_[xy, z].astype(np.float32),
+                      opacity=np.broadcast_to(np.float32(op), (k,)).copy(),
+                      scale=np.broadcast_to(np.float32(sc), (k, 3)).copy(),
+                      rot=np.tile(np.float32([1, 0, 0, 0]), (k, 1)),
+                      sh_dc=((np.broadcast_to(np.float32(rgb), (k, 3)) - 0.5) / SH_C0).astype(np.float32),
+                      sh_rest=np.zeros((k, 0, 3), np.float32), sh_degree=0)
+    kept = splats(xy, r.normal(0.05, 0.004, n), 0.9, [0.02, 0.02, 0.004], [0.55, 0.5, 0.44])
+    yy, xx = np.mgrid[0:60, 0:60]
+    hole = np.hypot(-0.75 + (xx + 0.5) * 0.025 - 0.2, 0.75 - (yy + 0.5) * 0.025 + 0.1) < 0.2
+    for wash in (0.8, 0.4):
+        # A huge faint splat centred far off, as the capture's are.
+        cap = merge(kept, splats([[3.0, 1.0]], [-0.2], wash, [20, 20, 0.05], [0.3, 0.25, 0.2]))
+        layer = missing_layer(kept, cap, 1.5)
+        inside = np.hypot(layer.xyz[:, 0] - 0.2, layer.xyz[:, 1] + 0.1) < 0.3
+        assert inside.all(), "the layer went where the patch was solid"
+        assert layer.xyz[:, 2].max() <= np.percentile(kept.xyz[:, 2], 10) + 0.003
+        _, a_t = render_patch(cap, 1.5, 60, 2)
+        _, a_f = render_patch(merge(kept, layer), 1.5, 60, 2)
+        assert abs(a_f[hole].mean() - a_t[hole].mean()) < 0.08, \
+            f"cover {a_f[hole].mean():.2f} against the capture's {a_t[hole].mean():.2f}"
+    # Nothing missing, nothing added.
+    assert len(missing_layer(kept, kept, 1.5)) == 0
+
+
+def test_apart_alike_keeps_a_material_from_mixing_dark_and_pale():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    from bozkir.ply import SH_C0
+
+    def patch(v):
+        n = 200
+        rgb = np.full((n, 3), v, np.float32)
+        return Splats(xyz=np.zeros((n, 3), np.float32), opacity=np.ones(n, np.float32),
+                      scale=np.full((n, 3), 0.01, np.float32),
+                      rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+                      sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+                      sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    # desert7's bush: 0.20 first, then a pale half-sand one and a near twin.
+    cands = [(0, (0, 0), patch(0.20), {}), (0, (3, 0), patch(0.32), {}),
+             (0, (0, 3), patch(0.14), {}), (0, (3, 3), patch(0.21), {}),
+             (0, (0.5, 0), patch(0.20), {})]
+    got = [c[1] for c in ew.apart_alike(cands, 3, 1.5)]
+    assert got == [(0, 0), (3, 3), (0, 3)], got          # the pale one left out
+    got = [c[1] for c in ew.apart_alike(cands, 2, 1.5, apart_too=False)]
+    assert got == [(0, 0), (0.5, 0)], got
+
+
+def _flat_patch(seed, base, std=0.05, n=6000, half=0.95):
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(seed)
+    xy = r.random((n, 2)) * 2 * half - half
+    rgb = np.clip(np.float32(base) + r.normal(0, std, (n, 3)), 0, 1)
+    return Splats(xyz=np.c_[xy, r.normal(0, 0.004, n)].astype(np.float32),
+                  opacity=np.full(n, 0.9, np.float32),
+                  scale=np.c_[np.full((n, 2), 0.03), np.full(n, 0.004)].astype(np.float32),
+                  rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+                  sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+                  sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+
+
+def test_centre_patches_keep_edges_and_end_the_cross():
+    """Each tile's interior from its own patch (a centre patch and four
+    boundary strips, DAV-GSWT; a closed seam, omega-tiles): edges still
+    identical between tiles that share a colour, and the four triangles,
+    patches of different brightness here, no longer meet in the middle:
+    what is left of their tones reaches the centre as a smooth grade (the
+    seam membrane), with no step."""
+    from scipy.ndimage import gaussian_filter
+    from bozkir.wang import build_tile_set, minimal_codes, edge_gaussians
+    from bozkir.graphcut import render_patch, tile_uv
+    h = [_flat_patch(1, [0.55] * 3), _flat_patch(2, [0.40] * 3), _flat_patch(3, [0.65] * 3)]
+    v = [_flat_patch(4, [0.48] * 3), _flat_patch(5, [0.60] * 3), _flat_patch(6, [0.45] * 3)]
+    codes = minimal_codes(3, 3)[:6]
+    centres = [_flat_patch(100 + i, [0.55] * 3) for i in range(6)]
+    u, v_ = tile_uv(64)
+    core = np.maximum(np.abs(u), np.abs(v_)) < 0.38
+    step = {}
+    for name, cs in (("cross", None), ("centre", centres)):
+        tiles, got = build_tile_set(h, v, 1.5, cut=True, resolution=64,
+                                    codes=codes, centres=cs)
+        for edge, col in (("n", 0), ("e", 1), ("s", 2), ("w", 3)):
+            same = {}
+            for t, c in zip(tiles, got):
+                same.setdefault(c[col], []).append(edge_gaussians(t, 1.5, 2, edge, margin=0.03))
+            for g in same.values():
+                assert all(np.array_equal(g[0], x) for x in g), f"{name}: edge {edge} differs"
+        sharp = []
+        for t in tiles:
+            gy, gx = np.gradient(gaussian_filter(render_patch(t, 1.5, 64, 2)[0].mean(-1), 1.5))
+            sharp.append(np.percentile(np.hypot(gx, gy)[core], 95))
+        step[name] = np.mean(sharp)
+    assert step["centre"] < 0.6 * step["cross"], step
+
+
+def test_seam_membrane_meets_the_edge_and_stays_smooth():
+    """Poisson-style correction: the offset equals the colour difference
+    along the seam and has no step anywhere inside."""
+    from bozkir.wang import seam_membrane
+    r = 64
+    yy, xx = np.mgrid[0:r, 0:r]
+    inside = (np.abs(xx - 31.5) < 20) & (np.abs(yy - 31.5) < 20)
+    diff = np.zeros((r, r, 3))
+    diff[..., 0] = 0.1 * (xx > 31.5)            # the frame is redder on one side
+    f = seam_membrane(diff, np.ones((r, r)), inside)
+    assert abs(f[31, 11, 0]) < 0.03 and abs(f[31, 51, 0] - 0.1) < 0.03, (f[31, 11, 0], f[31, 51, 0])
+    steps = np.abs(np.diff(f[..., 0], axis=1))[inside[:, 1:] & inside[:, :-1]]
+    assert steps.max() < 0.02, steps.max()
+    assert not f[~inside].any()
+
+
+def test_even_out_moves_the_tone_and_keeps_the_detail():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    p = _flat_patch(3, [0.40, 0.36, 0.30], std=0.06)
+    q = ew.even_out(p, np.array([0.45, 0.41, 0.35]), 0.08)
+    assert np.allclose(ew.even_mean(q), [0.45, 0.41, 0.35], atol=0.01)
+    d = q.base_rgb - p.base_rgb
+    assert np.allclose(d.std(axis=0), 0, atol=0.01), "detail changed, not only the tone"
+    far = ew.even_out(p, np.array([0.70, 0.70, 0.70]), 0.08)
+    assert np.all(ew.even_mean(far) - ew.even_mean(p) < 0.09), "moved further than allowed"
+
+
+def test_split_materials_is_not_led_by_a_few_markers():
+    from bozkir.patches import split_materials
+
+    def cand(seed, base, std):
+        return (1.0, (float(seed), 0.0), _flat_patch(seed, base, std, n=1500), {})
+    kinds = ([("bare", cand(i, [0.55, 0.51, 0.45], 0.04)) for i in range(60)]
+             + [("scrub", cand(200 + i, [0.46, 0.43, 0.36], 0.10)) for i in range(50)]
+             + [("green", cand(400 + i, [0.24, 0.28, 0.16], 0.06)) for i in range(8)]
+             + [("marker", cand(600 + i, [0.15, 0.15, 0.20], 0.35)) for i in range(3)])
+    kind = {id(c): k for k, c in kinds}
+    groups = split_materials([c for _, c in kinds], 3)
+    seen = [sorted({kind[id(c)] for c in g} - {"marker"}) for g in groups]
+    assert seen == [["bare"], ["scrub"], ["green"]], seen
+
+
+def test_an_outnumbered_material_is_not_set_aside_as_odd():
+    """desert10 with 800 positions: the sand packed so tightly that all the
+    bush looked odd and it vanished as a material."""
+    from bozkir.patches import split_materials
+
+    def cand(seed, base, std):
+        return (1.0, (float(seed), 0.0), _flat_patch(seed, base, std, n=600), {})
+    kinds = ([("light", cand(i, [0.52, 0.48, 0.44], 0.02)) for i in range(380)]
+             + [("mid", cand(1000 + i, [0.44, 0.41, 0.37], 0.02)) for i in range(330)]
+             + [("bush", cand(2000 + i, [0.23, 0.23, 0.18], 0.07)) for i in range(45)]
+             + [("marker", cand(3000 + i, [0.15, 0.15, 0.20], 0.35)) for i in range(4)])
+    kind = {id(c): k for k, c in kinds}
+    groups = split_materials([c for _, c in kinds], 3)
+    seen = sorted(tuple(sorted({kind[id(c)] for c in g} - {"marker"})) for g in groups)
+    assert seen == [("bush",), ("light",), ("mid",)], seen
+
+
+def test_class_shares_measure_the_capture_not_the_candidates():
+    """A clump that gave plenty of candidates is still a small share of
+    the ground."""
+    from bozkir.patches import class_shares
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(0)
+    n = 150000
+    xy = r.random((n, 2)) * [12.0, 6.0] - [6.0, 3.0]
+    clump = np.hypot(xy[:, 0] - 4.0, xy[:, 1]) < 1.0              # 4% of the ground
+    rgb = np.where(clump[:, None], [0.24, 0.28, 0.16], [0.55, 0.51, 0.45])
+    rgb = np.clip(rgb + r.normal(0, 0.04, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, np.zeros(n)].astype(np.float32), opacity=np.ones(n, np.float32),
+               scale=np.full((n, 3), 0.02, np.float32), rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    sand = [(1, (0, 0), _flat_patch(i, [0.55, 0.51, 0.45], 0.04), {}) for i in range(5)]
+    bush = [(1, (0, 0), _flat_patch(50 + i, [0.24, 0.28, 0.16], 0.04), {}) for i in range(5)]
+    shares = class_shares(s, [sand, bush], 1.5, min_splats=500)
+    assert shares[1] < 0.15 and shares[0] > 0.85, shares
+
+
+
+def _export_module():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    return ew
+
+
+def test_centres_come_from_ground_of_their_own():
+    """desert9: a material's 18 centres were shifted copies from one spot."""
+    ew = _export_module()
+    spot = [(1, (x, y), _flat_patch(int(x * 40 + y * 4), [0.53, 0.48, 0.43], 0.03, n=800), {})
+            for x in np.arange(0, 3.01, 0.25) for y in np.arange(9, 11.41, 0.25)]
+    edge = [(1, (-4.0, 0.0), _flat_patch(999, [0.53, 0.48, 0.43], 0.03, n=800), {})]
+    got = ew.pick_centres(edge, edge + spot, 18, 1.5)
+    assert 2 <= len(got) < 18, len(got)
+    pts = [c[1] for c in edge + got]
+    for i in range(len(pts)):
+        for j in range(i):
+            gap = max(abs(pts[i][0] - pts[j][0]), abs(pts[i][1] - pts[j][1]))
+            assert gap >= 1.05 - 1e-9, (pts[i], pts[j])
+
+
+def test_centres_keep_their_materials_colour():
+    """desert10: the bush ran out of ground and took brown rim sand as
+    centres; every bush tile had a sand square."""
+    ew = _export_module()
+    bush = lambda i, x: (1, (x, 0.0), _flat_patch(i, [0.23, 0.25, 0.19], 0.03, n=900), {})
+    edge = [bush(i, 2.0 * i) for i in range(6)]
+    own = [bush(100 + i, 20.0 + 2.0 * i) for i in range(2)]
+    brown = [(1, (40.0 + 2.0 * i, 0.0), _flat_patch(200 + i, [0.41, 0.36, 0.33], 0.03, n=900), {})
+             for i in range(6)]
+    got = ew.pick_centres(edge, edge + own + brown, 18, 1.5)
+    assert len(got) == 2 and all(c in own for c in got), [c[1] for c in got]
+
+
+def test_a_material_keeps_its_common_tone():
+    """desert11: bluish grass (as blue as red) had the bush's brightness and
+    passed; a yellower bush, or a shrub in a sand tile, must still pass."""
+    from bozkir.patches import tone_gate
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(8)
+
+    def patch(i, base, shrub=0.0, other=None, part=0.0):
+        p = _flat_patch(i, base, 0.05, n=3000)
+        rgb = p.base_rgb.copy()
+        k = len(rgb)
+        if shrub:
+            rgb[: int(shrub * k)] = np.clip([0.2, 0.3, 0.12] + r.normal(0, 0.03, (int(shrub * k), 3)), 0, 1)
+        if other is not None:
+            rgb[: int(part * k)] = np.clip(np.array(other) + r.normal(0, 0.03, (int(part * k), 3)), 0, 1)
+        p.sh_dc = ((rgb - 0.5) / SH_C0).astype(np.float32)
+        return (1, (float(i), 0.0), p, {})
+    bush = [patch(i, [0.25 + 0.01 * (i % 3), 0.25, 0.20 - 0.02 * (i % 4)]) for i in range(30)]
+    test = tone_gate(bush)
+    assert test(patch(100, [0.27, 0.28, 0.27]))[0] is False                    # bluish
+    assert "bluer" in test(patch(101, [0.27, 0.28, 0.27]))[1]
+    assert test(patch(102, [0.27, 0.26, 0.16]))[0]                              # yellower bush
+    sand = [patch(200 + i, [0.5 + 0.01 * (i % 3), 0.46, 0.42]) for i in range(30)]
+    test = tone_gate(sand)
+    assert test(patch(300, [0.51, 0.46, 0.42], shrub=0.08))[0]                  # one shrub
+    ok, why = test(patch(301, [0.51, 0.46, 0.42], other=[0.15, 0.15, 0.2], part=0.45))
+    assert not ok, why                                                          # half something else
+
+
+def test_holes_from_above_are_found():
+    ew = _export_module()
+    whole = _flat_patch(1, [0.5, 0.45, 0.4], n=20000, half=0.75)
+    p = _flat_patch(2, [0.5, 0.45, 0.4], n=20000, half=0.75)
+    keep = np.flatnonzero(np.hypot(p.xyz[:, 0] - 0.3, p.xyz[:, 1] + 0.2) > 0.2)
+    holed = p.subset(keep)
+    n0 = ew.holes(whole, 1.5, 2)[0]
+    n1, area, mask = ew.holes(holed, 1.5, 2)
+    assert n0 == 0 and n1 == 1 and 300 < area < 1400, (n0, n1, area)
+
+
+def test_patches_with_holes_are_passed_over():
+    """desert11: holes in the patches showed in 16 of 18 bush tiles."""
+    ew = _export_module()
+
+    def cand(i, x, hole):
+        p = _flat_patch(i, [0.5, 0.45, 0.4], n=20000, half=0.75)
+        if hole:
+            p = p.subset(np.flatnonzero(np.hypot(p.xyz[:, 0], p.xyz[:, 1]) > 0.2))
+        return (1, (x, 0.0), p, {})
+    cands = [cand(0, 0.0, False), cand(1, 2.0, True), cand(2, 4.0, False), cand(3, 6.0, False)]
+    got = ew.apart_alike(cands, 4, 1.5, accept=lambda c: ew.hole_free(c, 1.5, 2, 0.99))
+    assert sorted(c[1][0] for c in got) == [0.0, 4.0, 6.0], [c[1] for c in got]
+    assert cands[1][3]["holed"] and not cands[0][3]["holed"]
+
+
+def test_the_ground_slab_follows_the_ground_not_the_bush():
+    """A plane fitted through the bush top cut away the ground under it
+    (a third of the splats on this cut): holes in every bush tile."""
+    import argparse
+    from bozkir.patches import ground_level
+    from bozkir.ply import SH_C0
+    ew = _export_module()
+    r = np.random.default_rng(9)
+    n = 120000
+    xy = r.random((n, 2)) * 4.0 - 2.0
+    z = r.normal(0, 0.005, n)
+    bush = xy[:, 0] > -1.0
+    z[bush] += r.random(bush.sum()) * 0.4                        # 40 cm of bush
+    s = Splats(xyz=np.c_[xy, z].astype(np.float32), opacity=np.full(n, 0.8, np.float32),
+               scale=np.full((n, 3), 0.02, np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((np.full((n, 3), 0.4) - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    args = argparse.Namespace(size=1.5, thickness=0.375, extract_margin=0.35, max_per_tile=0)
+    inside = np.all(np.abs(xy) <= 1.37, axis=1)
+    wide = s.subset(np.flatnonzero(inside))
+    h = wide.xyz[:, 2]
+    g = ground_level(h, 0.375)
+    wide = wide.subset(np.flatnonzero((h >= g - 0.094) & (h <= g + 0.375)))
+    got = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.2, "wide": wide, "cut": 2.03})],
+                             1, args, 2, None, s, 0.74)[0]
+    assert len(got) > 0.9 * inside.sum(), (len(got), int(inside.sum()))
+
+
+def test_the_rim_is_not_taken_for_bush_when_shrinking():
+    """desert11: a 2.42 m cut of the capture's dark rim (0.39) passed as bush
+    on the material map, which judges over a tile."""
+    ew = _export_module()
+    bush = [(1, (2.0 * i, 0.0), _flat_patch(i, [0.23 + 0.01 * i, 0.25, 0.19], 0.03, n=900), {})
+            for i in range(6)]
+    alike = ew.colour_alike(bush)
+    rim = (1, (40.0, 0.0), _flat_patch(99, [0.39, 0.34, 0.31], 0.03, n=900), {})
+    more = (1, (44.0, 0.0), _flat_patch(98, [0.26, 0.27, 0.21], 0.03, n=900), {})
+    assert not alike(rim) and alike(more)
+
+
+def test_a_material_can_be_cut_larger_and_shrunk():
+    """--class-scale: a 3 m cut shrunk to the 1.5 m tile, splats with it."""
+    import argparse
+    from bozkir.ply import SH_C0
+    ew = _export_module()
+    r = np.random.default_rng(7)
+    n = 80000
+    xy = r.random((n, 2)) * 8.0 - 4.0
+    rgb = np.clip([0.3, 0.32, 0.2] + r.normal(0, 0.05, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, r.normal(0, 0.05, n)].astype(np.float32),
+               opacity=np.full(n, 0.5, np.float32), scale=np.full((n, 3), 0.02, np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    args = argparse.Namespace(size=1.5, thickness=0.375, extract_margin=0.35, max_per_tile=0)
+    near = lambda half: s.subset(np.flatnonzero(np.all(np.abs(xy) <= half, axis=1)))
+    plain = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(1.0125)})],
+                               1, args, 2)[0]
+    small = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(2.025),
+                                                      "cut": 3.0})], 1, args, 2, None, s, 0.5)[0]
+    reach = lambda p: float(np.abs(p.xyz[:, :2]).max())
+    assert abs(reach(small) - reach(plain)) < 0.1, (reach(small), reach(plain))
+    assert len(small) > 3 * len(plain)                      # four times the ground
+    assert np.allclose(small.scale, 0.01, atol=1e-6)
+    assert float(np.std(small.xyz[:, 2])) < 0.6 * float(np.std(plain.xyz[:, 2]))
+    # On a slope a level slab cut away the uphill and downhill sides (gaps in
+    # desert10s); the slab follows the ground's plane instead.
+    tilted = s.subset(np.arange(len(s)))
+    tilted.xyz = tilted.xyz.copy()
+    tilted.xyz[:, 2] += 0.14 * tilted.xyz[:, 0]                # 8 degrees
+    wide = tilted.subset(np.flatnonzero(np.all(np.abs(xy) <= 2.025, axis=1)))
+    h = wide.xyz[:, 2]
+    clipped = wide.subset(np.flatnonzero((h > -0.1) & (h < 0.375)))   # a level slab's cut
+    got = ew.prepare_patches([(1.0, (0.0, 0.0), tilted, {"relief": 0.1, "wide": clipped,
+                                                         "cut": 3.0})], 1, args, 2, None,
+                             tilted, 0.5)[0]
+    x = got.xyz[:, 0]
+    assert (x < -0.6).sum() > 0.15 * len(got) and (x > 0.6).sum() > 0.15 * len(got), \
+        ((x < -0.6).mean(), (x > 0.6).mean())
+
+
+def test_material_map_and_the_look_picture():
+    import tempfile
+    from bozkir.patches import material_map
+    from bozkir.ply import SH_C0
+    ew = _export_module()
+    r = np.random.default_rng(1)
+    n = 150000
+    xy = r.random((n, 2)) * [12.0, 6.0] - [6.0, 3.0]
+    bush = xy[:, 0] > 2.0
+    rgb = np.where(bush[:, None], [0.24, 0.28, 0.16], [0.55, 0.51, 0.45])
+    rgb = np.clip(rgb + r.normal(0, 0.04, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, np.zeros(n)].astype(np.float32), opacity=np.ones(n, np.float32),
+               scale=np.full((n, 3), 0.02, np.float32), rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    sand = [(1, (-4.0 + i, 0), _flat_patch(i, [0.55, 0.51, 0.45], 0.04), {}) for i in range(4)]
+    scrub = [(1, (3.0 + i, 0), _flat_patch(50 + i, [0.24, 0.28, 0.16], 0.04), {}) for i in range(2)]
+    labels, (x0, y0) = material_map(s, [sand, scrub], 1.5, min_splats=500)
+    at = lambda x, y: labels[int((y - y0) / 0.5), int((x - x0) / 0.5)]
+    assert at(-4, 0) == 0 and at(4.5, 0) == 1 and at(-1, 1) == 0, labels
+    with tempfile.TemporaryDirectory() as d:
+        dest = Path(d) / "classes_t.png"
+        info = {"shares": [0.8, 0.2], "ground_shares": [0.67, 0.33], "thick": [0.01, 0.06],
+                "odd": [(0.0, 0.0)], "viable": [(-4.0, 0.0), (3.0, 0.0)]}
+        ew.look(s, [sand, scrub], [sand[:2], scrub[:1]], [sand[2:], []], info, 1.5, 2,
+                dest, "t")
+        assert dest.stat().st_size > 10000
+
+
+def test_the_smeared_rim_is_not_counted_as_a_material():
+    """desert v1's left rim is a dark smear of big splats; it counted as bush."""
+    from bozkir.patches import class_shares, material_map
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(2)
+    n = 200000
+    xy = r.random((n, 2)) * [12.0, 6.0] - [6.0, 3.0]
+    bush = xy[:, 0] > 4.5                                    # 12.5% of the ground
+    rim = xy[:, 0] < -3.0                                    # dark, smeared
+    rgb = np.where((bush | rim)[:, None], [0.24, 0.28, 0.16], [0.55, 0.51, 0.45])
+    rgb = np.clip(rgb + r.normal(0, 0.04, (n, 3)), 0, 1)
+    scale = np.where(rim, 0.08, 0.02)[:, None] * np.ones(3)
+    s = Splats(xyz=np.c_[xy, np.zeros(n)].astype(np.float32), opacity=np.ones(n, np.float32),
+               scale=scale.astype(np.float32), rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    sand = [(1, (0, 0), _flat_patch(i, [0.55, 0.51, 0.45], 0.04), {}) for i in range(5)]
+    scrub = [(1, (0, 0), _flat_patch(50 + i, [0.24, 0.28, 0.16], 0.04), {}) for i in range(5)]
+    shares = class_shares(s, [sand, scrub], 1.5, min_splats=500)
+    assert shares[1] < 0.25, shares                          # 0.4 with the rim
+    labels, (x0, y0) = material_map(s, [sand, scrub], 1.5, min_splats=500)
+    assert labels[int((0 - y0) / 0.5), int((-5 - x0) / 0.5)] == -1
+    assert labels[int((0 - y0) / 0.5), int((5.5 - x0) / 0.5)] == 1
+
+
+def test_thickness_tells_a_crust_from_a_haze():
+    from bozkir.patches import thickness
+    crust = _flat_patch(1, [0.5, 0.45, 0.4])
+    haze = _flat_patch(2, [0.2, 0.22, 0.15])
+    r = np.random.default_rng(3)
+    haze.xyz = haze.xyz.copy()
+    haze.xyz[:, 2] = r.random(len(haze.xyz)) * 0.3          # see-through, 30 cm deep
+    assert thickness(crust) < 0.01 < 0.05 < thickness(haze), (thickness(crust), thickness(haze))
+
+
+def test_haze_gets_a_small_part_of_the_map_not_none():
+    ew = _export_module()
+    got = ew.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.5)
+    assert abs(sum(got) - 1) < 1e-9 and 0.04 < got[2] < 0.15 and got[0] > got[1] > got[2], got
+    same = ew.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.0)
+    assert np.allclose(same, [0.49, 0.27, 0.24])
+
+
+def test_class_reasons_name_what_a_material_lacks():
+    ew = _export_module()
+    def mat(base, xs):
+        return [(1, (x, 0.0), _flat_patch(int(x * 10) + int(base[0] * 100), base, 0.03, n=800), {})
+                for x in xs]
+    sand = mat([0.55, 0.51, 0.45], np.arange(0, 12, 1.6))
+    twin = mat([0.56, 0.52, 0.46], np.arange(20, 32, 1.6))    # the same colour
+    bush = mat([0.22, 0.25, 0.15], [40.0, 40.5, 41.0])         # one spot
+    why = ew.class_reasons([sand, twin, bush], [0.6, 0.35, 0.05], 1.5, 6, 0.1)
+    assert why[0] == [] or all("colour" in w for w in why[0]), why
+    assert any("colour" in w for w in why[1])
+    assert any("ground" in w for w in why[2]) and any("apart" in w for w in why[2]), why
+
+
+def test_the_search_says_where_it_rejected_and_why():
+    """desert10: the sharp middle had few usable positions, and nothing said why."""
+    from bozkir.patches import pick_patches
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(4)
+    n = 120000
+    xy = r.random((n, 2)) * [8.0, 4.0] - [4.0, 2.0]
+    keep = (xy[:, 0] < 0) | (r.random(n) < 0.05)              # the right half sparse
+    xy = xy[keep]
+    n = len(xy)
+    rgb = np.clip([0.55, 0.5, 0.44] + r.normal(0, 0.06, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, r.normal(0, 0.003, n)].astype(np.float32),
+               opacity=np.full(n, 0.8, np.float32), scale=np.full((n, 3), 0.02, np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    stats = {}
+    pick_patches(s, 1.5, 10 ** 9, 2, verbose=False, stats=stats, min_separation=0.5)
+    where = stats["rejected_at"]
+    assert where and all(r == "sparse" for x, _, r in where if x > 1.0), where[:5]
+    assert all(x > -0.9 for x, _, r in where if r == "sparse"), where[:5]
+    one = [(0, (0.0, 0.0), _flat_patch(1, [0.5, 0.45, 0.4]), {}),
+           (0, (0.1, 0.0), _flat_patch(2, [0.5, 0.45, 0.4]), {}),
+           (0, (1.4, 0.0), _flat_patch(3, [0.5, 0.45, 0.4]), {})]
+    got = [c[1] for c in _export_module().apart_alike(one, 2, 1.5)]
+    assert got == [(0.0, 0.0), (1.4, 0.0)], got               # least overlap, not a twin
+
+
+def test_faint_ground_is_told_from_ground_with_gaps():
+    """desert10: 719 positions failed the hole test; the sharp middle is a
+    faint but whole layer that the export's fill makes solid."""
+    from bozkir.patches import pick_patches, rendered_coverage
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(5)
+
+    def scene(gap):
+        n = 60000
+        xy = r.random((n, 2)) * [6.0, 3.0] - [3.0, 1.5]
+        if gap:                                            # bare 30 cm stripes
+            xy = xy[(np.floor((xy[:, 0] + 3.0) / 0.3) % 2) == 0]
+        n = len(xy)
+        rgb = np.clip([0.55, 0.5, 0.44] + r.normal(0, 0.05, (n, 3)), 0, 1)
+        return Splats(xyz=np.c_[xy, r.normal(0, 0.003, n)].astype(np.float32),
+                      opacity=np.full(n, 0.12, np.float32),
+                      scale=np.full((n, 3), 0.015, np.float32),
+                      rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+                      sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+                      sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    def search(s, **kw):
+        st = {}
+        try:
+            pick_patches(s, 1.5, 10 ** 9, 2, verbose=False, stats=st, min_separation=0.5, **kw)
+        except SystemExit:                                 # nothing passed
+            pass
+        return st
+    faint, gappy = scene(False), scene(True)
+    now, filled = rendered_coverage(faint, 1.5, 2, boost=(1.0, 6.0))
+    assert now < 0.8 <= filled, (now, filled)
+    for s, want in ((faint, "faint"), (gappy, "gaps")):
+        st = search(s)
+        why = {w for _, _, w in st["rejected_at"]}
+        assert st["viable"] == 0 and want in why, (want, why)
+    st = search(faint, faint_fill=6.0)
+    assert st["viable"] > 0, st                            # passes once judged filled
+    st = search(gappy, faint_fill=6.0)
+    assert st["viable"] == 0, st                           # gaps stay out
+
+
+def test_ground_the_photos_saw_little_is_not_counted():
+    """desert10: the faint, hazy left rim is dark and counted as bush."""
+    from bozkir.patches import class_shares, material_map, seen_points
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(6)
+    n = 200000
+    xy = r.random((n, 2)) * [12.0, 6.0] - [6.0, 3.0]
+    dark = (xy[:, 0] > 4.5) | (xy[:, 0] < -3.0)               # bush, and the rim
+    rgb = np.where(dark[:, None], [0.24, 0.28, 0.16], [0.55, 0.51, 0.45])
+    rgb = np.clip(rgb + r.normal(0, 0.04, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, np.zeros(n)].astype(np.float32), opacity=np.ones(n, np.float32),
+               scale=np.full((n, 3), 0.02, np.float32), rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    sand = [(1, (0, 0), _flat_patch(i, [0.55, 0.51, 0.45], 0.04), {}) for i in range(5)]
+    bush = [(1, (5.2, 0), _flat_patch(50 + i, [0.24, 0.28, 0.16], 0.04), {}) for i in range(5)]
+    grid = [(x, y) for x in np.arange(-5.25, 5.3, 0.75) for y in np.arange(-2.25, 2.3, 0.75)]
+    found = [(1, p, None, {}) for p in grid if p[0] >= -3.0]
+    stats = {"rejected_at": [(x, y, "faint") for x, y in grid if x < -3.0]}
+    seen = seen_points(found, stats)
+    blind = class_shares(s, [sand, bush], 1.5, min_splats=500)
+    shares = class_shares(s, [sand, bush], 1.5, min_splats=500, seen=seen)
+    assert blind[1] > 0.4 and shares[1] < 0.3 and blind[1] - shares[1] > 0.12, (blind, shares)
+    labels, (x0, y0) = material_map(s, [sand, bush], 1.5, min_splats=500, seen=seen)
+    assert labels[int((0 - y0) / 0.5), int((-5 - x0) / 0.5)] == -1
+    assert labels[int((0 - y0) / 0.5), int((5.5 - x0) / 0.5)] == 1
+
+
+def test_decal_copy_keeps_its_tile_edges():
+    from bozkir.decals import cut, place
+    s = _shrub_scene()
+    d = cut(s, (1.0, -0.5), 0.5)
+    tile = s.subset(np.flatnonzero(np.all(np.abs(s.xyz[:, :2]) <= 0.75, axis=1)))
+    for at in [(0.0, 0.0), (0.2, -0.15)]:
+        v = place(tile, d, 0.45, 1.5, at=at)
+        rv = np.hypot(*(v.xyz[:, :2] - np.float32(at)).T)
+        rt = np.hypot(*(tile.xyz[:, :2] - np.float32(at)).T)
+        assert np.array_equal(v.xyz[rv >= 0.45][:int((rt >= 0.45).sum())],
+                              tile.xyz[rt >= 0.45])           # outside the disc: untouched
+        edge = np.abs(v.xyz[:, :2]).max(1) > 0.65
+        assert np.array_equal(np.sort(v.xyz[edge], axis=0),
+                              np.sort(tile.xyz[np.abs(tile.xyz[:, :2]).max(1) > 0.65], axis=0))
+    for bad in [dict(radius=0.7, at=(0, 0)), dict(radius=0.45, at=(0.3, 0))]:
+        try:
+            place(tile, d, bad["radius"], 1.5, at=bad["at"])
+            raise AssertionError(f"a decal that leaves the tile was accepted: {bad}")
+        except ValueError:
+            pass
+
+
+
+def _ew():
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("ew", root / "scripts" / "export_wang.py")
+    ew = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ew)
+    return ew
+
+
+def _texture(kind, seed, n=60, px=0.025):
+    """Top-down luminance of a made-up material: blobs without a direction,
+    ripples at 30 degrees (each patch a little off), or lopsided ripples
+    (a lit face that rises fast and a long shaded one)."""
+    from scipy.ndimage import gaussian_filter
+    r = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:n, 0:n] * px
+    if kind == "blobs":
+        g = gaussian_filter(r.normal(size=(n, n)), 1.5)
+        return 0.5 + 0.05 * g / g.std()
+    a = np.radians(30 + r.normal(0, 5) if kind != "every way" else r.uniform(0, 180))
+    u = (xx * np.cos(a) + yy * np.sin(a)) / 0.25 + r.random()
+    if kind == "lopsided":
+        f = u % 1.0
+        f = np.where(f < 0.15, f / 0.15, 1 - (f - 0.15) / 0.85)
+    else:
+        f = 0.5 + 0.5 * np.sin(2 * np.pi * u)
+    return 0.4 + 0.2 * f + 0.05 * r.normal(size=(n, n))
+
+
+def test_frames_keep_the_edges_and_centres_the_middle():
+    from bozkir.frames import geometry, frame_of, centre_of
+    g = geometry(1.5, 0.6, 15.0)
+    assert abs(g["radius"] - 0.45) < 1e-9 and abs(g["half"] - 0.075) < 1e-9
+    assert g["inner"] < g["radius"] < g["outer"] < 0.75 * (1 - 2 * 0.06)
+    t = _flat_patch(1, [0.5, 0.5, 0.5], n=20000, half=0.75)
+    f, c = frame_of(t, g["inner"]), centre_of(t, g["outer"])
+    rf, rc = np.hypot(*f.xyz[:, :2].T), np.hypot(*c.xyz[:, :2].T)
+    assert rf.min() >= g["inner"] and rc.max() <= g["outer"]
+    edge = np.abs(t.xyz[:, :2]).max(axis=1) > 0.75 - 0.09
+    assert int(edge.sum()) == int((np.abs(f.xyz[:, :2]).max(axis=1) > 0.75 - 0.09).sum())
+    assert len(f) + len(c) > len(t)                      # they overlap in the ring
+    try:
+        geometry(1.5, 0.8, 15.0)
+        raise AssertionError("a centre into the edge strip was allowed")
+    except ValueError:
+        pass
+
+
+def test_how_far_centres_turn_is_measured():
+    from bozkir.frames import turn_rule
+    w = np.ones((60, 60))
+    rule = lambda kind: turn_rule([(_texture(kind, s), w) for s in range(8)])
+    assert rule("blobs")["any"]
+    rip = rule("ripples")
+    assert not rip["any"] and rip["half"] and 4.9 <= rip["spread"] <= 12, rip
+    lop = rule("lopsided")
+    assert not lop["any"] and not lop["half"], lop          # a half turn would show
+    assert rule("every way")["any"]                         # patches disagree: any
+
+
+def test_salient_spots_count_only_where_the_frame_shows():
+    from bozkir.frames import salience, zone
+    n, px = 60, 0.025
+    yy, xx = np.mgrid[0:n, 0:n] * px
+
+    def spot(img, cx, cy):
+        return img - 0.25 * np.exp(-(np.hypot(xx - cx, yy - cy) / 0.12) ** 2)
+    imgs = [_texture("blobs", s) for s in range(6)]
+    imgs += [spot(_texture("blobs", 10), 0.3, 0.3), spot(_texture("blobs", 11), 0.75, 0.75)]
+    ring = zone(n, 1.5, 0.34)
+    sal = salience([(i, None) for i in imgs], [ring] * len(imgs))
+    assert sal[6] > 3 * max(sal[:6].max(), 1e-3), sal      # a spot in the frame
+    assert sal[7] <= max(sal[:6].max(), 1e-3) * 1.5, sal   # one in the middle: hidden
+
+
+def test_height_order_measures_how_materials_follow_height():
+    ew = _ew()
+    r = np.random.default_rng(3)
+
+    def pos(x, y, z):
+        return (1.0, (x, y), scene(np.array([[x, y, z]] * 8, np.float32)), {})
+    xy = r.uniform(0, 12, (300, 2))
+    hill = 0.3 * np.sin(xy[:, 0]) * np.cos(xy[:, 1])        # hollows and crests
+    low = [pos(x, y, h) for (x, y), h in zip(xy, hill) if h < 0]
+    high = [pos(x, y, h) for (x, y), h in zip(xy, hill) if h >= 0]
+    assert ew.height_order([low, high]) < 0.1             # by height
+    mixed = [pos(x, y, h) for (x, y), h in zip(xy, hill)]
+    p = ew.height_order([mixed[::2], mixed[1::2]])
+    assert 0.35 < p < 0.65, p                               # unrelated
+    assert ew.height_order([high, low]) > 0.9               # the other way round
+
+
+def test_a_tile_is_checked_for_holes_with_its_neighbours_edges():
+    """The ground just past an edge belongs to the neighbour; seen alone, a
+    tile is thin there. Its neighbours' edge bands come along, moved over."""
+    ew = _ew()
+    a = _source_patch(0, 0, n=4000)
+    b = _source_patch(9, 9, n=4000)
+    codes = [(0, 0, 0, 0), (1, 1, 1, 1)]
+    seen = ew.with_neighbours([a, b], codes, [0, 0], 1.0, band=0.1)
+    x, y = seen[0].xyz[:, 0], seen[0].xyz[:, 1]
+    assert len(seen[0]) > len(a)
+    for far in (x > 0.5, x < -0.5, y > 0.5, y < -0.5):
+        assert 0 < far.sum() and np.abs(np.r_[x[far], y[far]]).max() <= 0.6 + 1e-6
+    alone = ew.with_neighbours([a], [codes[0]], [0], 1.0)[0]       # its own edges match
+    assert len(ew.with_neighbours([a, b], codes, [0, 1], 1.0)[0]) == len(alone), \
+        "a tile of another material lent its edge"
+
+
+def test_the_fill_can_spare_large_faint_splats():
+    """--fill-spare-haze: large faint splats keep their opacity; the rest
+    are filled as before."""
+    from bozkir.tile import fill_opacity, haze_splats
+    r = np.random.default_rng(5)
+    n = 3000
+    t = scene(np.c_[r.uniform(-0.5, 0.5, (n, 2)), np.zeros(n)].astype(np.float32),
+              opacity=np.full(n, 0.3, np.float32), scale=np.full((n, 3), 0.01, np.float32))
+    big = np.arange(n) < 200
+    t.scale[big] = 0.06
+    t.opacity[big] = 0.1
+    t.xyz[big, 2] = 0.2                                     # standing above the ground
+    h = haze_splats(t, 1.0)
+    assert not haze_splats(scene(t.xyz * [1, 1, 0], opacity=t.opacity, scale=t.scale), 1.0).any()
+    assert h[big].all() and not h[~big].any()
+    a = fill_opacity(t, 1.0, target=0.98)
+    b = fill_opacity(t, 1.0, target=0.98, spare=h)
+    assert (a.opacity[big] > t.opacity[big]).any()
+    assert np.array_equal(b.opacity[big], t.opacity[big])
+    assert np.array_equal(a.opacity[~big], b.opacity[~big])
+
+
+def test_a_centre_is_judged_by_how_sharp_it_is_where_it_shows():
+    """--pool-sharpness: a candidate with larger splats than the edges is
+    left out; one with fewer splats over its whole cut but splats as fine is
+    not (the old count left it out)."""
+    ew = _ew()
+    from bozkir.frames import geometry
+    geo = geometry(1.5, 0, 15.0, 6.0)
+
+    def cand(x, seed, n, size_m, half=0.75):
+        p = _flat_patch(seed, [0.5, 0.45, 0.4], n=n, half=half)
+        p.scale[:, :2] = size_m
+        return (1.0, (x, 0.0), p, {})
+    edges = [cand(0, 1, 3000, 0.01), cand(3, 2, 3000, 0.01)]
+    blurry = cand(6, 3, 3300, 0.03)
+    small_cut = cand(9, 4, 2000, 0.01, half=0.66)
+    pool, _, _, why = ew.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo,
+                                   middles=False, by_sharpness=True)
+    assert [c[1][0] for c in pool] == [9], why
+    assert any("larger splats" in k and v == 1 for k, v in why.items()), why
+    pool, _, _, why = ew.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo, middles=False)
+    assert 9 not in [c[1][0] for c in pool], "the old count let the small cut in"
+
+
+def test_what_a_frame_shows_of_an_edge_patch():
+    """Centred on the tile, a patch's frame is all but its middle; on its
+    edge (--diamonds), its diamond but the tips the tile's middle falls on,
+    on either axis (the axis is decided later)."""
+    from bozkir.frames import geometry, shown, zone
+    g = geometry(1.5, 0, 15.0, 6.0)
+    assert np.array_equal(shown(60, 1.5, g["inner"], False, 6.0),
+                          zone(60, 1.5, g["inner"], shape=6.0))
+    d = shown(60, 1.5, g["inner"], True, 6.0)
+    c = (np.arange(60) + 0.5) / 60 * 1.5 - 0.75
+    diamond = np.abs(c[None, :]) + np.abs(c[:, None]) <= 0.75
+    assert not (d & ~diamond).any() and d.sum() > 0.95 * diamond.sum()
+    assert d[30, 30] and d[0 + 3, 30], "the middle and the north tip both show"
+
+
+def test_the_centre_pool_stays_off_the_frames():
+    ew = _ew()
+    from bozkir.frames import geometry
+    geo = geometry(1.5, 0.6, 15.0)
+
+    def cand(x, y, seed):
+        return (1.0, (x, y), _flat_patch(seed, [0.5, 0.45, 0.4], n=1500, half=0.75), {})
+    edges = [cand(0, 0, 1), cand(3, 0, 2)]
+    material = [cand(0.6, 0.0, 3),     # over edge 0's frame
+                cand(0.02, 0.0, 4),    # on edge 0's middle, which the pool has
+                cand(6.0, 0.0, 5),     # clear
+                cand(6.3, 0.0, 6),     # overlaps the one before
+                cand(0.0, 3.0, 7)]     # clear
+    pool, mids, shared, why = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo)
+    got = sorted(c[1] for c in pool)
+    assert why["candidates"] == 5 and why["too close to a centre taken"] == 3, why
+    assert mids == 2 and not any(shared) and got == [(0, 0), (0.0, 3.0), (3, 0), (6.0, 0.0)], got
+    pool, _, _, _ = ew.pick_pool(edges, material, 3, 1.5, 1.5, geo)
+    assert len(pool) == 3
+
+
+def test_a_short_pool_takes_ground_the_frames_share_only_when_asked():
+    """--diamonds: an edge patch shows its diamond. A material with no
+    ground clear of it gets no centre, unless --pool-share lets a centre
+    share some with the frames: then the least shared first, and none
+    beyond the share."""
+    ew = _ew()
+    from bozkir.frames import geometry, shared_with_frames
+    geo = geometry(1.5, 0, 15.0, 6.0)
+
+    def cand(x, y, seed):
+        return (1.0, (x, y), _flat_patch(seed, [0.5, 0.45, 0.4], n=1500, half=0.75), {})
+    edges = [cand(0, 0, 1), cand(1.5, 0, 2)]
+    material = [cand(0.75, 0.0, 3),    # between the two diamonds' tips
+                cand(0.0, 0.0, 4),     # on edge 0 itself
+                cand(0.75, 1.5, 5)]    # half off
+    shares = [shared_with_frames(c[1], [e[1] for e in edges], 1.5, geo, 1.5, True)
+              for c in material]
+    assert shares[1] > 0.8 and shares[2] < 0.02 < shares[0] < shares[1], shares
+    pool, mids, _, why = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
+                                 diamonds=True)
+    assert mids == 0 and not pool and why["on the frames' ground"] == 3, why
+    pool, _, shared, _ = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
+                                   share=0.6, diamonds=True)
+    got = [c[1] for c in pool]
+    assert got == [(0.75, 1.5), (0.75, 0.0)] and shared[0] < 0.02 < shared[1] <= 0.6, shared
+
+
+def test_quiet_edges_leave_spotted_frames_out():
+    ew = _ew()
+    from bozkir.ply import SH_C0
+
+    def cand(x, seed, spotted):
+        p = _flat_patch(seed, [0.55, 0.5, 0.42], std=0.02, n=9000, half=0.75)
+        if spotted:
+            d = np.hypot(p.xyz[:, 0] - 0.5, p.xyz[:, 1] - 0.5)
+            rgb = p.base_rgb.copy()
+            rgb[d < 0.12] = [0.2, 0.22, 0.12]
+            p.sh_dc = ((rgb - 0.5) / SH_C0).astype(np.float32)
+        return (1.0, (x, 0.0), p, {})
+    cands = [cand(2 * k, k, k < 2) for k in range(6)]        # the first two spotted
+    picked, line = ew.quiet_edges(cands[:2], cands, 2, 1.5, 0.34, 1.5)
+    assert line.startswith("quiet edges: yes"), line
+    assert all(c[1][0] >= 4 for c in picked), [c[1] for c in picked]
+
+
+def test_levels_of_detail_keep_the_tiles_colour():
+    """desert11: the levels keep the largest splats, and a bush's small dark
+    ones on top went, so distant bush came out pale."""
+    from bozkir.pack import seen_colour, tile_levels
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(4)
+    n_g, n_b = 6000, 4000
+    xy = np.r_[r.random((n_g, 2)) * 1.5 - 0.75, (r.random((n_b, 2)) * 2 - 1) * 0.2]
+    z = np.r_[np.zeros(n_g), 0.05 + 0.2 * r.random(n_b)]
+    rgb = np.r_[np.tile([0.7, 0.65, 0.55], (n_g, 1)), np.tile([0.2, 0.3, 0.12], (n_b, 1))]
+    sc = np.r_[np.full((n_g, 3), [0.04, 0.04, 0.005]), np.full((n_b, 3), 0.015)]
+    t = Splats(xyz=np.c_[xy, z].astype(np.float32),
+               opacity=np.r_[np.full(n_g, 0.95), np.full(n_b, 0.6)].astype(np.float32),
+               scale=sc.astype(np.float32), rot=np.tile(np.float32([1, 0, 0, 0]), (n_g + n_b, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n_g + n_b, 0, 3), np.float32), sh_degree=0)
+    want = seen_colour(t)
+    plain = tile_levels(t, 4, 1.5)
+    toned = tile_levels(t, 4, 1.5, tone=True)
+    drift = max(float(np.abs(seen_colour(p) - want).max()) for p in plain[1:])
+    left = max(float(np.abs(seen_colour(p) - want).max()) for p in toned[1:])
+    assert drift > 0.03 and left < 0.01, (drift, left)
+
+
+def test_the_far_view_sees_what_stands_up_and_never_black():
+    """The atlas: a bare spot lies over the entry's own colour, not black;
+    the entries are the tiles then the centres; and each says its colour
+    from low down, darker than from above where a bush stands."""
+    from bozkir.pack import pack, read_splat, tile_atlas, seen_colour
+    import json
+    import tempfile
+    bush = _flat_patch(2, [0.2, 0.3, 0.12], n=6000, half=0.3)
+    bush.xyz[:, 2] += np.random.default_rng(3).random(len(bush)).astype(np.float32) * 0.3
+    bush.scale[:] = 0.015
+    ground = _flat_patch(1, [0.7, 0.65, 0.55], n=8000, half=0.75)
+    ground = ground.subset(np.flatnonzero(np.hypot(*ground.xyz[:, :2].T) > 0.2))  # a hole
+    tile = ground.subset(np.arange(len(ground)))
+    from bozkir.tile import merge
+    with_bush = merge(ground, bush)
+    parts = [tile, with_bush, ground]
+    tiles, cursor, bufs = [], 0, []
+    for p in parts:
+        bufs.append(pack(p))
+        tiles.append({"start": cursor, "count": len(p), "levels": [[cursor, len(p)]]})
+        cursor += len(p)
+    m = {"size": 1.5, "up_axis": 2, "tiles": tiles[:2], "centres": tiles[2:], "total": cursor}
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "t.splat").write_bytes(np.concatenate(bufs).tobytes())
+        (Path(d) / "t.json").write_text(json.dumps(m))
+        m2, s = read_splat(Path(d) / "t.splat", Path(d) / "t.json")
+    img, lay = tile_atlas(m2, s, res=32)
+    assert lay["count"] == 3 and lay["tiles"] == 2 and len(lay["seen"]) == 3
+    assert (img[..., 3] == 255).all()
+    hole = img[16 - 3:16 + 3, 16 - 3:16 + 3, :3].astype(int)
+    assert hole.min() > 100, "a bare spot came out dark"
+    low = np.array(lay["seen"][1])
+    top = img[:32, 32:64, :3].reshape(-1, 3).mean(axis=0) / 255
+    assert low[0] < top[0] - 0.03, (low, top)               # more bush from low down
 
 
 def test_every_script_builds_its_parser():

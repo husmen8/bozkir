@@ -6,6 +6,12 @@ still wins:
     python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur --size 2.0
     python scripts/export_wang.py data/raw/x.ply --clean --flip --save-preset x
 
+Presets stack. A preset can name a "base" and list only what it changes,
+and `--preset a,b` puts b's settings over a's:
+
+    "desert4": {"base": "desert3", "fill_opacity": 0.99}
+    python scripts/export_wang.py data/raw/desert_v1.ply --preset desert4,test
+
 Stored in capture_presets.json at the repository root (hand-editable),
 found from this file's location so it works from any folder. Not to be
 confused with web/views.json, the viewer's settings.
@@ -27,11 +33,34 @@ def load_all(path=PRESETS):
         raise SystemExit(f"{path} is not valid JSON: {e}")
 
 
+def resolve(presets, names, _inside=()):
+    """The settings of one or more presets, left to right (later wins),
+    each with its "base" filled in first."""
+    out = {}
+    for name in names:
+        if name not in presets:
+            raise SystemExit(
+                f"no preset called {name!r}. "
+                f"Known: {', '.join(sorted(presets)) or 'none'}")
+        if name in _inside:
+            raise SystemExit(f"preset {name!r} is its own base")
+        values = dict(presets[name])
+        base = values.pop("base", None)
+        if base:
+            out.update(resolve(presets, _names(base), _inside + (name,)))
+        out.update(values)
+    return out
+
+
+def _names(text):
+    return [n.strip() for n in str(text).split(",") if n.strip()]
+
+
 def add_preset_args(parser, path=PRESETS):
     known = sorted(load_all(path))
     parser.add_argument(
         "--preset", default=None,
-        help="settings saved under this name" +
+        help="settings saved under this name; several stack, as a,b" +
              (f" (available: {', '.join(known)})" if known else ""))
     parser.add_argument(
         "--save-preset", default=None, metavar="NAME",
@@ -66,15 +95,12 @@ def apply(parser, argv=None, path=PRESETS):
 
     name = getattr(peek, "preset", None)
     if name:
-        if name not in presets:
-            raise SystemExit(
-                f"no preset called {name!r}. "
-                f"Known: {', '.join(sorted(presets)) or 'none'}")
+        chosen = resolve(presets, _names(name))
         # Settings this script has no option for are skipped, so one preset
         # works with every script.
         known = {a.dest for a in parser._actions}
-        values = {k: v for k, v in presets[name].items() if k in known}
-        skipped = sorted(set(presets[name]) - known)
+        values = {k: v for k, v in chosen.items() if k in known}
+        skipped = sorted(set(chosen) - known)
         parser.set_defaults(**values)
         if skipped:
             print(f"  preset {name!r}: {len(values)} settings applied, "

@@ -215,3 +215,124 @@ def rotate_patch(p, quarter_turns, up_axis=2):
     v = w0 * v1 + w1[:, None] * v0 + np.cross(np.broadcast_to(v0, v1.shape), v1)
     out.rot = np.c_[w, v].astype(np.asarray(p.rot).dtype)
     return out
+
+
+def missing_layer(kept, capture, size, up_axis=2, px=0.025, gap=0.1):
+    """What a patch is missing against its capture, seen from above, as a
+    layer of flat splats on the patch's own ground.
+
+    Both are drawn straight down over the same square (`kept`, the patch;
+    `capture`, every splat of the capture that reaches the square, in the
+    same frame, the huge faint ones included). Where the capture covers
+    more by `gap` or over, the gap is filled with the capture's own colour
+    there, as much as is missing and no more: where the patch is already
+    solid nothing is added. Each splat lies just under the lowest splats around it, so the
+    layer follows the ground and cannot show above it."""
+    from .graphcut import render_patch
+    from .ply import SH_C0
+    from scipy.ndimage import distance_transform_edt
+
+    res = max(int(round(size / px)), 8)
+    cell = size / res
+    rgb_t, a_t = render_patch(capture, size, res, up_axis)
+    _, a_k = render_patch(kept, size, res, up_axis)
+    a_k = np.clip(a_k, 0.0, 0.999)
+    want = np.clip((a_t - a_k) / (1.0 - a_k), 0.0, 1.0)
+    # Only where the gap shows: under ground that is already nearly solid,
+    # a layer would add splats and nothing visible.
+    rows, cols = np.nonzero((a_t - a_k) > gap)
+    if not len(rows):
+        return kept.subset(np.zeros(0, dtype=np.int64))
+    plane = [i for i in range(3) if i != up_axis]
+
+    # Ground under each pixel: the low splats of the patch, 10 cm cells,
+    # empty cells taking their nearest neighbour's.
+    g = max(1, int(round(0.1 / cell)))
+    n = -(-res // g)
+    kc = np.clip(((kept.xyz[:, plane[0]] + size / 2) / cell).astype(int) // g, 0, n - 1)
+    kr = np.clip(((size / 2 - kept.xyz[:, plane[1]]) / cell).astype(int) // g, 0, n - 1)
+    low = np.full((n, n), np.nan)
+    z = kept.xyz[:, up_axis]
+    for key in np.unique(kr * n + kc):
+        m = (kr * n + kc) == key
+        low[key // n, key % n] = np.percentile(z[m], 10)
+    if np.isnan(low).all():
+        low[:] = 0.0
+    idx = distance_transform_edt(np.isnan(low), return_distances=False, return_indices=True)
+    low = low[tuple(idx)]
+
+    xyz = np.zeros((len(rows), 3), dtype=np.float32)
+    xyz[:, plane[0]] = -size / 2 + (cols + 0.5) * cell
+    xyz[:, plane[1]] = size / 2 - (rows + 0.5) * cell
+    xyz[:, up_axis] = low[rows // g, cols // g] - 0.003
+    scale = np.full((len(rows), 3), 0.6 * cell, dtype=np.float32)
+    scale[:, up_axis] = 0.002
+    rest = kept.sh_rest.shape[1]
+    layer = Splats(xyz=xyz, opacity=want[rows, cols].astype(np.float32), scale=scale,
+                   rot=np.tile(np.float32([1, 0, 0, 0]), (len(rows), 1)),
+                   sh_dc=((np.clip(rgb_t[rows, cols], 0, 1) - 0.5) / SH_C0).astype(np.float32),
+                   sh_rest=np.zeros((len(rows), rest, 3), np.float32),
+                   sh_degree=kept.sh_degree)
+    # Neighbours overlap, so a splat's peak is not its pixel's cover: match
+    # the layer's own cover to what is missing, in a few steps.
+    for _ in range(4):
+        _, a_l = render_patch(layer, size, res, up_axis)
+        ratio = want[rows, cols] / np.maximum(a_l[rows, cols], 1e-3)
+        layer.opacity = np.clip(layer.opacity * np.clip(ratio, 0.5, 2.0),
+                                0.0, 0.99).astype(np.float32)
+    return layer
+
+
+def haze_splats(t, size, up_axis=2):
+    """Large faint splats standing above the ground: footprint (the two
+    largest axes' mean) over twice the tile's median, opacity under its
+    median, and more than 2% of the tile above its ground (its lower
+    quartile). Training leaves them as soft fill in a canopy; from above
+    they sit under the detail, from low down in front of it. On the ground
+    they are the ground's cover, and stay in the fill (sparing them there
+    starved desert13's sand of hole-free patches)."""
+    if not len(t):
+        return np.zeros(0, bool)
+    s = np.sort(np.asarray(t.scale, np.float64), axis=1)
+    foot = np.sqrt(s[:, 1] * s[:, 2])
+    op = np.asarray(t.opacity, np.float64)
+    z = np.asarray(t.xyz[:, up_axis], np.float64)
+    high = z - np.percentile(z, 25) > 0.02 * size
+    return (foot > 2.0 * np.median(foot)) & (op < np.median(op)) & high
+
+
+def fill_opacity(t, size, up_axis=2, target=0.98, max_boost=6.0, px=0.02, spare=None):
+    """Make a tile's own splats opaque where its ground is see-through.
+
+    Training only needs each photo pixel right, so the ground can come out
+    half transparent with the capture's background behind it (false
+    transparency, Noise Guided Splatting, NeurIPS 2025); cut out as a tile,
+    the sky shows through. Each splat's opacity becomes 1 - (1 - a)^k, with
+    k chosen from the tile's coverage at that spot so the layer reaches
+    `target` from above. No splat is added or moved, so nothing new can
+    appear from another angle; bare spots with no splat stay bare. `spare`:
+    splats left as they are (haze_splats, export --fill-spare-haze): made
+    opaque, haze read as smears from low down in the bush."""
+    from .graphcut import render_patch
+    from scipy.ndimage import gaussian_filter
+
+    if not len(t):
+        return t
+    res = max(int(round(size / px)), 8)
+    _, a = render_patch(t, size, res, up_axis)
+    a = np.clip(gaussian_filter(a, 1.0), 0.0, 0.999)
+    plane = [i for i in range(3) if i != up_axis]
+    cell = size / res
+    col = np.clip(((t.xyz[:, plane[0]] + size / 2.0) / cell).astype(int), 0, res - 1)
+    row = np.clip(((size / 2.0 - t.xyz[:, plane[1]]) / cell).astype(int), 0, res - 1)
+    here = a[row, col]
+    k = np.ones(len(t))
+    thin = (here > 0.02) & (here < target)
+    k[thin] = np.log(1.0 - target) / np.log(1.0 - here[thin])
+    k = np.clip(k, 1.0, max_boost)
+    if spare is not None:
+        k[np.asarray(spare, bool)] = 1.0
+    out = t.subset(np.arange(len(t)))
+    op = np.clip(t.opacity.astype(np.float64), 0.0, 0.999)
+    out.opacity = (1.0 - (1.0 - op) ** k).astype(np.float32)
+    return out
