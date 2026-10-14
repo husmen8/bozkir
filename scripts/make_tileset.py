@@ -98,7 +98,7 @@ def main(argv=None):
     for w in why:
         print(f"    - {w}")
     print(f"\n  wrote {out.relative_to(ROOT)} and its .json")
-    print("  to see it:   cd web && python -m http.server 8000")
+    print("  to see it:   python scripts/serve.py")
     print(f"  then open:   http://localhost:8000/?scene={name}")
     return 0
 

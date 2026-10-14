@@ -1,29 +1,30 @@
-"""Named capture settings: a dozen flags found by trial and error, kept
-under a name. `--preset name` replays them; anything on the command line
-still wins:
+"""Named capture settings. `--preset name` replays them; anything on the
+command line still wins:
 
-    python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur
-    python scripts/export_wang.py data/raw/bigsur.ply --preset bigsur --size 2.0
+    python scripts/build.py data/raw/x.ply --preset ground -o web/data/x
+    python scripts/export_wang.py data/raw/x.ply --preset ground --size 2.0
     python scripts/export_wang.py data/raw/x.ply --clean --flip --save-preset x
 
 Presets stack. A preset can name a "base" and list only what it changes,
 and `--preset a,b` puts b's settings over a's:
 
-    "desert4": {"base": "desert3", "fill_opacity": 0.99}
-    python scripts/export_wang.py data/raw/desert_v1.ply --preset desert4,test
+    "mine": {"base": "ground", "colours": 2}
 
-Stored in capture_presets.json at the repository root (hand-editable),
-found from this file's location so it works from any folder. Not to be
-confused with web/views.json, the viewer's settings.
+capture_presets.json at the repository root holds the published method
+(`ground`). capture_presets.local.json beside it, if present, holds a
+working copy's own presets and is not tracked; `--save-preset` writes
+there. A name may be in only one of the two. Not to be confused with
+web/views.json, the viewer's settings.
 """
 
 import json
 from pathlib import Path
 
 PRESETS = Path(__file__).resolve().parents[1] / "capture_presets.json"
+LOCAL = PRESETS.with_name("capture_presets.local.json")
 
 
-def load_all(path=PRESETS):
+def _read(path):
     path = Path(path)
     if not path.exists():
         return {}
@@ -31,6 +32,18 @@ def load_all(path=PRESETS):
         return json.loads(path.read_text())
     except json.JSONDecodeError as e:
         raise SystemExit(f"{path} is not valid JSON: {e}")
+
+
+def load_all(path=None):
+    """One file's presets, or with no path the published and local ones
+    together."""
+    if path is not None:
+        return _read(path)
+    shared, local = _read(PRESETS), _read(LOCAL)
+    both = sorted(set(shared) & set(local))
+    if both:
+        raise SystemExit(f"preset {both[0]!r} is in both {PRESETS.name} and {LOCAL.name}")
+    return {**shared, **local}
 
 
 def resolve(presets, names, _inside=()):
@@ -56,7 +69,7 @@ def _names(text):
     return [n.strip() for n in str(text).split(",") if n.strip()]
 
 
-def add_preset_args(parser, path=PRESETS):
+def add_preset_args(parser, path=None):
     known = sorted(load_all(path))
     parser.add_argument(
         "--preset", default=None,
@@ -71,7 +84,7 @@ def add_preset_args(parser, path=PRESETS):
     return parser
 
 
-def apply(parser, argv=None, path=PRESETS):
+def apply(parser, argv=None, path=None):
     """Parse arguments with a preset supplying the defaults: one pass reads
     --preset, the second parses with its values as defaults."""
     presets = load_all(path)
@@ -86,7 +99,7 @@ def apply(parser, argv=None, path=PRESETS):
 
     if getattr(peek, "list_presets", False):
         if not presets:
-            print(f"no presets yet ({path} does not exist)")
+            print(f"no presets yet ({path or PRESETS} does not exist)")
         for name, values in sorted(presets.items()):
             print(f"\n  {name}")
             for k, v in sorted(values.items()):
@@ -110,7 +123,7 @@ def apply(parser, argv=None, path=PRESETS):
     args = parser.parse_args(argv)
 
     if getattr(args, "save_preset", None):
-        save(args, args.save_preset, parser, path)
+        save(args, args.save_preset, parser, path or LOCAL)
     return args
 
 
@@ -119,9 +132,11 @@ def apply(parser, argv=None, path=PRESETS):
 SKIP = {"preset", "save_preset", "list_presets", "path", "out", "no_cache"}
 
 
-def save(args, name, parser, path=PRESETS):
+def save(args, name, parser, path=LOCAL):
     """Write the run's settings under `name`, keeping only what differs."""
     path = Path(path)
+    if path == LOCAL and name in _read(PRESETS):
+        raise SystemExit(f"{name!r} is a published preset; save under another name")
     presets = load_all(path)
     values = {}
     for k, v in vars(args).items():

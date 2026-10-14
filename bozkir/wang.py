@@ -18,11 +18,6 @@ import numpy as np
 
 from .tile import merge, translate
 
-# Corners are where all four triangles meet, so a feathered tile is not
-# exactly edge-matched within this fraction of the tile size of a corner.
-CORNER_NOTE = "edges match exactly except within `blend` of each corner"
-
-
 def region_weights(xy, size, blend=0.0):
     """Membership of each of the four triangles (columns N, E, S, W),
     summing to one. `xy` is tile-local, spanning [-size/2, size/2].

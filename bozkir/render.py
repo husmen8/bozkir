@@ -1,7 +1,7 @@
 """CPU reference renderer for 3D Gaussian scenes.
 
-Slow and correct. The point is to have an image we trust, so that when a
-fast GPU renderer disagrees with it we know which one is wrong.
+Slow and exact: a reference image, so that when a fast GPU renderer
+disagrees with it, the GPU renderer is the one in question.
 
 Orthographic here: the projection is linear, so the 2D covariance is an
 exact submatrix of the 3D one - no Jacobian, no affine approximation, and

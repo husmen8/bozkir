@@ -255,7 +255,7 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
 
     # Landmarks repeat recognisably, texture does not. Texture reads 2-3 on
     # salience and is untouched; one isolated spot reads tens and is pushed
-    # well down, so auto-pick stops choosing patches I was excluding by hand.
+    # well down, below patches with no landmark.
     landmark = 1.0 + max(0.0, sal - 4.0) / 4.0
     return float(cover * filled * flatness * np.log1p(density)
                  / (1.0 + 20.0 * planarity) / landmark), info
@@ -668,7 +668,7 @@ def auto_pick(s, size, k, up_axis, verbose=True, progress=None,
                 progress=None if label.startswith("separation") else progress)
             chosen = choose(cands, k, size, sep)
             # The search measured it; a recalled list keeps it. Rendering it
-            # again took most of a minute on desert v1, for nothing new.
+            # again took most of a minute on the desert, for nothing new.
             for _, _, p, info in chosen:
                 if "cover" not in info:
                     info["cover"] = rendered_coverage(p, size, up_axis)
@@ -921,7 +921,7 @@ def split_materials(cands, classes=3, tries=24, seed=0, peers=6):
     many anyway) is set aside as odd and the rest clustered again, and the
     odd ones join their nearest group at the end. Judged by group size, not
     by how tightly packed a patch's neighbours are: with 800 positions the
-    sand packed so tightly that all of desert v1's bush counted as odd.
+    sand packed so tightly that all of the desert's bush counted as odd.
     Deterministic. Groups largest first, not narrowed."""
     if len(cands) < classes:
         return [list(cands)]
@@ -1007,7 +1007,7 @@ def _material_space(groups):
 
 def _blurred(log_scale, ok, blur):
     """Cells whose splats are on average `blur` times the usual size: the
-    capture's smeared rim, seen by few photos. On desert v1 its dark smear
+    capture's smeared rim, seen by few photos. On the desert its dark smear
     counted as bush."""
     if not ok.any():
         return np.zeros_like(ok)
@@ -1021,7 +1021,7 @@ def seen_points(found, stats):
     """Search positions as (well seen, poorly seen): usable ones and those
     turned down for their shape (too steep, buried, ...) against those
     turned down because the photos saw little there (too few splats,
-    faint, gaps). desert v1's hazy rim is the second kind."""
+    faint, gaps). The desert's hazy rim is the second kind."""
     where = stats.get("rejected_at", [])
     good = [c[1] for c in found] + [(x, y) for x, y, r in where if r not in POORLY_SEEN]
     bad = [(x, y) for x, y, r in where if r in POORLY_SEEN]
@@ -1145,7 +1145,7 @@ def tone_gate(material, core=0.5, pad=0.01, fit_min=0.8, step=0.04, keep=0.9):
 
     Two parts. The patch's mean cast (red-green and yellow-blue) must lie
     within the range of the material's core, the most typical half of its
-    positions, widened by `pad`: desert v1's bluish grass had the bush's
+    positions, widened by `pad`: the desert's bluish grass had the bush's
     brightness and passed every other test. A range, not a distance, so a
     material that varies one way (yellower bush) keeps that variety. And at
     least `fit_min` of what it shows from above must be colours the core
@@ -1254,7 +1254,7 @@ def odd_spots(cells, centres, size, rare=4.0, k=5):
             continue
         tree = cKDTree(ref)
         # Every core (the same answer): one query per patch over all the
-        # others' cells is quadratic, 4 minutes for desert v1's 534.
+        # others' cells is quadratic, 4 minutes for the desert's 534.
         usual = float(np.median(tree.query(ref, k + 1, workers=-1)[0][:, -1]))
         ok = np.all(np.isfinite(f), axis=1)
         d = np.zeros(len(f))

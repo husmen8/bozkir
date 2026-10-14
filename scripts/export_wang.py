@@ -5,7 +5,7 @@ classes, builds the tiles (graph-cut seams, minimal sets, rotated patches as
 extra colours), and writes one .splat plus a manifest of edge codes, classes
 and LOD ranges for the viewer.
 
-    python scripts/export_wang.py data/raw/desert.ply --preset desert3
+    python scripts/export_wang.py data/raw/scene.ply --preset ground
 """
 
 import argparse
@@ -19,222 +19,31 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.patches import (appearance, purity, apply_settings, auto_pick,  # noqa: E402
                             balanced_split, cached_search, choose,
-                            class_separation, describe_trail, level_patch,
+                            class_separation, describe_trail,
                             rendered_coverage, search_kwargs,
-                            select_similar, split_classes, stratified_keep,
+                            select_similar, split_classes,
                             rank_clean, class_shares, split_materials,
                             material_map, thickness, thickness_map, seen_points,
-                            ground_level, tone_gate)
+                            tone_gate)
 from bozkir import presets as presets_mod  # noqa: E402
 from bozkir import frames as frames_mod  # noqa: E402
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
-from bozkir.scene import add_scene_args, scene_from_args, prepare, config_from_args  # noqa: E402
+from bozkir.scene import (add_scene_args, scene_from_args, prepare,  # noqa: E402
+                          config_from_args, scale_report)
 from bozkir.select import cap_height  # noqa: E402
 from bozkir.wang import (build_tile_set, minimal_codes, layout, check_layout,  # noqa: E402
                          edge_gaussians)
 from bozkir.pack import pack, tile_levels, STRIDE  # noqa: E402
-from bozkir.tile import fill_opacity as _fill_opacity, haze_splats, rotate_patch, missing_layer, merge, extract_patch  # noqa: E402
+from bozkir.tile import haze_splats, rotate_patch  # noqa: E402
+from bozkir.materials import choose_classes, haze, height_order, weigh_shares  # noqa: E402
+from bozkir.pick import (apart, apart_alike, colour_alike, dense_first,  # noqa: E402
+                         lum_of, overlap_report, pick_centres, pick_pool, quiet_edges)
+from bozkir.holes import (filled, hole_free, hole_report, holed_cache, holes,  # noqa: E402
+                          save_holed)
+from bozkir.cut import even_mean, even_out, prepare_patches  # noqa: E402
 from bozkir.catalogue import rebuild as reindex  # noqa: E402
 
 
-def overlap_report(chosen, size):
-    """Warn when the patches of one class share ground: their colours are
-    then shifted copies, and anything distinctive in the shared part repeats
-    in tile after tile. Happens when a material covers little of the capture
-    (the desert scrub is ~4 x 5 m)."""
-    pts = [c[1] for c in chosen]
-    pairs, worst = 0, 0.0
-    for a in range(len(pts)):
-        for b in range(a + 1, len(pts)):
-            dx = max(0.0, size - abs(pts[a][0] - pts[b][0]))
-            dy = max(0.0, size - abs(pts[a][1] - pts[b][1]))
-            share = dx * dy / (size * size)
-            if share > 0.01:
-                pairs += 1
-                worst = max(worst, share)
-    if not pairs:
-        return
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    w = max(xs) - min(xs) + size
-    h = max(ys) - min(ys) + size
-    print(f"  ! {len(pts)} patches from a {w:.1f} x {h:.1f} area; {pairs} "
-          f"pair(s) share ground, up to {worst:.0%}. Overlapping patches are "
-          f"shifted copies of one another, so expect repetition in this "
-          f"material. A capture with more of it is the fix; fewer colours "
-          f"(--colours 2) needs fewer patches.")
-
-
-def apart(cands, n, size):
-    """The first `n` of `cands` that share no ground with one another, in
-    order; overlapping ones fill in only when too few are apart."""
-    picked = []
-    for c in cands:
-        if all(abs(c[1][0] - p[1][0]) >= size or abs(c[1][1] - p[1][1]) >= size
-               for p in picked):
-            picked.append(c)
-        if len(picked) == n:
-            return picked
-    ids = {id(p) for p in picked}
-    return picked + [c for c in cands if id(c) not in ids][:n - len(picked)]
-
-
-def apart_alike(cands, n, size, apart_too=True, given=1, only_apart=False, accept=None):
-    """`n` of `cands`: the first `given`, then each time the one that
-    looks most like those already chosen (appearance), among those sharing
-    no ground with them when `apart_too` and there are any. Patches that
-    look alike hide the triangle each tile is made of; ones that differ
-    show it. `only_apart`: stop when none is left apart, rather than take
-    an overlapping one (the most alike is then a shifted copy). `accept`:
-    a further test, made only on the ones about to be taken (it may be
-    slow); those failing it are passed over."""
-    if not cands:
-        return []
-    feats = [appearance(c[2]) for c in cands]
-    ok = accept or (lambda c: True)
-    dropped = set()
-    picked = []
-    for i in range(len(cands)):
-        if len(picked) >= min(given, len(cands)):
-            break
-        if ok(cands[i]):
-            picked.append(i)
-        else:
-            dropped.add(i)
-    if not picked:
-        return []
-    while len(picked) < n:
-        ref = np.mean([feats[i] for i in picked], axis=0)
-        rest = [i for i in range(len(cands)) if i not in picked and i not in dropped]
-        if not rest:
-            break
-        free = [i for i in rest if all(
-            abs(cands[i][1][0] - cands[j][1][0]) >= size
-            or abs(cands[i][1][1] - cands[j][1][1]) >= size for j in picked)]
-        if only_apart and not free:
-            break
-        pool = free if (apart_too and free) else rest
-        if apart_too and not free:
-            # Nothing apart left: the least overlap, not the most alike
-            # (that is a shifted copy; desert10 took 1.0 and 1.5 a step apart).
-            share = [max(max(0.0, size - abs(cands[i][1][0] - cands[j][1][0]))
-                         * max(0.0, size - abs(cands[i][1][1] - cands[j][1][1]))
-                         for j in picked) for i in rest]
-            pool = [i for i, v in zip(rest, share) if v <= min(share) + 1e-9]
-        best = min(pool, key=lambda i: float(np.linalg.norm(feats[i] - ref)))
-        if ok(cands[best]):
-            picked.append(best)
-        else:
-            dropped.add(best)
-    return [cands[i] for i in picked]
-
-
-def haze(c, up=2):
-    """A candidate's splat layer thickness (m), measured once."""
-    if "haze" not in c[3]:
-        c[3]["haze"] = thickness(c[2], up)
-    return c[3]["haze"]
-
-
-def weigh_shares(shares, thick, weight):
-    """The share each material gets in the viewer: its share of the ground
-    times (thinnest layer / its layer) ** weight, so a material the capture
-    holds only as haze shows up less without being dropped. 0 keeps the
-    ground's shares."""
-    ref = max(min(thick), 1e-4)
-    w = [sh * (ref / max(t, 1e-4)) ** weight for sh, t in zip(shares, thick)]
-    return [v / sum(w) for v in w]
-
-
-def class_reasons(materials, shares, size, need, min_share, gap=0.04):
-    """Why each material cannot be a class of its own (empty when it can):
-    it must be a real part of the ground (`min_share` of it), have its own
-    colour (mean rgb `gap` from the nearest other) and give `need` patches
-    on ground of their own."""
-    rgb = [np.mean([appearance(c[2])[:3] for c in g], axis=0) for g in materials]
-    out = []
-    for i, g in enumerate(materials):
-        why = []
-        if shares[i] < min_share:
-            why.append(f"only {shares[i]:.0%} of the ground")
-        near = min((float(np.abs(rgb[i] - rgb[j]).max()) for j in range(len(rgb)) if j != i),
-                   default=1.0)
-        if near < gap:
-            why.append(f"colour only {near:.2f} from another")
-        room = []
-        for c in g:
-            if all(abs(c[1][0] - x) >= size or abs(c[1][1] - y) >= size for x, y in room):
-                room.append(c[1])
-        if len(room) < need:
-            why.append(f"only {len(room)} patches apart, {need} needed")
-        out.append(why)
-    return out
-
-
-def choose_classes(s, args, up, thickness_cm, need):
-    """How many materials to make tiles for, and why: the most (2 to 4)
-    for which every one passes class_reasons. 1 when none does."""
-    every = search_kwargs(args, thickness_cm)
-    sep = min(every.pop("min_separation", 1.0), 0.25)
-    found, st, _ = cached_search(s, args.size, up, every, cache=args.search_cache,
-                                 where=True)
-    seen = seen_points(found, st) if args.seen_shares else None
-    pos = choose(found, len(found), args.size, sep)
-    least = args.min_share or 0.1
-    print(f"\n  how many materials? each must be {least:.0%} of the ground or more, "
-          f"have its own colour and give {need} patches apart:")
-    best = 1
-    for k in (2, 3, 4):
-        mats = split_materials(pos, k)
-        sh = class_shares(s, mats, args.size, up, seen=seen)
-        why = class_reasons(mats, sh, args.size, need, least)
-        bad = [f"material {i} ({sh[i]:.0%}): {', '.join(w)}" for i, w in enumerate(why) if w]
-        print(f"    {k}: " + (" / ".join(f"{v:.0%}" for v in sorted(sh, reverse=True))
-                              + "  ok" if not bad else "no - " + "; ".join(bad)))
-        if not bad:
-            best = k
-    print(f"  -> {best} material{'s' if best > 1 else ''}")
-    return best
-
-
-def colour_alike(reference):
-    """A test: is a candidate's mean colour no further from the `reference`
-    patches' mean than the furthest of them, plus 0.04 (a visible step)?
-    The material map judges by colour and texture over a whole tile, so the
-    capture's dark, hazy rim counts as bush there; this is what keeps it out
-    of the bush's patches."""
-    if not reference:
-        return lambda c: True
-    rgb = lambda c: appearance(c[2])[:3]
-    mid = np.mean([rgb(e) for e in reference], axis=0)
-    reach = max(float(np.abs(rgb(e) - mid).max()) for e in reference) + 0.04
-    return lambda c: float(np.abs(rgb(c) - mid).max()) <= reach
-
-
-def pick_centres(edge, material, count, size, up=2, accept=None):
-    """Up to `count` centre patches like the `edge` ones, each on ground of
-    its own: a centre's core (the inner 0.7 of the tile, inside the seam
-    band) shares none with another's or an edge patch's. Positions a
-    quarter tile apart are mostly the same ground shifted, and alike-first
-    took exactly those: on desert v1 one material's 18 centres came from a
-    3 x 2.4 m spot and the same tuft showed in tile after tile. None
-    thinner than the thinnest edge patch, which it sits between: a blurrier
-    centre shows as a square. Nor further in colour from the edges' mean
-    than the furthest edge patch, plus 0.04: on desert10 the bush took
-    brown sand from the capture's rim (0.41 against 0.22) once its own
-    ground ran out, and every bush tile had a sand square in it."""
-    floor = min(len(e[2]) for e in edge) if edge else 0
-    # Nor a thicker haze of splats than the edges have.
-    ceiling = max(haze(e, up) for e in edge) if edge else 1e9
-    alike = colour_alike(edge)
-    spare = sorted((c for c in material if len(c[2]) >= floor and haze(c, up) <= ceiling
-                    and alike(c) and all(c is not e for e in edge)),
-                   key=lambda c: -len(c[2]))
-    return apart_alike(list(edge) + spare, len(edge) + count, 0.7 * size,
-                       given=len(edge), only_apart=True, accept=accept)[len(edge):]
-
-
-_LUM = {}
 _T0 = [time.perf_counter()] * 2         # when the run started, and the last step
 
 
@@ -244,199 +53,6 @@ def took(what):
     now = time.perf_counter()
     print(f"  [{what}: {now - _T0[1]:.0f} s, {now - _T0[0]:.0f} s in all]", flush=True)
     _T0[1] = now
-
-
-def lum_of(c, ground, size, up=2):
-    """A candidate from above as (luminance, coverage), a pixel being 2.5 cm
-    of the finished tile; measured once per spot and cut."""
-    key = (round(float(c[1][0]), 4), round(float(c[1][1]), 4), round(ground, 4), len(c[2]))
-    if key not in _LUM:
-        _LUM[key] = frames_mod.luminance(c[2], ground, up, px=0.025 * ground / size)
-    return _LUM[key]
-
-
-def quiet_edges(used, cands, n, ground, inner, size, up=2, accept=None, diamonds=False,
-                shape=2.0):
-    """The `n` edge patches with the spottiest frames (salient spots outside
-    `inner` of the tile, frames.salience) swapped, worst first, for clearly
-    quieter ones from the same candidates: a frame repeats in every tile
-    with its edge colour, so a spot in it shows at one place tile after
-    tile. A swap keeps the patches on ground of their own, alike in colour
-    and passing `accept`; one at a time, so a material with just enough
-    ground still gets some (taking a quiet subset first left desert v1 with
-    too few apart, every time). Returns (patches, the decision)."""
-    used = list(used[:n])
-    pool = list({id(c): c for c in used + list(cands)}.values())
-    if len(pool) <= n:
-        return used, "quiet edges: no (no spare patches to choose from)"
-    imgs = [lum_of(c, ground, size, up) for c in pool]
-    ring = frames_mod.shown(imgs[0][0].shape[0], ground, inner * ground / size, diamonds, shape)
-    sal = frames_mod.salience(imgs, [ring & (w > 0.5) for _, w in imgs])
-    of = {id(c): v for c, v in zip(pool, sal)}
-    before = float(np.mean([of[id(c)] for c in used]))
-    ok = accept or (lambda c: True)
-    alike = colour_alike(used)
-    spare = sorted((c for c in pool if all(c is not u for u in used)), key=lambda c: of[id(c)])
-    swaps = 0
-    for worst in sorted(used, key=lambda c: -of[id(c)]):
-        k = next(i for i, u in enumerate(used) if u is worst)
-        tries = 0                                      # hole checks are renders
-        for c in spare:
-            if of[id(c)] > 0.7 * of[id(worst)] or tries >= 3:
-                break                                  # none clearly quieter left
-            if all(abs(c[1][0] - u[1][0]) >= ground or abs(c[1][1] - u[1][1]) >= ground
-                   for i, u in enumerate(used) if i != k) and alike(c):
-                tries += 1
-                if ok(c):
-                    used[k] = c
-                    spare.remove(c)
-                    swaps += 1
-                    break
-    if not swaps:
-        return used, (f"quiet edges: no (no clearly quieter patch on ground of its own; "
-                      f"salient spots on {before:.1%} of the frames)")
-    after = float(np.mean([of[id(c)] for c in used]))
-    return used, (f"quiet edges: yes ({swaps} of {n} swapped for quieter: salient spots "
-                  f"on {after:.1%} of the frames, {before:.1%} before)")
-
-
-def sharpness(c, ground, size, geo, up=2, whole=False):
-    """How sharp a candidate looks where it is used: (splats per m2, median
-    footprint in m) over its centre's region, or with `whole` its whole
-    square (an edge patch, which shows all over the tiles). A splat count
-    over the whole cut stood in for this before; it says more about the
-    cut than about the ground."""
-    key = ("sharp", whole)
-    if key not in c[3]:
-        k = ground / size
-        plane = [i for i in range(3) if i != up]
-        xy = c[2].xyz[:, plane].astype(np.float64)
-        shape = geo.get("shape", 2.0)
-        r = frames_mod.norm(xy[:, 0], xy[:, 1], shape)
-        inside = np.abs(xy).max(axis=1) <= ground / 2.0
-        lo, hi = (0.0, np.inf) if whole else (0.0, geo["outer"] * k)
-        sel = inside & (r >= lo) & (r <= hi)
-        area = float(frames_mod.zone(64, ground, lo, hi, shape).mean()) * ground * ground
-        sc = np.sort(np.asarray(c[2].scale, np.float64)[sel], axis=1)
-        foot = float(np.median(np.sqrt(sc[:, 1] * sc[:, 2]))) if len(sc) else np.inf
-        c[3][key] = (float(sel.sum()) / max(area, 1e-9), foot)
-    return c[3][key]
-
-
-def pick_pool(edge, material, count, size, ground, geo, up=2, accept=None,
-              middles=True, share=0.0, diamonds=False, by_sharpness=False):
-    """At most `count` centres for --frames: each edge patch's own middle
-    first (its frame never shows it; not with --diamonds, where the middle
-    lies on the edge), then discs on ground of their own, clear of every
-    edge patch and of one another, the most like the edges first. As
-    pick_centres: none with fewer splats or more haze than the edges, nor
-    further in colour. With `share` above 0 (--pool-share), where ground of
-    its own runs out, centres of which up to that share also shows in a
-    frame (frames.shared_with_frames): a material with little ground (a
-    bush) gets some variety, its centres turned and away from where the
-    frames show the same ground. With `by_sharpness` (--pool-sharpness),
-    "thinner than the edges" is measured where it shows (sharpness): none
-    sparser, nor with larger splats, than the edge patches, in place of the
-    splat count over the whole cut. Returns (centres, edge middles, the
-    share of each of the others, why the rest were not taken: a count
-    each)."""
-    radius = geo["radius"] * ground / size
-    reach = geo.get("reach", geo["radius"]) * ground / size     # its corner, if square
-    square = geo.get("shape", 2.0) != 2.0
-    ok = accept or (lambda c: True)
-    pool = [e for e in edge if ok(e)][:count] if middles else []
-    mids = len(pool)
-    if not edge:
-        return pool, mids, [], {}
-    floor = min(len(e[2]) for e in edge)
-    ceiling = max(haze(e, up) for e in edge)
-    alike = colour_alike(edge)
-    ref = np.mean([appearance(e[2]) for e in edge], axis=0)
-    ids = {id(e) for e in edge}
-    others = [c for c in material if id(c) not in ids]
-    why = {"candidates": len(others)}
-    if by_sharpness:
-        # Blur is splat size; how many splats there are is the hole check's
-        # business (requiring the edges' density as well left 15 of 53).
-        fine = max(sharpness(e, ground, size, geo, up, whole=True)[1] for e in edge)
-        thin = [c for c in others if sharpness(c, ground, size, geo, up)[1] > fine]
-        why[f"with larger splats than the edges ({fine * 100:.1f} cm)"] = len(thin)
-    else:
-        thin = [c for c in others if len(c[2]) < floor]
-        why[f"with fewer splats than the thinnest edge ({floor:,})"] = len(thin)
-    thin_ids = {id(c) for c in thin}
-    hazy = [c for c in others if id(c) not in thin_ids and haze(c, up) > ceiling]
-    spare = sorted((c for c in others if id(c) not in thin_ids
-                    and haze(c, up) <= ceiling and alike(c)),
-                   key=lambda c: float(np.linalg.norm(appearance(c[2]) - ref)))
-    why["hazier than the edges"] = len(hazy)
-    why["further in colour than the edges"] = len(others) - len(thin) - len(hazy) - len(spare)
-    shared = []
-    if share > 0:
-        # Ground of its own first, then the least shared; alike within each.
-        of = {id(c): frames_mod.shared_with_frames(c[1], [e[1] for e in edge], ground,
-                                                  geo, size, diamonds) for c in spare}
-        kept = [c for c in spare if of[id(c)] <= 0.02] + sorted(
-            (c for c in spare if 0.02 < of[id(c)] <= share), key=lambda c: of[id(c)])
-        why["on the frames' ground"] = len(spare) - len(kept)
-        spare = kept
-    for k in ("too close to a centre taken", "with holes", "not tried"):
-        why[k] = 0
-    tries = 0
-    for n, c in enumerate(spare):
-        if len(pool) >= count:
-            break
-        if tries >= 3 * count:                           # hole checks are renders
-            why["not tried"] = len(spare) - n
-            break
-        dx = [abs(c[1][0] - p[1][0]) for p in pool]
-        dy = [abs(c[1][1] - p[1][1]) for p in pool]
-        if any((max(a, b) if square else np.hypot(a, b)) < 2 * radius for a, b in zip(dx, dy)):
-            why["too close to a centre taken"] += 1
-            continue
-        if share > 0 or all(frames_mod.clear_of_frame(c[1], e[1], ground, reach,
-                                                       0.05 if middles else None)
-                                for e in edge):
-            tries += 1
-            if ok(c):
-                pool.append(c)
-                shared.append(of[id(c)] if share > 0 else 0.0)
-            else:
-                why["with holes"] += 1
-        else:
-            why["on the frames' ground"] = why.get("on the frames' ground", 0) + 1
-    return pool, mids, shared, why
-
-
-def height_order(groups, up=2, radius=3.0):
-    """How strictly the materials, in order (hollows first), follow the
-    ground's height in the capture. Each position's ground (its splats'
-    lower quartile) against the mean of the positions within `radius`;
-    for each two materials in a row, the share of position pairs the wrong
-    way round (Mann-Whitney's U over all pairs, ties half). 0: strictly by
-    height; 0.5: no relation. None with nothing to compare."""
-    from scipy.spatial import cKDTree
-    from scipy.stats import rankdata
-    xy = np.array([c[1][:2] for g in groups for c in g], np.float64)
-    z = np.array([np.percentile(c[2].xyz[:, up], 25) if len(c[2]) else np.nan
-                  for g in groups for c in g])
-    lab = np.concatenate([[k] * len(g) for k, g in enumerate(groups)]) if len(xy) else []
-    ok = np.isfinite(z)
-    if ok.sum() < 4:
-        return None
-    tree = cKDTree(xy[ok])
-    rel = np.full(len(z), np.nan)
-    rel[ok] = z[ok] - np.array([z[ok][nb].mean() for nb in
-                                tree.query_ball_point(xy[ok], radius)])
-    wrong = total = 0.0
-    for k in range(len(groups) - 1):
-        a, b = rel[(lab == k) & ok], rel[(lab == k + 1) & ok]
-        if not len(a) or not len(b):
-            continue
-        r = rankdata(np.concatenate([a, b]))[:len(a)]
-        wrong += r.sum() - len(a) * (len(a) + 1) / 2.0        # pairs with a above b
-        total += len(a) * len(b)
-    return float(wrong / total) if total else None
 
 
 MATERIAL_RGB = ("#f0a830", "#30b0e0", "#e040a0", "#70d050", "#a070f0")
@@ -452,7 +68,7 @@ def look(s, materials, edges, centres, info, size, up, dest, name=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, Patch, Rectangle
+    from matplotlib.patches import Patch, Rectangle
     from scipy.ndimage import gaussian_filter
 
     plane = [i for i in range(3) if i != up]
@@ -582,295 +198,18 @@ def look(s, materials, edges, centres, info, size, up, dest, name=""):
     plt.close(fig)
 
 
-def holes(p, size, up=2, res=60, min_cm=8.0, ring=None, shape=2.0):
-    """See-through holes in a patch or tile from above: spots under half
-    covered, at least `min_cm` across, within `ring` (r_min, r_max) of its
-    middle if given (a frame, a centre). Returns (count, largest in cm^2,
-    mask of the holes)."""
-    from bozkir.graphcut import render_patch
-    from scipy.ndimage import label
-    if not len(p):
-        return 1, size * size * 1e4, np.ones((res, res), bool)
-    a = render_patch(p, size, res, up)[1]
-    see = a < 0.5
-    if ring is not None:
-        see &= frames_mod.zone(res, size, *ring, shape=shape)
-    lab, n = label(see)
-    px = (size * 100.0 / res) ** 2
-    sizes = np.bincount(lab.ravel(), minlength=n + 1)[1:] * px
-    big = [k + 1 for k, v in enumerate(sizes) if v >= min_cm ** 2]
-    mask = np.isin(lab, big)
-    return len(big), float(max((sizes[k - 1] for k in big), default=0.0)), mask
-
-
-# hole_free's answers, kept in data/cache between runs: --look and the
-# build after it ask about the same patches, and each answer is two renders.
-_HOLED = {"path": None, "data": {}, "new": 0}
-
-
-def holed_cache(s, thickness, margin, use=True):
-    """Load the answers for this prepared capture and cut (none if `use` is off)."""
-    import hashlib
-    from bozkir.patches import scene_fingerprint
-    _HOLED.update(path=None, data={}, new=0)
-    if not use:
-        return
-    key = hashlib.sha1(f"v1|{scene_fingerprint(s)}|{thickness}|{margin}".encode()).hexdigest()
-    _HOLED["path"] = Path("data/cache") / f"holes_{key[:16]}.json"
-    try:
-        _HOLED["data"] = json.loads(_HOLED["path"].read_text())
-    except (OSError, ValueError):
-        pass
-
-
-def save_holed():
-    if _HOLED["path"] is not None and _HOLED["new"]:
-        try:
-            _HOLED["path"].parent.mkdir(parents=True, exist_ok=True)
-            _HOLED["path"].write_text(json.dumps(_HOLED["data"]))
-            _HOLED["new"] = 0
-        except OSError:
-            pass
-
-
-_FILL = {"spare_haze": False}       # export --fill-spare-haze
-
-
-def fill_opacity(t, size, up=2, target=0.98):
-    """The fill (bozkir.tile.fill_opacity), sparing large faint splats with
-    --fill-spare-haze."""
-    return _fill_opacity(t, size, up, target,
-                         spare=haze_splats(t, size, up) if _FILL["spare_haze"] else None)
-
-
-def hole_free(c, size, up=2, fill=0.0):
-    """True when a candidate has no see-through hole from above once its
-    opacity is filled as its tile's will be (fill_opacity). Holes passed by
-    the search (faint, gappy ground) showed in every tile built from the
-    patch: desert11's bush 16 of 18 tiles, mid sand 11. Measured once, and
-    remembered between runs (holed_cache)."""
-    if "holed" not in c[3]:
-        key = (f"{c[1][0]:.4f},{c[1][1]:.4f},{size:.4f},{fill:g},{len(c[2])},{up}"
-               + (",haze" if _FILL["spare_haze"] else ""))
-        if _HOLED["path"] is None:
-            _HOLED["data"].pop(key, None)            # no capture to remember it by
-        if key not in _HOLED["data"]:
-            p = c[2]
-            if fill > 0:
-                p = fill_opacity(p, size, up, fill)
-            _HOLED["data"][key] = bool(holes(p, size, up)[0] > 0)
-            _HOLED["new"] += 1
-        c[3]["holed"] = _HOLED["data"][key]
-    return not c[3]["holed"]
-
-
-def with_neighbours(tiles, codes, tile_class, size, up=2, band=0.1):
-    """Each tile with a `band` of its neighbours' ground past each edge (from
-    any tile of its material with that edge colour on the other side; they
-    all share that edge): a tile seen alone is thin along its edges, since
-    the splats just past them belong to the neighbour, and a faint spot
-    there read as a hole that the world does not have."""
-    from bozkir.tile import translate
-    plane = [i for i in range(3) if i != up]
-    h = size / 2.0
-    # (edge, its code column, the other side's column, which way, along which axis)
-    sides = (("n", 0, 2, 1, 1), ("e", 1, 3, 1, 0), ("s", 2, 0, -1, 1), ("w", 3, 1, -1, 0))
-    out = []
-    for t, c, k in zip(tiles, codes, tile_class):
-        parts = [t]
-        for _, mine, theirs, sign, axis in sides:
-            other = next((u for u, d, q in zip(tiles, codes, tile_class)
-                          if q == k and d[theirs] == c[mine]), None)
-            if other is None or not len(other):
-                continue
-            a = other.xyz[:, plane[axis]] * -sign            # how far in from its edge
-            near = np.flatnonzero(a >= h - band)
-            if len(near):
-                off = np.zeros(3)
-                off[plane[axis]] = sign * size
-                parts.append(translate(other.subset(near), off))
-        out.append(merge(*parts) if len(parts) > 1 else t)
-    return out
-
-
-def hole_report(tiles, codes, tile_class, size, up, dest, ring=None, shape=2.0):
-    """Which finished tiles have see-through holes, per material, and a
-    picture of them (holes in red). `ring`, one per tile: only there (a
-    frame's band; None for a whole tile). Each tile is seen with its
-    neighbours' ground just past its edges (with_neighbours)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from bozkir.graphcut import render_patch
-    seen = with_neighbours(tiles, codes, tile_class, size, up)
-    found = [holes(t, size, up, ring=r, shape=shape)
-             for t, r in zip(seen, ring or [None] * len(tiles))]
-    print("\n  holes from above (8 cm or more across, under half covered):")
-    for k in sorted(set(tile_class)):
-        ids = [i for i, c in enumerate(tile_class) if c == k]
-        bad = [i for i in ids if found[i][0]]
-        worst = max((found[i][1] for i in bad), default=0.0)
-        print(f"    class {k}: {len(bad)} of {len(ids)} tiles"
-              + (f", largest {worst:.0f} cm2" if bad else ""))
-    bad = [i for i, f in enumerate(found) if f[0]]
-    if not bad:
-        return
-    cols = 9
-    rows = -(-len(bad) // cols)
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * 1.6, rows * 1.8))
-    ax = np.atleast_2d(ax)
-    for a in ax.flat:
-        a.axis("off")
-    for j, i in enumerate(bad):
-        rgb, al = render_patch(seen[i], size, 60, up)
-        img = np.clip(rgb * al[..., None], 0, 1)
-        img[found[i][2]] = [1.0, 0.1, 0.1]
-        ax.flat[j].imshow(img)
-        ax.flat[j].set_title(f"class {tile_class[i]} tile {i} {''.join(map(str, codes[i]))}",
-                             fontsize=6)
-    fig.tight_layout()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(dest, dpi=110)
-    plt.close(fig)
-    print(f"  the tiles with holes: {dest}")
-
-
-def even_mean(p):
-    """A patch's mean colour from above (opacity-weighted base colour)."""
-    w = np.asarray(p.opacity, dtype=np.float64)[:, None]
-    return (p.base_rgb * w).sum(axis=0) / max(float(w.sum()), 1e-9)
-
-
-def even_out(p, level, most):
-    """`p` with its mean colour moved to `level`, by at most `most` per
-    channel; detail and its own light and dark spots kept. Patches of one
-    material that differ in tone show as the triangles and frames of the
-    tiles built from them; every tile uses the same corrected patch, so
-    edges still match."""
-    from bozkir.ply import SH_C0
-    shift = np.clip(np.asarray(level) - even_mean(p), -most, most)
-    q = p.subset(np.arange(len(p)))
-    q.sh_dc = ((np.clip(p.base_rgb + shift, 0, 1) - 0.5) / SH_C0).astype(np.float32)
-    return q
-
-
-def dense_first(cands, at_least, keep=0.5):
-    """Densest first, without the patches under `keep` of the material's
-    dense (75th percentile) splat count, unless fewer than `at_least` are
-    left: on desert v1 thin patches have a quarter of the splats and show
-    as pale blurs, and --apart preferred them to dense ones that overlap."""
-    order = sorted(cands, key=lambda c: -len(c[2]))
-    if not order:
-        return order
-    floor = keep * float(np.percentile([len(c[2]) for c in order], 75))
-    dense = [c for c in order if len(c[2]) >= floor]
-    return order[:max(len(dense), at_least)]
-
-
-def scale_report(s, size):
-    """Warn when --size (in the capture's own units) looks wrong for the
-    capture's scale, suggesting a size."""
-    m = float(np.median(s.scale.max(axis=1)))
-    if m <= 0:
-        return
-    ratio = size / m
-    if 12 <= ratio <= 400:
-        return
-    guess = 55 * m
-    print(f"  ! --size {size:g} is {ratio:.0f}x the typical splat "
-          f"({m:.3g}); ground captures in metres sit around 30-150x. If this "
-          f"capture is not in metres, try --size {guess:.3g}.")
-
-
-def with_missing(wide, raw, centre, args, up):
-    """`wide` (a candidate's wider cut, centred on `centre`) with what it
-    is missing against the uncleaned capture from above (--missing-layer)."""
-    plane = [j for j in range(3) if j != up]
-    w = args.size * (1.0 + args.extract_margin)
-    d = np.abs(raw.xyz[:, plane] - np.float32(centre)).max(axis=1)
-    # Splats centred far off still paint here if they are big enough; ones
-    # high above the ground (floaters, sky) do not belong to it.
-    near = np.flatnonzero((d <= w / 2 + 3.0 * raw.scale.max(axis=1))
-                          & (raw.xyz[:, up] <= wide.xyz[:, up].max() + 0.5))
-    cap = raw.subset(near)
-    cap.xyz = cap.xyz.copy()
-    cap.xyz[:, plane] -= np.float32(centre)
-    layer = missing_layer(wide, cap, w, up)
-    print(f"    ({centre[0]:.2f}, {centre[1]:.2f}): {len(layer):,} splats "
-          f"fill what the capture shows and the patch is missing")
-    return merge(wide, layer) if len(layer) else wide
-
-
-def prepare_patches(chosen, need, args, up, raw=None, scene=None, scale=1.0):
-    """Cut, level and centre chosen candidates into tile-ready patches
-    (run once per class). With `raw`, each gets its missing layer first.
-    With `scale` under 1, each is cut from a square 1/scale as wide in
-    `scene` and shrunk to the tile, splats and heights with it (see
-    --class-scale)."""
-    patches = []
-    print(f"\n  {'#':>2} {'centre':>16} {'splats':>9} {'relief':>7} "
-          f"{'tilt':>7} {'rim':>6} {'mid':>6} {'mean rgb':>18}")
-    for i, (sc, (x, y), p, info) in enumerate(chosen[:need]):
-        # Level the wider cut so rotation has material to draw in from,
-        # then take the tile-sized middle of the result.
-        wide = info.get("wide", p)
-        if scale != 1.0 and scene is not None:
-            # The slab around the ground's own plane, not a level one: a
-            # 2-3 m cut on a slope lost its uphill and downhill sides to a
-            # level slab, which showed as gaps (desert10s).
-            th = args.thickness or args.size * 0.25
-            cut = info.get("cut", args.size / scale)
-            raw_w = extract_patch(scene, [x, y], cut * (1.0 + args.extract_margin), up_axis=up)
-            plane = [j for j in range(3) if j != up]
-            ref = wide.xyz.astype(np.float64)
-            # The ground's plane, not the canopy's: fitted to all, then again
-            # to the lowest third. Through the bush top, the slab cut away
-            # the ground around and under it: holes in every bush tile.
-            A = np.c_[ref[:, plane], np.ones(len(ref))]
-            coef = np.linalg.lstsq(A, ref[:, up], rcond=None)[0]
-            low = ref[:, up] - A @ coef <= np.percentile(ref[:, up] - A @ coef, 33)
-            if low.sum() >= 50:
-                coef = np.linalg.lstsq(A[low], ref[low, up], rcond=None)[0]
-            res = raw_w.xyz[:, up] - (raw_w.xyz[:, plane] @ coef[:2] + coef[2])
-            wide = raw_w.subset((res >= -0.25 * th) & (res <= th))
-        if raw is not None:
-            wide = with_missing(wide, raw, (x, y), args, up)
-        p, tilt = level_patch(wide, up)
-        # Centre on the origin so every tile is assembled in the same frame.
-        plane = [j for j in range(3) if j != up]
-        off = np.zeros(3, dtype=np.float32)
-        off[plane] = p.xyz[:, plane].mean(axis=0)
-        q = p.subset(np.arange(len(p)))
-        q.xyz = (q.xyz - off).astype(np.float32)
-        if scale != 1.0:
-            q.xyz = (q.xyz * scale).astype(np.float32)
-            q.scale = (q.scale * scale).astype(np.float32)
-
-        # Cap after levelling (which reads the wide cut), spread evenly.
-        if args.max_per_tile and len(q) > args.max_per_tile:
-            print(f"    patch {i} at ({x:.2f}, {y:.2f}): {len(q):,} splats "
-                  f"capped to {args.max_per_tile:,}")
-            q = q.subset(stratified_keep(q, args.max_per_tile,
-                                         args.size * (1.0 + args.extract_margin),
-                                         up))
-        # Overhang kept: a Gaussian just outside still covers ground inside.
-        plane2 = [j for j in range(3) if j != up]
-        over = float((np.abs(q.xyz[:, plane2]).max(axis=1)
-                      > args.size / 2).mean())
-        patches.append(q)
-        rgb = q.base_rgb.mean(axis=0)
-        print(f"  {i:>2} ({x:6.2f},{y:6.2f}) {len(q):>9,} "
-              f"{info['relief']:>7.2f} {tilt:>6.1f}\u00b0 "
-              f"{info.get('edge_relief', 0):>6.2f} "
-              f"{info.get('interior_relief', 0):>6.2f}  "
-              f"{rgb[0]:.2f} {rgb[1]:.2f} {rgb[2]:.2f}"
-              f"  overhang {over:>4.0%}")
-    return patches
-
-
-
 class _ShortClass(Exception):
     """A class came back with fewer patches than the colours need."""
+
+
+def in_repo(path):
+    """A path as the manifest stores it: relative to the repository when it
+    is inside it, so a published tileset does not carry a local folder."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        return Path(path).resolve().relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _progress_line():
@@ -889,8 +228,9 @@ def _progress_line():
             sys.stdout.flush()
     return progress
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", type=Path)
     ap.add_argument("--size", type=float, default=1.5)
     ap.add_argument("--colours", type=int, default=2,
@@ -938,7 +278,7 @@ def main():
                     help="with --min-share, weigh each material's share in the "
                          "viewer by how thin its layer of splats is: share x "
                          "(thinnest / its own) ** this. 0.5 gives a material "
-                         "held only as haze (desert v1's bush) a small part "
+                         "held only as haze (the desert's bush) a small part "
                          "without dropping it (0 = shares of the ground)")
     ap.add_argument("--pure-share", type=float, default=0.0,
                     help="with --min-share, take a material's patches only where "
@@ -953,7 +293,7 @@ def main():
                          "0:0.67 cuts 2.25 m for a 1.5 m tile. Splats shrink "
                          "with it, so up close the material looks as it does "
                          "from 1.5x as far, where a hazy capture tightens up "
-                         "(desert v1's bush). One scale per material, so its "
+                         "(the desert's bush). One scale per material, so its "
                          "tiles still match; heights shrink too. 'auto': each "
                          "material whose layer of splats is over twice the "
                          "thinnest one's is shrunk by (thinnest / its own) ** "
@@ -962,7 +302,7 @@ def main():
     ap.add_argument("--seen-shares", action="store_true",
                     help="with --min-share, count only ground the photos saw "
                          "well: not where the search found too few splats, "
-                         "faint layers or gaps (desert v1's hazy rim counted "
+                         "faint layers or gaps (the desert's hazy rim counted "
                          "as bush and inflated it)")
     ap.add_argument("--tone-order", action="store_true",
                     help="with --min-share, order the materials darkest to "
@@ -1067,7 +407,8 @@ def main():
                     help="width of the feathered band along each diagonal, "
                          "in world units; 0 is a hard cut. Ignored with --cut.")
     ap.add_argument("--cut", action=argparse.BooleanOptionalAction, default=True,
-                    help="(on by default; --no-cut for speed) place each diagonal by graph cut instead of leaving "
+                    help="(on by default; --no-cut for speed) place each "
+                         "diagonal by graph cut instead of leaving "
                          "it straight: the boundary follows wherever the two "
                          "patches already agree, so the join hides in the "
                          "texture (Kwatra et al. 2003, GSWT 3.2)")
@@ -1191,8 +532,7 @@ def main():
     ap.add_argument("-o", "--out", type=Path, default=None)
     add_scene_args(ap)
     add_preset_args(ap)
-    args = apply_preset(ap)
-    _FILL["spare_haze"] = bool(args.fill_spare_haze)
+    args = apply_preset(ap, argv)
 
     def classes_in(text):
         return {int(v) for v in text.replace(" ", "").split(",") if v}
@@ -1320,7 +660,7 @@ def main():
             # ground: flat bare sand outscores sand with shrubs, so the top
             # candidates were all one material and the others went unseen.
             every = search_kwargs(args, thickness)
-            # A quarter tile apart: 0.5 left 63 of 232 positions on desert v1,
+            # A quarter tile apart: 0.5 left 63 of 232 positions on the desert,
             # too few for a material's 6 edge and 18 centre patches.
             sep = min(every.pop("min_separation", 1.0), 0.25)
             found, st, _ = cached_search(s, args.size, up, every,
@@ -1511,11 +851,11 @@ def main():
                     sd = np.maximum(f.std(axis=0), 1e-6)
                     far = np.linalg.norm((f - mid) / sd, axis=1)
                     # Dense counts as much: the most typical patches of
-                    # desert v1's commonest sand had a quarter of the splats.
+                    # the desert's commonest sand had a quarter of the splats.
                     n = np.array([len(c[2]) for c in g], dtype=np.float64)
                     rank = far / max(np.median(far), 1e-9) - n / max(n.max(), 1.0)
                     if args.quality_weight > 0:
-                        # Splat count favoured the haze: desert v1's bush has
+                        # Splat count favoured the haze: the desert's bush has
                         # three times the splats of its sharp sand. A thin
                         # layer is what looks sharp up close.
                         th = np.array([haze(c, up) for c in g])
@@ -1576,7 +916,7 @@ def main():
         mats = extra["materials"]
         labels, (mx, my) = material_map(s, mats, args.size, up, seen=extra.get("seen"))
 
-        def purity(c, k, d):
+        def map_share(c, k, d):
             """Share of the ground under `c` (a `d` square) that is material `k`."""
             i0, i1 = (int(np.floor((c[1][0] - d / 2 - mx) / 0.5)),
                       int(np.ceil((c[1][0] + d / 2 - mx) / 0.5)))
@@ -1601,7 +941,8 @@ def main():
             n_c = need_of(ci)
             tone = tone_gate(mats[ci])
             in_tone = lambda c: tone(c)[0]
-            solid = lambda c, d=args.size: hole_free(c, d, up, args.fill_opacity)
+            solid = lambda c, d=args.size: hole_free(c, d, up, args.fill_opacity,
+                                                     args.fill_spare_haze)
             rel = float(np.median([c[3].get("relief", 0.0) for c in class_sets[ci][:n_c]]))
             decisions[ci].append(f"flatten: {'yes' if args.flatten_bare and rel < 0.15 else 'no'}"
                                  f" (relief {rel * 100:.0f} cm)")
@@ -1632,7 +973,7 @@ def main():
                     found_big, _, _ = cached_search(s, d, up, every, cache=args.search_cache,
                                                     progress=_progress_line())
                     big = [c for c in choose(found_big, len(found_big), d, sep)
-                           if purity(c, ci, d) >= floor and alike(c) and in_tone(c)]
+                           if map_share(c, ci, d) >= floor and alike(c) and in_tone(c)]
                     if args.odd_spots > 0 and big:
                         ordered, clean, _ = rank_clean(big, d, args.odd_spots, up)
                         big = ordered[:clean]
@@ -1686,13 +1027,13 @@ def main():
             # Pure patches (--pure-share), for materials not shrunk.
             if ci not in shrink and args.pure_share > 0:
                 pool = extra["pools"][ci]
-                pure = [c for c in pool if purity(c, ci, args.size) >= floor and in_tone(c)]
+                pure = [c for c in pool if map_share(c, ci, args.size) >= floor and in_tone(c)]
                 apart_n = apart_count(pure, args.size)
                 if apart_n >= n_c:
                     class_sets[ci] = apart_alike(pure, n_c, args.size, True, accept=solid)
                     source[ci] = (pure, args.size)
                     cpool[ci] = [c for c in mats[ci]
-                                 if purity(c, ci, args.size) >= floor and in_tone(c)]
+                                 if map_share(c, ci, args.size) >= floor and in_tone(c)]
                     decisions[ci].append(f"pure patches: yes ({apart_n} apart at "
                                          f"{floor:.0%} or more, in the common tone)")
                 else:
@@ -1757,7 +1098,7 @@ def main():
         extra["frame_pools"] = []
         for ci in range(len(class_sets)):
             n_c, d = need_of(ci), ground_of(ci)
-            solid_d = lambda c, d=d: hole_free(c, d, up, args.fill_opacity)
+            solid_d = lambda c, d=d: hole_free(c, d, up, args.fill_opacity, args.fill_spare_haze)
             cands = source.get(ci, ((extra.get("pools") or class_sets)[ci], d))[0]
             rule = frames_mod.turn_rule([lum_of(c, d, args.size, up)
                                          for c in list(class_sets[ci][:n_c]) + list(cands)[:12]])
@@ -1779,7 +1120,8 @@ def main():
             class_sets[ci] = list(edge) + [c for c in class_sets[ci]
                                            if all(c is not e for e in edge)]
             decisions[ci].append(line)
-            pool, mids, shared, why = pick_pool(class_sets[ci][:n_c], material[ci], args.centre_pool,
+            pool, mids, shared, why = pick_pool(class_sets[ci][:n_c], material[ci],
+                                         args.centre_pool,
                                          args.size, d, geo, up, solid_d, not args.diamonds,
                                          args.pool_share, args.diamonds,
                                          args.pool_sharpness)
@@ -1797,7 +1139,8 @@ def main():
             decisions[ci].append(
                 f"centres: a pool of {len(pool)} "
                 + ("rounded squares" if square else "discs")
-                + f" {2 * geo['radius']:.2f} m across ({2 * geo['radius'] / args.size:.0%} of the tile), "
+                + f" {2 * geo['radius']:.2f} m across "
+                + f"({2 * geo['radius'] / args.size:.0%} of the tile), "
                 + (f"{mids} the edge patches' own middles, " if not args.diamonds else "")
                 + f"{sum(v <= 0.02 for v in shared)} on ground of their own"
                 + (f", {sum(v > 0.02 for v in shared)} sharing up to {max(shared):.0%} of "
@@ -1829,7 +1172,7 @@ def main():
         pool = extra.get("centre_pool") or mats
         centres = [pick_centres(g[:need_of(ci)], pool[ci], count, ground_of(ci), up,
                                 accept=lambda c, d=ground_of(ci): hole_free(
-                                    c, d, up, args.fill_opacity))
+                                    c, d, up, args.fill_opacity, args.fill_spare_haze))
                    if args.centres and not args.frames else []
                    for ci, g in enumerate(class_sets)]
         if args.frames:
@@ -1946,7 +1289,7 @@ def main():
                         or extra.get("pools", [picked]))[ci]
             chosen_c = pick_centres(picked[:n_c], material, count, ground_of(ci), up,
                                     accept=lambda c, d=ground_of(ci): hole_free(
-                                        c, d, up, args.fill_opacity))
+                                        c, d, up, args.fill_opacity, args.fill_spare_haze))
             if chosen_c:
                 print(f"\n  centre patches, one per tile: {len(chosen_c)} on ground "
                       f"of their own for {count} tiles")
@@ -2049,9 +1392,10 @@ def main():
         was = cover(tiles)
         if args.fill_spare_haze:
             n = sum(int(haze_splats(t, args.size, up).sum()) for t in tiles)
-            print(f"  fill: {n:,} large faint splats ({n / max(1, sum(len(t) for t in tiles)):.0%}) "
+            total = max(1, sum(len(t) for t in tiles))
+            print(f"  fill: {n:,} large faint splats ({n / total:.0%}) "
                   f"left as they are (--fill-spare-haze)")
-        tiles = [fill_opacity(t, args.size, up, args.fill_opacity) for t in tiles]
+        tiles = [filled(t, args.size, up, args.fill_opacity, args.fill_spare_haze) for t in tiles]
         print(f"  fill opacity: cover from above {was:.0%} -> {cover(tiles):.0%}")
     name = (args.out.stem if args.out else args.path.stem).removesuffix("_base")
     hole_report(tiles, codes, tile_class, args.size, up,
@@ -2061,7 +1405,7 @@ def main():
     if args.frames:
         # Filled whole, then cut: a fill at the cut's rim would thicken it.
         if args.fill_opacity > 0:
-            pool_patches = [fill_opacity(p, args.size, up, args.fill_opacity)
+            pool_patches = [filled(p, args.size, up, args.fill_opacity, args.fill_spare_haze)
                             for p in pool_patches]
         for k in sorted(set(pool_class)):
             ids = [i for i, c in enumerate(pool_class) if c == k]
@@ -2131,7 +1475,7 @@ def main():
            if args.frames else {}),
         # What produced this file, so a scene can be traced back to the
         # settings that made it without keeping a shell history.
-        "settings": {k: (str(v) if isinstance(v, Path) else v)
+        "settings": {k: (in_repo(v) if isinstance(v, Path) else v)
                      for k, v in sorted(vars(args).items())
                      if k not in ("out", "list_presets", "save_preset")},
         "total": cursor, "tiles": meta}, indent=2))

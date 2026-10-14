@@ -8,7 +8,7 @@ What each control in the viewer does is in [viewer-guide.md](viewer-guide.md)
 ## The viewer
 
 ```bash
-cd web && python -m http.server 8000      # ES modules will not load from file://
+python scripts/serve.py                   # ES modules will not load from file://
 ```
 
 Open `http://localhost:8000`. It opens on the desert tileset over its
@@ -44,16 +44,28 @@ controls with values in range.
 
 **Figures.** Figure mode (F) hides the panel; **save PNG** (P) writes the
 canvas at full resolution, named after the scene, grid, rule and camera.
-Settings used for the README views: size 24, relief scale = size, relief
-1.2, follows height 40%, patch size 3, share 30%, decisiveness 3, blend on
-at 0.25 (the `readme` preset).
+Settings used for the README views (the `readme` preset): world size 24,
+relief scale = world size, relief 1.2, follows height 40%, patch size 3,
+decisiveness 3, blend on, decals following the terrain.
 
 Relief scale follows the grid until you move it, warns when it is below the
 grid (the height field then repeats), and follows again once dragged back.
 
 ## From your own capture
 
-One command, for a first capture:
+```bash
+python scripts/build.py data/raw/scene.ply --preset ground -o web/data/scene
+```
+
+runs the export, the decals and the far-field atlas with the shipped
+method (`ground` in `capture_presets.json`). The number of materials,
+their height order, the centre pool and how each material turns are
+measured from the capture; each decision is printed with its reason.
+`--look` builds nothing: it draws the materials and the patches that would
+be used to `out/classes_<name>.png`. Files already at the output names are
+moved to `web/data/backup/<time>/` first.
+
+For a first look at an untuned capture:
 
 ```bash
 python scripts/make_tileset.py my_ground.ply
@@ -72,9 +84,9 @@ python scripts/export_wang.py data/raw/scene.ply --preset scene --patches 0,2,4,
 python scripts/bake_atlas.py scene                         # far field
 ```
 
-The shipped tileset: `export_wang.py data/raw/desert.ply --preset desert3`,
-then `bake_atlas.py desert`. Re-bake the atlas after every export; an atlas
-with a different tile count is ignored.
+The shipped tileset: `build.py data/raw/desert_v1.ply --preset ground -o
+web/data/desert` (export, decals, atlas). After a bare `export_wang.py`,
+re-bake the atlas; an atlas with a different tile count is ignored.
 
 Exporter defaults are set for a capture nobody has tuned: graph-cut seams
 (`--no-cut` for speed), at most 60,000 splats per patch (`--max-per-tile 0`
@@ -84,7 +96,8 @@ that looks upside down (`--flip`), a `--size` far from the capture's scale
 material will repeat). `--classes 2` splits a capture into two materials
 and refuses if it only holds one; `--colours 3` and `--rotations 3` fight
 repetition (see the README). Settings that worked are saved with
-`--save-preset name` into `capture_presets.json`.
+`--save-preset name` into `capture_presets.local.json`, which is not
+tracked; a preset may name another as its `base`.
 
 ## Terrain
 
@@ -95,7 +108,7 @@ server. From Python:
 
 ```bash
 python scripts/terrain_gen.py --name canyon --profile canyon --seed 3 --size 512
-python scripts/heightmap.py C:/odm/copr/odm_dem/dsm.tif --name desert   # from a drone DSM
+python scripts/heightmap.py <odm>/odm_dem/dsm.tif --name desert   # from a drone DSM
 ```
 
 Both write a 16-bit height PNG (two 8-bit channels; browsers decode 16-bit

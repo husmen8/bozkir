@@ -38,7 +38,7 @@ def ground_maps(s, up_axis=2, cell=0.05):
     lum_sum = np.bincount(flat, ink * luma, minlength=w * h).reshape(h, w)
     bright = np.where(ink_sum > 0, lum_sum / np.maximum(ink_sum, 1e-12), 0.0)
     # Cover relative to the capture's own typical paint per cell: an absolute
-    # measure rated a capture of thin needles (desert v1) as nearly empty.
+    # measure rated a capture of thin needles (the desert) as nearly empty.
     typical = np.median(ink_sum[ink_sum > 0]) if (ink_sum > 0).any() else 1.0
     cover = ink_sum / max(typical, 1e-12)
     from .patches import OPPONENT
@@ -52,7 +52,7 @@ def ground_maps(s, up_axis=2, cell=0.05):
 def painted(bright, colour, seen):
     """Cells of a painted survey marker: a blue cast no ground, shrub or
     shadow has, or near-black right beside something lit or blue (the
-    black square around the cross). Measured on desert v1: two markers had
+    black square around the cross). Measured on the desert: two markers had
     7 and 13 cells over the blue line and 7 and 9 black-beside-lit cells,
     a shrub none of either."""
     from scipy.ndimage import maximum_filter

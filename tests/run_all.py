@@ -21,12 +21,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 SUITES = [
-    ('python package', [sys.executable, 'tests/test_all.py'],
-     'numpy and plyfile'),
-    ('pipeline', [sys.executable, 'tests/test_pipeline.py'],
-     'numpy, Pillow and plyfile'),
-    ('browser modules', ['node', 'tests/test_web.mjs'],
-     'node'),
+    ("python package", [sys.executable, "tests/test_all.py"],
+     "numpy and plyfile"),
+    ("pipeline", [sys.executable, "tests/test_pipeline.py"],
+     "numpy, Pillow and plyfile"),
+    ("browser modules", ["node", "tests/test_web.mjs"],
+     "node"),
 ]
 
 
@@ -38,56 +38,56 @@ def runnable(cmd):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--quick', action='store_true',
-                    help='skip the suite that needs the PLY stack')
-    ap.add_argument('--strict', action='store_true',
-                    help='treat a skipped suite as a failure')
+    ap.add_argument("--quick", action="store_true",
+                    help="skip the suite that needs the PLY stack")
+    ap.add_argument("--strict", action="store_true",
+                    help="treat a skipped suite as a failure")
     args = ap.parse_args(argv)
 
     results = []
     for name, cmd, needs in SUITES:
-        if args.quick and name == 'python package':
-            results.append((name, 'skipped', 'asked for --quick'))
+        if args.quick and name == "python package":
+            results.append((name, "skipped", "asked for --quick"))
             continue
         if not runnable(cmd):
-            results.append((name, 'skipped', f'needs {needs}'))
+            results.append((name, "skipped", f"needs {needs}"))
             continue
 
-        print(f'\n=== {name} ' + '=' * (60 - len(name)))
+        print(f"\n=== {name} " + "=" * (60 - len(name)))
         # stderr captured to tell a missing import from a failed assertion.
         p = subprocess.run(cmd, cwd=ROOT, stderr=subprocess.PIPE, text=True)
-        err = p.stderr or ''
+        err = p.stderr or ""
         missing = None
-        for marker in ('ModuleNotFoundError: No module named ',
+        for marker in ("ModuleNotFoundError: No module named ",
                        "Cannot find module "):
             if marker in err:
-                missing = err.split(marker, 1)[1].split('\n')[0].strip().strip("'\"")
+                missing = err.split(marker, 1)[1].split("\n")[0].strip().strip("'\"")
                 break
 
         if p.returncode == 0:
-            results.append((name, 'passed', ''))
+            results.append((name, "passed", ""))
         elif missing:
-            results.append((name, 'skipped', f'no {missing} installed'))
+            results.append((name, "skipped", f"no {missing} installed"))
         else:
             if err.strip():
                 print(err.rstrip())
-            results.append((name, 'FAILED', 'see output above'))
+            results.append((name, "FAILED", "see output above"))
 
-    print('\n' + '=' * 68)
+    print("\n" + "=" * 68)
     for name, state, note in results:
-        print(f'  {name:<18} {state:<8} {note}')
+        print(f"  {name:<18} {state:<8} {note}")
 
-    failed = [r for r in results if r[1] == 'FAILED']
-    skipped = [r for r in results if r[1] == 'skipped']
+    failed = [r for r in results if r[1] == "FAILED"]
+    skipped = [r for r in results if r[1] == "skipped"]
     if failed:
-        print(f'\n{len(failed)} suite(s) failed')
+        print(f"\n{len(failed)} suite(s) failed")
         return 1
     if skipped:
-        print(f'\nall runnable suites passed, {len(skipped)} skipped')
+        print(f"\nall runnable suites passed, {len(skipped)} skipped")
         return 1 if args.strict else 0
-    print('\neverything passed')
+    print("\neverything passed")
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

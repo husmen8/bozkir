@@ -48,7 +48,7 @@ def min_size(s, size):
 
     Training blurs each splat by about half a photo pixel, so thin splats
     join into solid ground only at the photos' distance; closer, they part
-    into needles with gaps (desert v1: 60% cover from above at 1.5 m, 88%
+    into needles with gaps (the desert: 60% cover from above at 1.5 m, 88%
     with 1 cm). s' = sqrt(s^2 + size^2) is Mip-Splatting's 3D filter (Yu et
     al. 2024) applied after training."""
     out = s.subset(np.arange(len(s)))

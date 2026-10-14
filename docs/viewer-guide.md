@@ -4,7 +4,7 @@ Generated from `web/info.json` by `scripts/viewer_guide.py`; the
 same text is the viewer's info drawer (the ⓘ marks, or I over a
 control). Edit the JSON, not this page.
 
-- [What bozkır is](#about)
+- [bozkır](#about)
 - [Tilesets](#tileset)
 - [Wang tiles](#tiles)
 - [Terrain](#terrain)
@@ -16,7 +16,7 @@ control). Edit the JSON, not this page.
 - [Blending](#blend)
 - [Decals](#decals)
 - [Show the decision](#decision)
-- [Settings](#presets)
+- [Views](#presets)
 - [Camera](#camera)
 - [Walk](#walk)
 - [Look](#look)
@@ -31,17 +31,18 @@ control). Edit the JSON, not this page.
 - [Selective merging](#merging)
 - [Measurement](#measure)
 - [Repetition and busyness](#repetition)
+- [Frames and centres](#frames)
 
 <a id="about"></a>
-## What bozkır is
+## bozkır
 
-*Captured splat ground cut into Wang tiles and laid over terrain, with each material placed by the shape of the land.*
+*Gaussian-splat ground cut into Wang tiles and laid over terrain, with each material placed from the terrain's geometry.*
 
-In Hybrid GSWT a person paints which material goes where (a class map, painted with a brush beside a separately painted height map). Here it is derived from the terrain itself: drainage or sediment, topographic position, slope and altitude. The tiling, ordering and merging reimplement GSWT so the rule can be tested at scale.
+Hybrid GSWT chooses a material class per Gaussian from a coverage map that an artist paints. Here that coverage is computed from the height field: drainage or erosion sediment, topographic position, slope and altitude. The tiling, draw ordering and merging reimplement GSWT so the rule can be tested over large terrain.
 
-Limits: lighting is baked into the capture; the desert scrub comes from about 4 × 5 m of capture; the rule's one validation so far was null.
+Limits: lighting is baked into the capture; the rule's one validation against survey data was inconclusive (see the material rule).
 
-- Zeng, Ma, Sander. GSWT: Gaussian Splatting Wang Tiles. SIGGRAPH Asia 2025.
+- Zeng, Ma, Sander. Gaussian Splatting Wang Tiles. SIGGRAPH Asia 2025.
 - Zeng, Ma, Sander. Hybrid Gaussian Wang Tiles for Class-aware Authoring and Rendering. SIGGRAPH 2026.
 - Desert tiles: OpenDroneMap COPR dataset (Coal Oil Point Reserve; Tobias and Mandel 2009), CC BY-SA 4.0.
 - See also: [The material rule](#rule), [Wang tiles](#tiles)
@@ -49,129 +50,138 @@ Limits: lighting is baked into the capture; the desert scrub comes from about 4 
 <a id="tileset"></a>
 ## Tilesets
 
-*A .splat of packed Gaussians and a .json saying which splats form which tile.*
+*A .splat of packed Gaussians and a .json manifest: tile size, edge codes, materials, levels of detail.*
 
-The .json holds the tile size, levels of detail, Wang edge codes and each tile's material. Make one with `scripts/make_tileset.py` (gives a verdict) or `scripts/export_wang.py` (named presets). Without the .json the splats load as one plain scene.
+`scripts/build.py <capture.ply> --preset ground -o web/data/<name>` runs the export, the decals and the far-field atlas. Every decision is measured from the capture and printed with its reason: number of materials, patch choice, hole checks, centre pool, turns, height order.
 
-The starter is generated in the browser: the same construction with procedural patches.
+A .splat without a manifest loads as one plain scene. The starter tileset is generated in the browser with the same construction and procedural patches.
 
-- In the code: `scripts/make_tileset.py`, `scripts/export_wang.py`, `web/starter.js`
-- See also: [Wang tiles](#tiles)
+- In the code: `scripts/build.py`, `scripts/export_wang.py`, `web/starter.js`
+- See also: [Wang tiles](#tiles), [Frames and centres](#frames)
 
 <a id="tiles"></a>
 ## Wang tiles
 
-*Tiles whose edges carry colours; neighbours must share the colour, so every layout is seamless.*
+*Edge-coloured tiles: neighbours share the colour of their common edge, so any valid layout is continuous.*
 
-Each tile is four triangles, one per edge, cut from a captured patch of that edge's colour (Cohen et al. 2003). Seams between triangles follow a graph cut. Two tiles per west–south pair: 3 colours cost 18 tiles per material, not 81. Rotated patches count as extra colours.
+Each tile is four triangles, one per edge. The triangle on an edge comes from a patch of that edge's colour, placed with its centre on the edge (Cohen et al. 2003), so the ground continues across it. Seams between the triangles follow a minimum-error graph cut.
 
-A feature in a patch lands in the same place in every tile built from it, which the eye reads as a lattice.
+Two tiles per (west, south) colour pair: with 3 colours, 18 tiles per material instead of 81. Materials share the edge codes, so a cell can take any material without consulting its neighbours.
+
+A feature in a patch appears at the same place in every tile built from that patch; frames and centres address this.
 
 - Cohen, Shade, Hiller, Deussen. Wang Tiles for Image and Texture Generation. SIGGRAPH 2003.
+- Kwatra, Schödl, Essa, Turk, Bobick. Graphcut Textures. SIGGRAPH 2003.
 - In the code: `bozkir/wang.py`, `bozkir/graphcut.py`
-- See also: [Repetition and busyness](#repetition)
+- See also: [Frames and centres](#frames), [Repetition and busyness](#repetition)
 
 <a id="terrain"></a>
 ## Terrain
 
-*Nineteen landform profiles, generated and eroded in the browser, bit-identical to the Python version.*
+*Nineteen landform profiles, generated and eroded in the browser; the Python generator gives the same heights bit for bit.*
 
-Integer-hash noise per profile, Priority-Flood to fill depressions, then FastScape stream-power erosion with diffusion. Sediment is a routing proxy, not a deposition model. Closed basins become flat floors.
+Integer-hash fractal noise per profile, Priority-Flood depression filling, then stream-power erosion solved implicitly (FastScape) with hillslope diffusion. Sediment is a routing proxy, not a deposition model; closed basins become flat floors. The simulation runs 15% larger than the map and is cropped, so edges carry no boundary artefacts.
 
-- Barnes, Lehman, Mulla. Priority-Flood. 2014.
-- Braun, Willett. Implicit stream-power solver. 2013.
-- docs/terrain.md has the full list.
-- In the code: `web/terrain.js`, `bozkir/erosion.py`
-- See also: [The material rule](#rule)
+Height fields can also come from a drone DSM or from the capture (`scripts/heightmap.py`).
+
+- Barnes, Lehman, Mulla. Priority-Flood. Computers & Geosciences 2014.
+- Braun, Willett. An implicit, parallel solver for the stream power equation. Geomorphology 2013.
+- In the code: `web/terrain.js`, `bozkir/erosion.py`, `docs/terrain.md`
+- See also: [The material rule](#rule), [World](#world)
 
 <a id="world"></a>
 ## World
 
-*Size × size tiles laid out by the Wang rule and bent over the height field.*
+*World size × world size cells, each one tile, laid out by the Wang rule and bent over the height field.*
 
-Relief scale follows the size unless changed in Research; below it, the height field mirrors and landforms repeat (the scene card warns).
+Relief scale follows the world size unless set in Research. Below it the height field mirrors and landforms repeat; the scene section says so.
 
 - See also: [Relief](#relief), [Far field](#farfield)
 
 <a id="relief"></a>
 ## Relief
 
-*Terrain height, and how many tiles one height field spans.*
+*Terrain height, and how many cells one height field spans.*
 
-Height grows with relief scale, so large worlds keep their hills. A relief scale below the world size makes landforms repeat.
+Height grows with relief scale, so a larger world keeps its hills. A relief scale below the world size repeats the landforms, mirrored.
 
-- See also: [World](#world)
+- See also: [World](#world), [Detail relief](#detail)
 
 <a id="detail"></a>
 ## Detail relief
 
-*Tile-scale creases on steep slopes and crests.*
+*Ridged noise at tile scale, masked to steep slopes and convex crests.*
 
-A large world has about two height samples per tile, so close ground was smooth. The creases are masked to slopes and convex crests and computed identically for splats, far field and camera.
+A large world has about two height samples per cell, so close ground is smooth without it. The same function runs in the splat shader, the far field and the camera.
 
 - See also: [Relief](#relief)
 
 <a id="rule"></a>
 ## The material rule
 
-*Material that collects goes to hollows and channels; the other to steep, convex ground.*
+*The material that collects goes to hollows and channels, the exposed one to steep, convex ground.*
 
-Inputs, sampled at 4× the tile grid: drainage (or sediment), topographic position (TPI), slope, elevation. Weights are in `web/rule.json`. A median filter makes regions; a rank threshold sets each material's exact share.
+Inputs, sampled at 4× the cell grid: drainage, max-pooled so a channel narrower than a cell survives (or the erosion's sediment), topographic position index, slope, altitude. Weights are in `web/rule.json`, shared by the viewer and `bozkir/landform.py`. A median filter makes regions without moving their boundaries; a rank threshold gives each material exactly its share.
 
-Validation: against a drone survey (desert plot, 15.6 m) kappa stayed between −0.13 and +0.02 — never above chance. The plot is a single slope (a plane explains 86% of its height). A survey across several landforms is the next test.
+With three or more materials the height at which one gives way to the next wanders across the world by fractal noise. The capture sets the amount: how often the materials are out of height order over its ground (Mann-Whitney U over local relative height).
 
-- Weiss. Topographic Position and Landforms Analysis. 2001.
+Validation against an ODM survey (15.6 m plot, DTM and orthophoto): Cohen's kappa between −0.13 and +0.02 on grids 16 to 32, never above a torus-shift null. The plot is one slope (a plane explains 86% of its height), so it cannot separate the rule from chance; a survey across several landforms is needed.
+
+- Weiss. Topographic Position and Landforms Analysis. ESRI User Conference 2001.
 - In the code: `web/landform.js`, `bozkir/landform.py`, `scripts/validate_rule.py`
 - See also: [Share and swap](#share), [Blending](#blend), [Show the decision](#decision)
 
 <a id="share"></a>
 ## Share and swap
 
-*The share sets how much land a material gets; the rule sets where.*
+*The share sets how much of the world a material covers; the rule sets where.*
 
-Swap chooses which material collects. The exporter's material order is arbitrary (in the desert set, sand is first).
+A tileset that measured its capture starts at the capture's shares, weighted down for materials held only as haze. With three or more materials each has its own slider and the others keep their proportions. Swap reverses which material collects.
 
 - See also: [The material rule](#rule)
 
 <a id="blend"></a>
 ## Blending
 
-*Near a tie both materials are drawn, dissolved splat by splat.*
+*Each spot near a boundary belongs to one material; only a narrow strip between them dissolves, and there the taller splat wins.*
 
-Avoids the staircase of whole-tile boundaries, as Hybrid GSWT's per-Gaussian priority does. Costs a second draw call in the band.
+Each material has a field on a half-cell grid, read at a point displaced by value noise at three scales down to a sixth of a cell, so materials reach into one another instead of meeting along cell edges. Where three meet, every spot still goes to one of them. The far field reads the same fields.
 
-- See also: [The material rule](#rule)
+Cells the strip can reach are drawn a second time with the neighbouring material. In the strip the taller and more opaque splat wins (height-based blending). With tones meet, a cell next to another material takes the centres whose own tone is nearest that material's; nothing is tinted.
+
+- Zeng, Ma, Sander. Hybrid GSWT. SIGGRAPH 2026: per-Gaussian class choice at boundaries.
+- Mishkinis. Advanced Terrain Texture Splatting. Gamasutra 2013: height-based blending.
+- In the code: `web/shaders.js`, `web/frames.js`
+- See also: [The material rule](#rule), [Frames and centres](#frames)
 
 <a id="decals"></a>
 ## Decals
 
-*Distinct pieces of the capture, set into a few plain tiles.*
+*Distinct pieces of the capture, a shrub and its shadow, baked into copies of plain tiles.*
 
-Tiles have to be the plainest ground a capture holds, or every repeat shows; that leaves out what makes the capture look real, such as a shrub and its shadow. scripts/decals.py finds such pieces and bakes each into copies of plain tiles, inside a disc clear of the edges, so a copy meets its neighbours exactly as its tile does.
+Tiles are cut from the plainest ground, since anything distinctive repeats with them. `scripts/decals.py` finds distinct pieces and bakes each into copies of tiles or centres, inside a disc clear of the edges, so a copy matches its neighbours as the original does.
 
-The layout lays plain tiles first, then swaps a copy in at most once per block of 'decal spacing' tiles each way, and never the same decal within two blocks of itself. Too dense, and a handful of decals reads as clutter and as repetition. Each tile has two copies, each with a different decal at a different spot in it, so decals do not sit on a grid. Decals are not turned, so their shadows fall the way the capture's do, and they keep their height: the flattening that removes spikes from bare ground is not applied to them.
+The layout places at most one decal per block of decal spacing cells each way, never the same decal within two blocks of itself. Decals are not turned, so their shadows keep the capture's direction, and they are not flattened. With decals follow the terrain, each block keeps the cell nearest the other material.
 
-With 'decals follow the terrain', the rule leads: each block tries a few cells and keeps the one nearest the edge of the other material, where plants thin out into sand; out in the open most blocks stay bare. Decals are numbered in colour order, and a smooth field over the map picks which part of that order grows where, so neighbours look alike without repeating.
-
-- Glanville. Texture Bombing. GPU Gems, 2004: scattering features over a tiled texture.
+- Glanville. Texture Bombing. GPU Gems 2004.
 - In the code: `bozkir/decals.py`, `scripts/decals.py`, `web/decals.js`
 - See also: [Wang tiles](#tiles), [Repetition and busyness](#repetition)
 
 <a id="decision"></a>
 ## Show the decision
 
-*Colours each cell by the class the rule chose: green collects, yellow exposed, grey a near tie.*
+*Each cell coloured by the material the rule chose; grey where it was nearly a tie.*
 
-Separates a wrong decision from a tile that does not look like its class.
+Separates a wrong decision from a tile that does not look like its material.
 
 - See also: [The material rule](#rule)
 
 <a id="presets"></a>
-## Settings
+## Views
 
-*Named starting points from `web/views.json`; every control stays adjustable.*
+*Named settings from `web/views.json`; every control stays adjustable.*
 
-Research adds the figure presets: rule on and off, land variation off. The story steps are presets with a camera and a caption.
+A view sets the controls it names; controls another view set and this one does not go back to their defaults. Research adds the figure views (rule on and off, land variation off). The story steps are views with a camera and a caption.
 
 - In the code: `web/views.json`
 
@@ -180,16 +190,16 @@ Research adds the figure presets: rule on and off, land variation off. The story
 
 *Drag orbits, WASD moves, scroll zooms. Touch: one finger orbits, two pinch.*
 
-The scale bar is measured at the orbit point.
+The orbit point follows the ground and the eye stays above it. The scale bar is measured at the orbit point.
 
 - See also: [Walk](#walk)
 
 <a id="walk"></a>
 ## Walk
 
-*First person at 1.7 m eye height, walking pace 1.4 m/s.*
+*First person at 1.7 m eye height and 1.4 m/s.*
 
-WASD walks, shift runs, click to look with the mouse, Esc frees it, V leaves. The eye follows the drawn ground height, so the terrain is the collider. Assumes the capture is in metres.
+WASD walks, shift runs, click to look with the mouse, Esc releases it, V leaves. The eye follows the rendered ground height, so the terrain is the collider. Assumes the capture is in metres.
 
 - See also: [Camera](#camera)
 
@@ -205,59 +215,59 @@ WASD walks, shift runs, click to look with the mouse, Esc frees it, V leaves. Th
 
 *A capture's light and shadows are part of its colours.*
 
-Ground shading only darkens hollows by how much sky they see. Overcast captures tile best: no shadows to repeat.
+Ground shading only darkens hollows by the share of sky they see. Overcast captures tile best: no shadows to repeat.
 
 - See also: [Look](#look)
 
 <a id="macro"></a>
 ## Land variation
 
-*Slow brightness noise at about 4 and 11 tiles, in splats and far field alike.*
+*Slow brightness noise at about 4 and 11 cells, in the splats and the far field alike.*
 
-Breaks the one-tile period the eye picks up (macro variation in game landscape materials). A render-time tint, not in the capture; off in the figure presets.
+Breaks the one-tile period (macro variation in landscape materials). A render-time tint, not in the capture; off in the figure views.
 
 - See also: [Repetition and busyness](#repetition)
 
 <a id="renderer"></a>
 ## Renderer
 
-*WebGL2, one instanced draw per tile, splats sorted in a worker.*
+*WebGL2: one draw per visible cell or merged group, splats sorted in a worker.*
 
 - See also: [Far field](#farfield), [Auto quality](#quality), [Level of detail](#lod), [Draw order](#ordering)
 
 <a id="farfield"></a>
 ## Far field
 
-*Distant ground as one mesh coloured from a top-down atlas of the tiles: one draw call.*
+*Distant ground as one mesh coloured from a top-down atlas of the tiles and centres: one draw call.*
 
-The limit was draw calls, not splat count, so this was chosen over hierarchical 3DGS. Opaque, dithered hand-over; with distance each cell fades part-way to its tile's mean. Tilesets without an atlas get a rougher one baked in the browser.
+The limit at scale is draw calls, not splat count, so this was chosen over a hierarchical 3DGS. Opaque, handed over to the splats by a dithered screen door; with distance each cell fades part-way to its tile's mean colour. Tilesets without an atlas get one baked in the browser.
 
-Limits: top-down colour differs from grazing views; a faint step can show at the hand-over.
+Limits: a top-down atlas differs from grazing views, and a faint colour step can show at the hand-over.
 
-- Kerbl et al. A Hierarchical 3D Gaussian Representation. SIGGRAPH 2024.
+- Kerbl et al. A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets. SIGGRAPH 2024.
 - In the code: `scripts/bake_atlas.py`
 - See also: [Level of detail](#lod)
 
 <a id="quality"></a>
 ## Auto quality
 
-*Holds 30 fps: render resolution first (50–100%), level of detail only after.*
+*Holds about 30 fps: render resolution first (50–100%), level-of-detail distance second.*
 
-Moving both at once made the frame rate cycle between 20 and 45 fps.
+Adjusting both at once made the frame rate oscillate between 20 and 45 fps.
 
 - See also: [Level of detail](#lod)
 
 <a id="warp"></a>
 ## Tiles on terrain
 
-*Each splat is placed through the ground's tangent frame and shaped by its true Jacobian.*
+*Each splat is placed through the ground's tangent frame and shaped by the true Jacobian of the height map.*
 
-Normalising the Jacobian had thinned slopes by √(1 + |∇h|²). One frame per tile, as in GSWT, leaves gaps on slopes.
+A normalised Jacobian thins material on slopes by √(1 + |∇h|²). One frame per tile, as in GSWT, leaves gaps on slopes; off, the slider sets frames per tile.
 
 <a id="lod"></a>
 ## Level of detail
 
-*Tiles at 100, 25, 6 and 2% of their splats; each level starts twice as far out.*
+*Tiles at 100, 25, 6 and 2% of their splats; each level starts twice as far out as the one before.*
 
 - See also: [Far field](#farfield)
 
@@ -266,19 +276,19 @@ Normalising the Jacobian had thinned slopes by √(1 + |∇h|²). One frame per 
 
 *Back to front, within each tile and between tiles.*
 
-Within a tile: a counting sort in the tile's own frame (a single world order left 47% of pairs wrong on warped terrain; this leaves 0).
+Within a tile: a counting sort along the view direction in the tile's own frame. A single world-space order per tile left 47% of adjacent pairs wrong on warped terrain; this leaves none.
 
-Between tiles: depth keys tie along whole rows at axis-aligned views; a topological order removes it (27/54/27 reversed pairs → 0).
+Between tiles: nearest-depth keys tie along whole rows at axis-aligned views (81 cells, 9 keys) and reverse a row in one frame. A topological order over shared-edge constraints, as in GSWT, removes this.
 
-- In the code: `web/order.js`, `web/sort-worker.js`
+- In the code: `web/order.js`, `web/sort-worker.js`, `scripts/probe_order.py`
 - See also: [Selective merging](#merging)
 
 <a id="merging"></a>
 ## Selective merging
 
-*Where no order between two tiles is right, they are drawn as one stream.*
+*Where no order between two tiles is right, both are drawn as one interleaved stream.*
 
-Counting sort over the union: 3.8 ms against 9.5 ms for a k-way merge at 300k splats.
+Counting sort over the union: 3.8 ms against 9.5 ms for a k-way merge at 300k splats, 25.6 against 76.8 ms at 1.2M.
 
 - In the code: `web/merge.js`
 - See also: [Draw order](#ordering)
@@ -286,18 +296,34 @@ Counting sort over the union: 3.8 ms against 9.5 ms for a k-way merge at 300k sp
 <a id="measure"></a>
 ## Measurement
 
-*Pop meter, capture sweeps for pop_metric.py, and a scaling sweep.*
+*Pop meter, camera sweeps for `scripts/pop_metric.py`, and a scaling sweep.*
 
-The popping metric does not yet resolve the ordering difference (integer-accurate matching). GTX 1650 Ti: 60 fps to grid 40; with far field and auto quality, grid 256 above 30 fps.
+The popping metric registers frames by phase correlation and block matching; integer-accurate matching does not yet resolve the ordering difference. GTX 1650 Ti: 60 fps to grid 40 (5.5M splats); with far field and auto quality, grid 256 above 30 fps.
 
-- In the code: `scripts/pop_metric.py`
+- In the code: `scripts/pop_metric.py`, `bozkir/popping.py`
 
 <a id="repetition"></a>
 ## Repetition and busyness
 
-*Two measures of tiled ground, checked against the eye.*
+*Two measures of tiled ground, compared with visual judgement.*
 
-Repetition (whole-tile minus half-tile correlation) disagreed with the eye. Busyness (how different a tile's four triangles are) agreed: the set that repeated least had 3.6× busier scrub. Two runs; a perceptual study is the proper test.
+Repetition: excess brightness correlation at whole-tile shifts over half-tile shifts. Busyness: the share of a tile's brightness variance explained by which triangle a pixel is in. On two tilesets of the same capture, the one that repeated less had 3.6× busier scrub and was judged worse; repetition alone did not match the judgement. Two tilesets are not a proof; a perceptual study is the test. The script lays out exported tiles only; centres from the pool are not modelled.
 
 - In the code: `scripts/repetition.py`
 - See also: [Wang tiles](#tiles), [Land variation](#macro)
+
+<a id="frames"></a>
+## Frames and centres
+
+*A tile keeps only the band along its edges; each cell gets a centre from a per-material pool, chosen and turned in the viewer.*
+
+The frame is what neighbours must agree on. The centre is a rounded square (unit ball of a p-norm, p = 6) as large as fits inside the edge strip, taken from the material's own ground where it shares little or none with the edge patches. Random placement and rotation hide a texture's period (Heitz and Neyret 2018).
+
+How a material's centres may turn is measured with the structure tensor of its patches: ripples or rows keep their direction, isotropic ground turns in quarter turns. Frame and centre meet in a ring where the taller, more opaque splats win.
+
+Pool candidates are judged where they show: no larger splat footprint, no thicker haze and no further in colour than the edge patches, and no see-through holes after the opacity fill.
+
+- Heitz, Neyret. High-Performance By-Example Noise using a Histogram-Preserving Blending Operator. HPG 2018.
+- Mikkelsen. Practical Real-Time Hex-Tiling. JCGT 2022.
+- In the code: `bozkir/frames.py`, `bozkir/pick.py`, `web/frames.js`
+- See also: [Wang tiles](#tiles), [Blending](#blend)

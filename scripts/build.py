@@ -1,9 +1,9 @@
 """A finished tileset from a capture in one command: export, decals, far
 view, all from one preset.
 
-    python scripts/build.py data/raw/desert_v1.ply --preset desert4 -o web/data/desert_final2
-    python scripts/build.py data/raw/desert_v1.ply --preset desert4 -o web/data/test --odd-spots 30
-    python scripts/build.py data/raw/desert_v1.ply --preset desert9 -o web/data/desert9 --look
+    python scripts/build.py data/raw/scene.ply --preset ground -o web/data/scene --look
+    python scripts/build.py data/raw/scene.ply --preset ground -o web/data/scene
+    python scripts/build.py data/raw/scene.ply --preset ground -o web/data/test --odd-spots 30
 
 Each step is its own script (export_wang, decals, bake_atlas) reading the
 same preset; flags after the preset go to the step they belong to
@@ -68,15 +68,15 @@ def run(step, cmd):
         raise SystemExit(f"\n{step} stopped; nothing after it was run")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", type=Path, help="the capture (.ply)")
     ap.add_argument("-o", "--out", required=True, type=Path,
-                    help="the finished tileset, e.g. web/data/desert_final2")
+                    help="the finished tileset, e.g. web/data/scene")
     ap.add_argument("--preset", required=True,
                     help="settings for every step; several stack, as a,b")
-    args, rest = ap.parse_known_args()
+    args, rest = ap.parse_known_args(argv)
     from bozkir import BUILD
     print(f"bozkir {BUILD}")
     export_flags, decal_flags = split_flags(rest)

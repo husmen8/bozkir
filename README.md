@@ -20,15 +20,14 @@ two-material tileset made in the page, with no data at all.
 [COPR dataset](https://github.com/OpenDroneMap/odm_data_copr) (Coal Oil
 Point Reserve, California; Michele M. Tobias and Alex Mandel, 2009),
 licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
-I trained the splats and cut the tiles; the tileset in `web/data` is shared
-under the same licence.*
+The tileset in `web/data` is derived from it and shared under the same
+licence.*
 
-**What it is for.** Ground under a fixed light: game levels with a set time
-of day, previs, architectural visualisation, simulation grounds - real
-surfaces over large procedural terrain, materials where the land says they
-go.
+**Intended use.** Ground under a fixed light: game levels with a set time
+of day, previs, architectural visualisation, simulation grounds - captured
+surfaces over large procedural terrain, materials where the land puts them.
 
-**What it is not for.** Anything that must be relit or have a day cycle
+**Out of scope.** Anything that must be relit or have a day cycle
 (lighting is baked into a capture), cliffs and walls, trees and tall
 objects as tiles, water, and captures with too little clean flat ground -
 roughly four tile-sized areas of each material.
@@ -39,14 +38,21 @@ roughly four tile-sized areas of each material.
 git clone https://github.com/husmen8/bozkir && cd bozkir
 pip install -r requirements.txt          # Python 3.10+
 python tests/run_all.py                  # ~300 tests; the web suite needs Node 22+
-cd web && python -m http.server 8000     # then open http://localhost:8000
+python scripts/serve.py                  # then open http://localhost:8000
 ```
 
-From a capture of your own ground: `python scripts/make_tileset.py my_ground.ply`
-ends with a verdict and the address to open. [docs/usage.md](docs/usage.md)
-covers the full pipeline, terrain generation and the viewer's options;
-[docs/viewer-guide.md](docs/viewer-guide.md) explains every control (the
-same text as the viewer's ⓘ notes).
+From a capture of your own ground:
+
+```bash
+python scripts/build.py my_ground.ply --preset ground -o web/data/my_ground
+```
+
+runs the export, the decals and the far-field atlas, printing each decision
+it measures from the capture with its reason. `scripts/make_tileset.py`
+is the first-look variant: untuned defaults and a verdict.
+[docs/usage.md](docs/usage.md) covers the pipeline, terrain generation and
+the viewer's options; [docs/viewer-guide.md](docs/viewer-guide.md) explains
+every control (the same text as the viewer's ⓘ notes).
 
 ---
 
@@ -60,19 +66,21 @@ P̃_c(x, u) = P_c(u) ^ (1 / α_c(x)),    c* = argmax_c P̃_c(x, u)
 ```
 
 where α_c(x) is a target coverage per class. In their authoring system it
-comes from a **class map that a person paints with a brush**, beside a
-separately painted height map - the two are independent. Nobody paints a
-ten-kilometre map, and terrain shaders in every engine already place
+comes from a **class map painted with a brush**, beside a separately
+painted height map - the two are independent. A ten-kilometre map is not
+painted by hand, and terrain shaders in every engine already place
 material by slope and height.
 
-bozkır derives the class decision from the height field instead: slope, topographic position
-(TPI, Weiss 2001), drainage, altitude, and on generated terrain the
-erosion's own sediment record. Their equation takes it unchanged.
+bozkır derives the class decision from the height field instead: slope,
+topographic position (TPI, Weiss 2001), drainage, altitude, and on
+generated terrain the erosion's own sediment record. Their equation takes
+it unchanged.
 
 ![the rule](docs/fig_rule.png)
 
-The same decision rendered from the real tiles, seen from above with the
-terrain as shading; only where each class goes differs between the panels:
+The same decision rendered from the real tiles (an earlier two-material
+export of the desert), seen from above with the terrain as shading; only
+where each class goes differs between the panels:
 
 ![rule off and on, rendered from the tiles](docs/fig_map.png)
 
@@ -80,9 +88,12 @@ The maps are sampled at 4× the tile grid (one sample per tile aliases), and
 drainage is max-pooled so a channel narrower than a tile survives. The
 class-lead field goes through a median filter (regions become contiguous
 without the boundary moving) and a rank threshold, so the share asked for
-is the share given. The weights live in one file, `web/rule.json`, read by
-the viewer and by `bozkir/landform.py`; the tests hold the two identical
-cell for cell.
+is the share given. With three or more materials, the height at which one
+gives way to the next wanders by fractal noise, by an amount measured from
+the capture: how often its materials are out of height order (Mann-Whitney
+U over local relative height). The weights live in one file,
+`web/rule.json`, read by the viewer and by `bozkir/landform.py`; the tests
+hold the two identical cell for cell.
 
 ![one rule, three terrains](docs/fig_seeds.png)
 
@@ -90,13 +101,13 @@ The same rule and settings on three terrains: it is a rule, not a
 placement. The share is an artist's control; the terrain decides where it
 goes.
 
-**What this can and cannot claim.** Finding tiles, splitting a capture into
-classes, the terrain analysis and the rule work for any input. The mapping
-from landform to material - collected material in hollows, bare ground on
+**Scope of the claim.** Finding tiles, splitting a capture into classes,
+the terrain analysis and the rule work for any input. The mapping from
+landform to material - collected material in hollows, bare ground on
 ridges - is a judgement: defensible for sand and scrub in arid ground, wrong
 for moss on shaded rock. The claim is *a framework for geometry-driven
-material placement*: a planner that an artist steers, not a map of where
-materials really grow. Testing the judgement against real ground is below;
+material placement*: a planner an artist steers, not a map of where
+materials really grow. A test of the mapping against real ground is below;
 learning the mapping from data is the open question.
 
 ---
@@ -146,6 +157,7 @@ the motivation for the open question, learning placement from data:
 - *from the capture itself* - measure where each material sits in the
   captured ground and carry those statistics to the large terrain, as
   WorldBrush (Emilien et al. 2015) learns distributions from example areas;
+  the measured height order above is a first step;
 - *from public elevation and aerial imagery* over several landforms, with
   sites and metric fixed before scoring;
 - *from people* - a small study of whether rule-on reads as more natural
@@ -153,49 +165,55 @@ the motivation for the open question, learning placement from data:
 
 ### 2. Repetition, and what the eye sees
 
-Each tile is four triangles, one per edge, each always the same part of the
-patch for that edge's colour (Cohen et al. 2003). Anything distinctive in a
-patch therefore sits at the same place in every tile built from it and
-forms a lattice. Against that: more colours (`--colours 3`, with Cohen's
-minimal set of two tiles per (west, south) pair - 18 per class instead of
-81), patches turned by 90° as extra colours (`--rotations`; turning a
-finished tile would break matching, turning a patch does not), landmarks
-scored down in the patch search, and purity (each class keeps the patches
-with the least of the other material).
+Each tile is four triangles, one per edge; the triangle on an edge comes
+from a patch of that edge's colour, centred on the edge (Cohen et al. 2003).
+Anything distinctive in a patch therefore sits at the same place in every
+tile built from it and forms a lattice. Against that: more colours
+(`--colours 3`, with Cohen's minimal set of two tiles per (west, south)
+pair - 18 per class instead of 81), patches turned by 90° as extra colours
+(`--rotations`; turning a finished tile would break matching, turning a
+patch does not), landmarks scored down in the patch search, and purity
+(each class keeps the patches with the least of the other material).
 
 `scripts/repetition.py` measures repetition as excess similarity at
 whole-tile shifts over half-tile shifts, on brightness ("texture") and on a
-map of what stands out ("landmarks"). On the desert tileset, lower is less
-repetition:
+map of what stands out ("landmarks"). On an earlier two-material export of
+the desert (sand, scrub), lower is less repetition:
 
-| setting | sand texture | scrub texture | sand landmarks | scrub landmarks | my judgement |
+| setting | sand texture | scrub texture | sand landmarks | scrub landmarks | visual rank |
 |---|---|---|---|---|---|
 | 2 colours, straight seams | 0.502 | 0.413 | 0.479 | 0.381 | - |
 | 3 colours, straight | 0.335 | 0.396 | 0.304 | 0.244 | - |
 | 3 colours, graph cut | 0.317 | 0.380 | - | - | - |
-| 3 colours, 2 sources × 3 turns (`desert3`) | 0.314 | 0.353 | 0.280 | 0.307 | **best** |
-| 3 colours, 3 sources × 2 turns | 0.334 | 0.276 | 0.284 | 0.259 | worst |
-| 4 colours, 4 sources × 2 turns (`desert2`) | 0.270 | 0.225 | 0.211 | 0.180 | second |
+| 3 colours, 2 sources × 3 turns | 0.314 | 0.353 | 0.280 | 0.307 | 1 |
+| 3 colours, 3 sources × 2 turns | 0.334 | 0.276 | 0.284 | 0.259 | 3 |
+| 4 colours, 4 sources × 2 turns | 0.270 | 0.225 | 0.211 | 0.180 | 2 |
 
 More colours cut sand repetition by a third; graph cut matters more to the
 eye (a visible X) than to the metric. **Neither repetition metric agrees
-with what I saw**: the run I judged best is not the one that repeats least.
-Looking at them, I was trading repetition against *busyness* - how
-different a tile's four triangles are - and preferring calm ground.
+with the visual ranking**: the run ranked first is not the one that repeats
+least. The ranking traded repetition against *busyness* - how different a
+tile's four triangles are - in favour of calm ground.
 
-Busyness is measurable: the share of a tile's brightness variance explained
-by which triangle a pixel is in (0 = one ground, 1 = four flat blocks). On
-the two runs that still exist:
+Busyness is the share of a tile's brightness variance explained by which
+triangle a pixel is in (0 = one ground, 1 = four flat blocks). On the two
+runs that still exist:
 
-| setting | sand busyness | scrub busyness | my judgement |
+| setting | sand busyness | scrub busyness | visual rank |
 |---|---|---|---|
-| `desert3` | 0.083 ± 0.050 | 0.092 ± 0.044 | best |
-| `desert2` | 0.070 ± 0.060 | **0.336 ± 0.136** | second |
+| 3 colours, 2 sources × 3 turns | 0.083 ± 0.050 | 0.092 ± 0.044 | 1 |
+| 4 colours, 4 sources × 2 turns | 0.070 ± 0.060 | **0.336 ± 0.136** | 2 |
 
-`desert2` repeats least but its scrub tiles are 3.6 times busier, which is
-what I objected to. Two runs agree with the eye; two runs are not a proof.
-Perceived quality of tiled ground looks at least two-dimensional, and a
-small perceptual study is the proper test.
+The 4-colour run repeats least but its scrub tiles are 3.6 times busier.
+Two runs agree with the eye; two runs are not a proof. Perceived quality of
+tiled ground looks at least two-dimensional, and a small perceptual study
+is the proper test.
+
+The shipped tileset goes further: each cell's centre comes from a separate
+per-material pool, chosen and turned in the viewer (*Frames and centres*
+below), so the lattice is left only in the band along the edges.
+`repetition.py` lays out exported tiles and does not model the centres
+yet, so it has no figure for the shipped tileset.
 
 ### 3. Reimplementation
 
@@ -243,7 +261,9 @@ result above does not depend on it.
 **Capture to tiles.** Align the capture to its ground plane, remove floaters
 and background, then search for squares flat, dense and alike enough to
 interchange. The search loosens whichever filter rejects most and reports
-what it changed; a capture that cannot work at any setting says so.
+what it changed; a capture that cannot work at any setting says so. The
+number of materials, their order in height and how each may turn are
+measured from the capture, not set by hand.
 
 ![candidate patches from the desert capture](docs/patches_desert.jpg)
 
@@ -255,12 +275,27 @@ neighbours, and the matching constraint never overrules the terrain.
 
 ![edge colours](docs/edges.jpg)
 
+**Frames and centres.** A tile keeps only the band along its edges, which
+is what neighbours must agree on. Each cell's centre - a rounded square
+(unit ball of a p-norm, p = 6) as large as fits inside that band - comes
+from a per-material pool cut from the material's own ground, and is chosen
+and turned per cell in the viewer, as random placement and rotation hide a
+texture's period (Heitz and Neyret 2018). How a material may turn is
+measured with the structure tensor of its patches: ripples and rows keep
+their direction, isotropic ground turns in quarter turns. Pool candidates
+are judged where they show: no larger splat footprint, no thicker haze and
+no further in colour than the edge patches, and no see-through holes.
+
+**Decals.** Distinct pieces of the capture - a shrub and its shadow - are
+kept out of the tiles and baked into copies of plain tiles and centres,
+inside a disc clear of the edges, then placed sparsely by the layout
+(texture bombing, Glanville 2004).
+
 Not every capture can become tiles. `scripts/inspect_ply.py` and
-`make_tileset.py`'s verdict screen them; of the captures I tried, one is
-used. A sea stack is not ground (its splats are needles: median anisotropy
-484), an aerial survey shot around a subject yields one usable region
-rather than four, and a synthetic scan has no material to preserve. The
-table is in [docs/captures.md](docs/captures.md).
+`make_tileset.py`'s verdict screen them. A sea stack is not ground (its
+splats are needles: median anisotropy 484), an aerial survey shot around a
+subject yields one usable region rather than four, and a synthetic scan has
+no material to preserve.
 
 **Terrain.** Fractal noise from an integer hash, Priority-Flood depression
 filling, and stream-power erosion solved the FastScape way (Braun and
@@ -274,15 +309,20 @@ Height fields can also come from a drone DSM or from the capture itself;
 
 **Renderer.** WebGL2: per-tile counting sort in a worker, Wang layout,
 topological tile order, selective merging, warping onto the height field,
-LOD with cross-fade, per-splat blending between classes. Beyond that:
+LOD with cross-fade. Beyond that:
 
+- **Blending by spot.** Each material has a field on a half-cell grid, read
+  at a point displaced by value noise at three scales, so materials reach
+  into one another instead of meeting along cell edges; each spot belongs
+  to one material, and only a narrow strip dissolves, where the taller and
+  more opaque splat wins (height-based blending, Mishkinis 2013).
 - **Far field.** Past the splat levels of detail the ground is one mesh
-  textured from an atlas of every tile seen from above
-  (`scripts/bake_atlas.py`), with the same layout and rule - one draw call
-  for all distant cells. Chosen over hierarchical 3DGS (Kerbl et al. 2024)
-  because the limit here is draw calls, not splat count. Opaque, colour
-  matched per tile to the splats, detail fading to the tile mean with
-  distance, handed over by a dithered screen door.
+  textured from an atlas of every tile and centre seen from above
+  (`scripts/bake_atlas.py`), with the same layout, rule and blend fields -
+  one draw call for all distant cells. Chosen over hierarchical 3DGS
+  (Kerbl et al. 2024) because the limit here is draw calls, not splat
+  count. Opaque, colour matched per tile to the splats, detail fading to
+  the tile mean with distance, handed over by a dithered screen door.
 - **Auto quality.** About 30 fps the way games do it: render resolution
   first (50-100%), level-of-detail distance only as a slow second lever -
   moving both at once made them chase each other between 20 and 45 fps.
@@ -304,7 +344,7 @@ relighting. Where bozkır stands on each:
 | objection | bozkır's answer | what remains |
 |---|---|---|
 | no collision | the ground is a height field, so the collider is the terrain itself - the "render the splats, collide with a hidden mesh" pattern engine users recommend | the tiles' own micro-relief is not in the collider |
-| huge files | a kilometre-scale world from a 21.8 MB tileset (36 tiles) | the source capture is still large |
+| huge files | a kilometre-scale world from a 19.5 MB tileset (three materials: 54 tiles, 27 centres, 0.6M splats across all levels of detail) | the source capture is still large |
 | seams when splitting big scenes | Wang tiles are seamless by construction; the far field hands over by dithering | a faint colour step at the hand-over |
 | cannot be edited | layout, materials and terrain are procedural: rules, presets and sliders | the captured micro-geometry itself is not editable |
 | no relighting | not solved: lighting is baked, ground shading only darkens | a sunny capture repeats its shadows |
@@ -322,18 +362,17 @@ GPU with no training.
 - Lighting is baked into the capture: no relighting, no time of day.
   Shadows in a sunny capture become part of the repeating pattern; overcast
   captures tile better.
-- The desert's scrub is only about 4 × 5 m of capture, so its patches
-  overlap and repeat more than the sand.
-- Class choice is per cell; without blending the boundary reads as
-  rectangles (Hybrid GSWT's per-Gaussian priority avoids this).
+- A material with little clean ground yields few patches and few centres,
+  and repeats more than the others.
+- Class choice is per cell. Blending by spot hides the cell outline, but
+  the boundary keeps the scale of the half-cell field.
 - `.splat` keeps degree-0 colour only, so view-dependent colour is lost on
   export (mean error 14 on 0-255).
-- The far field cannot follow splat size, loses per-splat blending, and a
-  top-down atlas differs from grazing views: a faint colour step remains at
-  the hand-over.
+- The far field cannot follow splat size, and a top-down atlas differs from
+  grazing views: a faint colour step remains at the hand-over.
 - Closed basins become flat floors ([docs/terrain.md](docs/terrain.md)).
-- Features crossing a tile corner still repeat; corner tiles (Lagae and
-  Dutré 2006) are the known fix.
+- Features in the edge band near a tile corner still repeat; corner tiles
+  (Lagae and Dutré 2006) are the known fix.
 - The upside-down check is one-way: a warning means something, silence
   proves nothing.
 - Sorting and draw-call issue stay on the CPU.
@@ -346,21 +385,35 @@ GPU with no training.
 
 ```
 bozkir/    the Python pipeline: ply, transform, select, scene, patches,
-           tile, graphcut, wang, pack (+ atlas), presets, render, camera,
-           popping; terrain and erosion (height fields, generator);
-           landform (the viewer's rule); validate; catalogue
-scripts/   command-line tools: make_tileset, export_wang, bake_atlas,
-           preview_patches, inspect_ply, terrain_gen, heightmap,
-           validate_rule, repetition, figures, ...; experiments/ for one-offs
-web/       the viewer: viewer, ui, sort-worker, order, merge, grid,
-           landform + rule.json, terrain + terrain-worker, heightfield,
-           tileset, starter, capture, benchmark; views.json (presets and
-           story), info.json (the ⓘ notes), tilesets.json
+           tile, graphcut, cut, wang, materials, frames, pick, holes,
+           decals, pack (+ atlas), presets, render, camera, popping;
+           terrain and erosion (height fields, generator); landform (the
+           viewer's rule); validate; catalogue
+scripts/   command-line tools: build, export_wang, decals, bake_atlas,
+           make_tileset, preview_patches, inspect_ply, terrain_gen,
+           heightmap, validate_rule, repetition, figures, serve, ...;
+           experiments/ for one-offs
+web/       the viewer: viewer, ui, style.css, shaders, gl, splat, camera,
+           frames, decals, sort-worker, order, merge, grid, landform +
+           rule.json, terrain + terrain-worker, heightfield, tileset,
+           starter, capture, benchmark; views.json (presets and story),
+           info.json (the ⓘ notes), tilesets.json
 tests/     run_all.py: test_all.py (package), test_pipeline.py (pipeline,
            Python/JS parity, scripts end to end), test_web.mjs (browser
            modules); bridge.mjs runs the JavaScript for the parity tests
-docs/      usage, viewer guide, terrain sources, capture screening, figures
+docs/      usage, viewer guide, terrain sources, figures
 ```
+
+## Data and software
+
+- Desert capture: OpenDroneMap's
+  [COPR dataset](https://github.com/OpenDroneMap/odm_data_copr) (Michele M.
+  Tobias and Alex Mandel, 2009), CC BY-SA 4.0. The tileset and its atlas in
+  `web/data` are derived from it and shared under the same licence; the
+  height field and sediment map are generated.
+- Python: NumPy, SciPy, plyfile, Pillow, Matplotlib.
+- Viewer: WebGL2 and plain ES modules, no third-party code. Tilesets use
+  antimatter15's `.splat` layout, so they open in other `.splat` viewers.
 
 ## References
 
@@ -382,14 +435,23 @@ Gaussian Splatting for View-Consistent Real-time Rendering.* SIGGRAPH 2024.
 Cohen, Shade, Hiller, Deussen. *Wang Tiles for Image and Texture
 Generation.* SIGGRAPH 2003.
 
-Emilien, Vimont, Cani, Poulin, Benes. *WorldBrush: Interactive
-Example-based Synthesis of Procedural Virtual Worlds.* SIGGRAPH 2015.
-
 Kwatra, Schödl, Essa, Turk, Bobick. *Graphcut Textures: Image and Video
 Synthesis Using Graph Cuts.* SIGGRAPH 2003.
 
 Lagae, Dutré. *An Alternative for Wang Tiles: Colored Edges versus Colored
 Corners.* ACM TOG 2006.
+
+Heitz, Neyret. *High-Performance By-Example Noise using a
+Histogram-Preserving Blending Operator.* HPG 2018.
+
+Mikkelsen. *Practical Real-Time Hex-Tiling.* JCGT 2022.
+
+Mishkinis. *Advanced Terrain Texture Splatting.* Gamasutra 2013.
+
+Glanville. *Texture Bombing.* GPU Gems, 2004.
+
+Emilien, Vimont, Cani, Poulin, Benes. *WorldBrush: Interactive
+Example-based Synthesis of Procedural Virtual Worlds.* SIGGRAPH 2015.
 
 Weiss. *Topographic Position and Landforms Analysis.* ESRI User Conference,
 2001.

@@ -1,9 +1,8 @@
 {
   "_about": "What the viewer says about each public tileset: material names in the tileset's class order (the exporter's order, which is arbitrary), the unit its sizes are in, and one line for the scene card. A manifest's own 'names' wins over these.",
   "desert": {
-    "names": ["sand", "scrub"],
     "units": "m",
-    "note": "OpenDroneMap COPR dataset (Tobias and Mandel 2009, CC BY-SA 4.0); the scrub comes from about 4 × 5 m of it"
+    "note": "OpenDroneMap COPR dataset (Tobias and Mandel 2009, CC BY-SA 4.0)"
   },
   "starter": {
     "units": "m",

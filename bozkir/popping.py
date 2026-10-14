@@ -19,7 +19,7 @@ does not yet resolve the ordering difference.
 
 import numpy as np
 
-__all__ = ['to_luma', 'motion_field', 'compensate', 'popping', 'sweep']
+__all__ = ["to_luma", "motion_field", "compensate", "popping", "sweep"]
 
 
 def to_luma(img):
@@ -42,7 +42,7 @@ def motion_field(a, b, block=32, search=12, refine=None):
     a = np.ascontiguousarray(to_luma(a), dtype=np.float32)
     b = np.ascontiguousarray(to_luma(b), dtype=np.float32)
     if a.shape != b.shape:
-        raise ValueError(f'frames differ in size: {a.shape} vs {b.shape}')
+        raise ValueError(f"frames differ in size: {a.shape} vs {b.shape}")
     h, w = a.shape
 
     # Each offset is scored for all blocks at once (a few hundred array
@@ -62,7 +62,7 @@ def motion_field(a, b, block=32, search=12, refine=None):
         ry = np.arange(0, hh, blk)
         rx = np.arange(0, ww, blk)
         reach = radius + max(abs(dy0), abs(dx0))
-        pad = np.pad(src, reach, mode='edge')
+        pad = np.pad(src, reach, mode="edge")
         best = np.full((rows, cols), np.inf, dtype=np.float32)
         out = np.zeros((rows, cols, 2), dtype=np.int32)
         for dy in range(dy0 - radius, dy0 + radius + 1):
@@ -165,11 +165,11 @@ def popping(a, b, block=32, search=12, threshold=0.02, margin=None):
 
     core = resid[inside]
     return {
-        'raw': float(np.abs(lb - la)[inside].mean()),
-        'residual': float(core.mean()),
-        'fraction': float((core > threshold).mean()),
-        'p99': float(np.percentile(core, 99)),
-        'mask': (resid > threshold) & inside,
+        "raw": float(np.abs(lb - la)[inside].mean()),
+        "residual": float(core.mean()),
+        "fraction": float((core > threshold).mean()),
+        "p99": float(np.percentile(core, 99)),
+        "mask": (resid > threshold) & inside,
     }
 
 
@@ -178,13 +178,13 @@ def sweep(frames, **kw):
     means: popping is a spike the eye catches every time."""
     out = [popping(frames[i], frames[i + 1], **kw) for i in range(len(frames) - 1)]
     if not out:
-        return {'pairs': 0}
+        return {"pairs": 0}
     return {
-        'pairs': len(out),
-        'residual_mean': float(np.mean([r['residual'] for r in out])),
-        'residual_peak': float(np.max([r['residual'] for r in out])),
-        'fraction_mean': float(np.mean([r['fraction'] for r in out])),
-        'fraction_peak': float(np.max([r['fraction'] for r in out])),
-        'worst_pair': int(np.argmax([r['fraction'] for r in out])),
-        'per_pair': out,
+        "pairs": len(out),
+        "residual_mean": float(np.mean([r["residual"] for r in out])),
+        "residual_peak": float(np.max([r["residual"] for r in out])),
+        "fraction_mean": float(np.mean([r["fraction"] for r in out])),
+        "fraction_peak": float(np.max([r["fraction"] for r in out])),
+        "worst_pair": int(np.argmax([r["fraction"] for r in out])),
+        "per_pair": out,
     }

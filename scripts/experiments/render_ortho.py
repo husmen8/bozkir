@@ -2,8 +2,8 @@
 
 Run from the repo root:
 
-    python scripts/experiments/render_ortho.py data/raw/garden.ply
-    python scripts/experiments/render_ortho.py data/raw/garden.ply --res 1200 --axis 1
+    python scripts/experiments/render_ortho.py data/raw/scene.ply
+    python scripts/experiments/render_ortho.py data/raw/scene.ply --res 1200 --axis 1
 
 Writes out/render_<name>_<axis>.png. Slow by design; --max-splats trades
 accuracy for time while you are still finding the right framing.

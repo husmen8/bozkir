@@ -615,13 +615,13 @@ wtest('a stored zip round-trips to the same bytes', async () => {
 wtest('the tileset is picked out of a folder with junk beside it', async () => {
   const splat = new Uint8Array(64).fill(7);
   const m = await readZip(zipOf([
-    ['bigsur/bigsur.splat', splat],
-    ['bigsur/bigsur.json', META],
-    ['__MACOSX/._bigsur.splat', 'junk'],
-    ['bigsur/.DS_Store', 'junk'],
+    ['scene/scene.splat', splat],
+    ['scene/scene.json', META],
+    ['__MACOSX/._scene.splat', 'junk'],
+    ['scene/.DS_Store', 'junk'],
   ]));
   const t = pickTileset(m);
-  eq(t.name, 'bigsur.splat', 'picked the shadow file or the wrong one');
+  eq(t.name, 'scene.splat', 'picked the shadow file or the wrong one');
   eq(t.buffer.byteLength, 64);
   eq(t.meta.size, 1.5);
 });
@@ -685,7 +685,7 @@ wtest('a trailing comment does not hide the end record', async () => {
 });
 
 
-wtest('a written zip reads back through our own reader', async () => {
+wtest('a written zip reads back through the viewer\'s reader', async () => {
   const splat = new Uint8Array(300).map((_, i) => (i * 7) % 251);
   const z = writeZip([['x.splat', splat], ['x.json', new TextEncoder().encode(META)]]);
   const back = await readZip(z.buffer.slice(z.byteOffset, z.byteOffset + z.length));
@@ -696,7 +696,7 @@ wtest('a written zip reads back through our own reader', async () => {
 
 wtest('a written zip carries correct CRCs', async () => {
   // The reader ignores the CRC field; an archiver does not. A zip that
-  // only our own code can open would be useless for handing frames to
+  // only this reader can open would be useless for handing frames to
   // pop_metric.py.
   const z = writeZip([['a.txt', new TextEncoder().encode('hello world')]]);
   const view = new DataView(z.buffer, z.byteOffset, z.byteLength);

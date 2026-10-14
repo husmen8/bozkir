@@ -4,7 +4,7 @@
 // small API (see initUI); nothing here touches WebGL.
 
 const $ = (id) => document.getElementById(id);
-const store = {
+export const store = {
   get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } },
 };
@@ -39,7 +39,9 @@ function setMode(research) {
 function setupModes() {
   $('modeExplore').addEventListener('click', () => setMode(false));
   $('modeResearch').addEventListener('click', () => setMode(true));
-  setMode(store.get('bozkir.expert') === '1');
+  // ?mode=research or ?mode=explore in a link wins over the remembered mode.
+  const asked = new URLSearchParams(location.search).get('mode');
+  setMode(asked ? asked === 'research' : store.get('bozkir.expert') === '1');
   window.addEventListener('keydown', (e) => {
     if (e.target.matches('input, select, textarea')) return;
     if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey) {
@@ -106,8 +108,8 @@ export function loadFailed(title, detail) {
   const o = $('overlay');
   o.classList.remove('hidden', 'ready');
   $('bar').style.display = 'none';
-  $('loadnote').innerHTML = `<b style="color:#e0a070">${title}</b>`
-    + (detail ? `<pre style="white-space:pre-wrap;font-size:11px;color:#c07a5a">${detail}</pre>` : '');
+  $('loadnote').innerHTML = `<b style="color:#e0a070">${esc(title)}</b>`
+    + (detail ? `<pre style="white-space:pre-wrap;font-size:11px;color:#c07a5a">${esc(detail)}</pre>` : '');
 }
 
 // -------------------------------------------------------------- the hint
@@ -128,8 +130,8 @@ function showHint() {
 
 // The index, in reading order.
 const INDEX = [
-  ['what it is', ['about', 'tileset', 'tiles', 'terrain']],
-  ['the rule', ['rule', 'share', 'blend', 'decision']],
+  ['pipeline', ['about', 'tileset', 'tiles', 'frames', 'terrain']],
+  ['materials', ['rule', 'share', 'blend', 'decals', 'decision']],
   ['viewing', ['world', 'relief', 'detail', 'presets', 'camera', 'walk', 'look', 'lighting', 'macro']],
   ['renderer', ['renderer', 'farfield', 'quality', 'warp', 'lod', 'ordering', 'merging']],
   ['evidence', ['measure', 'repetition']],
@@ -152,7 +154,8 @@ async function setupInfo() {
       e.preventDefault(); e.stopPropagation();
       openInfo(el.dataset.info);
     });
-    el.appendChild(mark);
+    // After the name, before the key number on the right.
+    el.insertBefore(mark, el.querySelector('.k'));
   }
   document.addEventListener('mouseover', (e) => {
     hovered = e.target.closest ? e.target.closest('[data-info]') : null;
@@ -248,7 +251,7 @@ function setupTips() {
     tip.style.left = '0px'; tip.style.top = '0px';
     const w = tip.offsetWidth, h = tip.offsetHeight;
     let x, y;
-    if (r.left >= panel.left && panel.left > w + 16) {
+    if ($('panel').contains(el) && panel.left > w + 16) {
       x = panel.left - w - 10;                       // left of the panel, level with the row
       y = r.top + r.height / 2 - h / 2;
     } else {
@@ -345,9 +348,7 @@ function fill(text) {
                                         : `real ground from the ${esc(s.scene)} capture`);
 }
 
-// ------------------------------------------------------------- scene card
-
-let cardHidden = store.get('bozkir.cardHidden') === '1';
+// ------------------------------------------------------------ scene facts
 
 function fmtLen(m) {
   if (!(m > 0)) return '—';
@@ -356,46 +357,76 @@ function fmtLen(m) {
   return `${+m.toFixed(1)} m`;
 }
 
-/** The fact sheet in the corner: materials, shares, sizes and a scale bar.
- *  Called every half second by the viewer. */
+/** Each pipeline section's key number, on its header. */
+function sectionKeys(s) {
+  const set = (id, text) => { const el = $(id); if (el && el.textContent !== text) el.textContent = text; };
+  const ok = s && s.splats;
+  set('kscene', ok ? s.scene : '');
+  set('kterrain', ok && !s.plain ? `${fmtLen(s.world)} across` : '');
+  set('ktiles', ok && !s.plain ? `${s.tiles} × ${fmtLen(s.tileSize)}` : '');
+  set('kmaterials', ok && !s.plain && s.names.length > 1 ? `${s.names.length}` : '');
+}
+
+/** Body classes for what the loaded tileset has, so the panel shows only
+ *  the controls that apply to it (data-needs in index.html). */
+function tilesetClasses(s) {
+  const ok = !!(s && s.splats && !s.plain);
+  const n = ok ? s.names.length : 0;
+  const b = document.body.classList;
+  b.toggle('loaded', ok);
+  b.toggle('multi', n >= 2);
+  b.toggle('two', n === 2);
+  b.toggle('many', n >= 3);
+  b.toggle('wang', ok && s.wang);
+  b.toggle('has-frames', ok && s.frames);
+  b.toggle('has-decals', ok && s.decals);
+}
+
+/** The loaded tileset in the scene section (materials, shares, tiles, its
+ *  credit) and the scale bar on the canvas. Called every half second by the
+ *  viewer; the DOM is only touched when something changed. */
+let factsHtml = '', scaleHtml = '';
 export function updateCard(s) {
-  const card = $('card');
-  if (!card) return;
-  if (cardHidden || !s || !s.splats) { card.innerHTML = ''; return; }
-  let html = '<button type="button" class="hide" title="hide this card">×</button>';
-  html += `<div class="t">${esc(s.scene)}</div>`;
-  if (s.plain) {
-    html += '<div class="d">a single capture, shown as it is</div>';
-  } else {
-    const total = s.counts ? s.counts.reduce((a, b) => a + b, 0) : 0;
-    for (let k = 0; k < s.names.length; k++) {
-      const c = s.colours[k] || [0.5, 0.5, 0.5];
-      const rgb = c.map((v) => Math.round(255 * Math.min(1, v))).join(',');
-      const share = total && s.counts ? ` <b>${Math.round(100 * s.counts[k] / total)}%</b>` : '';
-      const role = s.ruleOn && s.names.length > 1
-        ? (k === s.collects ? 'collects' : k === s.exposed ? 'exposed' : '') : '';
-      html += `<div class="m"><i style="background:rgb(${rgb})"></i>${esc(s.names[k])}${share}`
-        + (role ? `<span class="role">${role}</span>` : '') + '</div>';
-    }
-    html += `<div class="d">${s.tiles} tiles of ${fmtLen(s.tileSize)} · world ${fmtLen(s.world)} across</div>`;
-    if (s.note) html += `<div class="d">${esc(s.note)}</div>`;
-    if (s.repeats > 1.05) {
-      html += `<div class="d warn">the terrain repeats ${s.repeats.toFixed(1)}× across, mirrored:`
-        + ' relief scale is below the world size</div>';
+  sectionKeys(s);
+  tilesetClasses(s);
+  let html = '';
+  if (s && s.splats) {
+    if (s.plain) {
+      html += '<div class="d">a single capture, shown as it is</div>';
+    } else {
+      const total = s.counts ? s.counts.reduce((a, b) => a + b, 0) : 0;
+      for (let k = 0; k < s.names.length; k++) {
+        const c = s.colours[k] || [0.5, 0.5, 0.5];
+        const rgb = c.map((v) => Math.round(255 * Math.min(1, v))).join(',');
+        const share = total && s.counts ? `${Math.round(100 * s.counts[k] / total)}%` : '';
+        const role = s.ruleOn && s.names.length > 1
+          ? (k === s.collects ? 'collects' : k === s.exposed ? 'exposed' : '') : '';
+        html += `<div class="m"><i style="background:rgb(${rgb})"></i>${esc(s.names[k])}`
+          + `<b>${share}</b><span class="role">${role}</span></div>`;
+      }
+      const parts = [`${s.tiles} tiles of ${fmtLen(s.tileSize)}`];
+      if (s.frames) parts.push(`frames + ${s.centres} centres`);
+      if (s.decals) parts.push('decals');
+      html += `<div class="d">${parts.join(' · ')}</div>`;
+      if (s.note) html += `<div class="d">${esc(s.note)}</div>`;
+      if (s.repeats > 1.05) {
+        html += `<div class="d warn">the terrain repeats ${s.repeats.toFixed(1)}× across, mirrored:`
+          + ' relief scale is below the world size</div>';
+      }
     }
   }
+  if (html !== factsHtml) { $('facts').innerHTML = factsHtml = html; }
+
   // Scale bar at the orbit point: a round length near 90 px.
-  if (s.metresPerPixel > 0 && isFinite(s.metresPerPixel)) {
+  let bar = '';
+  if (s && s.splats && s.metresPerPixel > 0 && isFinite(s.metresPerPixel)) {
     const want = s.metresPerPixel * 90;
     const p = Math.pow(10, Math.floor(Math.log10(want)));
     const len = [1, 2, 5, 10].map((k) => k * p).reduce((a, b) => (Math.abs(b - want) < Math.abs(a - want) ? b : a));
     const px = Math.max(8, Math.round(len / s.metresPerPixel));
-    html += `<div class="scale" title="at the point the camera orbits${s.units === 'm' ? '' : ', assuming the capture is in metres'}"><i style="width:${px}px"></i>${fmtLen(len)}</div>`;
+    bar = `<i style="width:${px}px"></i>${fmtLen(len)}`;
   }
-  card.innerHTML = html;
-  card.querySelector('.hide').addEventListener('click', () => {
-    cardHidden = true; store.set('bozkir.cardHidden', '1'); card.innerHTML = '';
-  });
+  if (bar !== scaleHtml) { $('scale').innerHTML = scaleHtml = bar; }
 }
 
 // ------------------------------------------------------------------ share

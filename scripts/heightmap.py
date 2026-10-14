@@ -1,6 +1,6 @@
 """Turn a drone DSM (or any PLY) into a height field for the viewer.
 
-    python scripts/heightmap.py C:/odm/copr/odm_dem/dsm.tif --name desert
+    python scripts/heightmap.py <odm>/odm_dem/dsm.tif --name desert
 
 Real ground in metres, a by-product of the same photogrammetry that gives
 the tiles. The survey is a polygon in a rectangular file, so the largest

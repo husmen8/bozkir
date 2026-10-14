@@ -66,8 +66,8 @@ class SceneConfig:
 
 
 # Upside-down check: ground carries material above it, so heights above the
-# median reach further than those below. bigsur came out upside down and
-# needed --flip found by hand.
+# median reach further than those below. Below this ratio the export
+# warns and names --flip.
 UPSIDE_DOWN_BELOW = 0.7
 
 
@@ -218,3 +218,18 @@ def scene_from_args(args, verbose=True):
         if verbose:
             print(f"  splats widened to at least {args.min_splat:g} cm")
     return s
+
+
+def scale_report(s, size):
+    """Warn when --size (in the capture's own units) looks wrong for the
+    capture's scale, suggesting a size."""
+    m = float(np.median(s.scale.max(axis=1)))
+    if m <= 0:
+        return
+    ratio = size / m
+    if 12 <= ratio <= 400:
+        return
+    guess = 55 * m
+    print(f"  ! --size {size:g} is {ratio:.0f}x the typical splat "
+          f"({m:.3g}); ground captures in metres sit around 30-150x. If this "
+          f"capture is not in metres, try --size {guess:.3g}.")

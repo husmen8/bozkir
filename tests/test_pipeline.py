@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 PASSED = 0
 FAILURES = []
-SECTION = ''
+SECTION = ""
 ONLY = [a.lower() for a in sys.argv[1:]]
 
 
@@ -40,19 +40,19 @@ def test(name):
         except AssertionError as e:
             FAILURES.append((SECTION, name, str(e)))
         except Exception as e:                        # noqa: BLE001
-            FAILURES.append((SECTION, name, f'{type(e).__name__}: {e}'))
+            FAILURES.append((SECTION, name, f"{type(e).__name__}: {e}"))
         return fn
     return wrap
 
 
-def ok(cond, msg='expected true'):
+def ok(cond, msg="expected true"):
     if not cond:
         raise AssertionError(msg)
 
 
-def close(a, b, tol=1e-9, msg='not close'):
+def close(a, b, tol=1e-9, msg="not close"):
     if abs(a - b) > tol:
-        raise AssertionError(f'{msg}: {a} vs {b}')
+        raise AssertionError(f"{msg}: {a} vs {b}")
 
 
 # All imports for the sections below, in one place.
@@ -92,7 +92,7 @@ def main(argv):
 # popping metric
 # ======================================================================
 
-SECTION = 'popping metric'
+SECTION = "popping metric"
 
 
 def texture(h=192, w=256, seed=0):
@@ -111,18 +111,18 @@ def shift(img, dy, dx):
     return np.roll(np.roll(img, dy, axis=0), dx, axis=1)
 
 
-@test('luminance accepts bytes and floats alike')
+@test("luminance accepts bytes and floats alike")
 def _():
     rgb = np.zeros((4, 4, 3), dtype=np.uint8)
     rgb[..., 1] = 255
-    assert abs(to_luma(rgb).mean() - 0.7152) < 1e-6, 'byte input mis-scaled'
+    assert abs(to_luma(rgb).mean() - 0.7152) < 1e-6, "byte input mis-scaled"
     f = np.ones((4, 4, 3))
-    assert abs(to_luma(f).mean() - 1.0) < 1e-9, 'float input mis-scaled'
+    assert abs(to_luma(f).mean() - 1.0) < 1e-9, "float input mis-scaled"
     g = np.ones((4, 4)) * 0.5
-    assert abs(to_luma(g).mean() - 0.5) < 1e-9, 'greyscale should pass through'
+    assert abs(to_luma(g).mean() - 0.5) < 1e-9, "greyscale should pass through"
 
 
-@test('a pure translation is found')
+@test("a pure translation is found")
 def _():
     a = texture()
     b = shift(a, 3, -5)
@@ -131,35 +131,35 @@ def _():
     dx = np.median(field[..., 1])
     # The field carries a onto b, so it reports where to read from: the
     # opposite sign of the shift applied.
-    assert abs(dy + 3) < 1.5, f'dy found {dy}, expected about -3'
-    assert abs(dx - 5) < 1.5, f'dx found {dx}, expected about 5'
+    assert abs(dy + 3) < 1.5, f"dy found {dy}, expected about -3"
+    assert abs(dx - 5) < 1.5, f"dx found {dx}, expected about 5"
 
 
-@test('compensating a translation removes almost all of the difference')
+@test("compensating a translation removes almost all of the difference")
 def _():
     # The central claim. A camera turning moves the whole image, and the
     # metric has to report that as nothing happened.
     a = texture()
     b = shift(a, 2, 4)
     r = popping(a, b, block=32, search=8)
-    assert r['raw'] > 0.05, f'the test frames barely differ: raw={r["raw"]}'
-    assert r['residual'] < r['raw'] / 10, \
-        f'compensation only got {r["raw"]:.4f} down to {r["residual"]:.4f}'
-    assert r['fraction'] < 0.02, f'{r["fraction"]:.3%} of pixels called popped'
+    assert r["raw"] > 0.05, f"the test frames barely differ: raw={r['raw']}"
+    assert r["residual"] < r["raw"] / 10, \
+        f"compensation only got {r['raw']:.4f} down to {r['residual']:.4f}"
+    assert r["fraction"] < 0.02, f"{r['fraction']:.3%} of pixels called popped"
 
 
-@test('a small block does not lose the motion to coarse rounding')
+@test("a small block does not lose the motion to coarse rounding")
 def _():
     # Regression: a fine radius from the block size alone (2 px for 16 px
     # blocks) could not reach a 3 px motion, and reported 16% popped.
     a = texture()
     b = shift(a, 2, 3)
     r = popping(a, b, block=16, search=10)
-    assert r['fraction'] < 0.02, \
-        f'{r["fraction"]:.2%} of a purely translated frame called popped'
+    assert r["fraction"] < 0.02, \
+        f"{r['fraction']:.2%} of a purely translated frame called popped"
 
 
-@test('block and search settings agree with each other')
+@test("block and search settings agree with each other")
 def _():
     # The metric is meant to be robust to how it is configured; a number
     # that changes with the block size is not measuring the scene.
@@ -168,11 +168,11 @@ def _():
     for block in (16, 24, 32, 48):
         for search in (6, 12, 20):
             r = popping(a, b, block=block, search=search)
-            assert r['fraction'] < 0.03, \
-                f'block={block} search={search}: {r["fraction"]:.2%} popped'
+            assert r["fraction"] < 0.03, \
+                f"block={block} search={search}: {r['fraction']:.2%} popped"
 
 
-@test('a shift far larger than the search radius is still found')
+@test("a shift far larger than the search radius is still found")
 def _():
     # Regression: a real capture read 55% popped for every ordering. A
     # 48-frame turn moves 100+ px per frame, beyond a searched radius of 12;
@@ -180,22 +180,22 @@ def _():
     a = texture(192, 256)
     b = shift(a, 40, -70)
     r = popping(a, b, block=32, search=8)
-    assert r['fraction'] < 0.03, \
-        f'{r["fraction"]:.1%} popped on a pure 70-pixel translation'
+    assert r["fraction"] < 0.03, \
+        f"{r['fraction']:.1%} popped on a pure 70-pixel translation"
 
 
-@test('the metric does not saturate as the step grows')
+@test("the metric does not saturate as the step grows")
 def _():
     # Whatever the step, a translated frame is a translated frame. If the
     # score climbs with step size the metric is measuring the camera.
     a = texture(192, 256)
     for dy, dx in ((1, 2), (8, 14), (25, 45), (60, 90)):
         r = popping(a, shift(a, dy, dx), block=32, search=8)
-        assert r['fraction'] < 0.05, \
-            f'shift ({dy},{dx}): {r["fraction"]:.1%} popped'
+        assert r["fraction"] < 0.05, \
+            f"shift ({dy},{dx}): {r['fraction']:.1%} popped"
 
 
-@test('a patch that swaps is caught')
+@test("a patch that swaps is caught")
 def _():
     # A tile suddenly drawn in front of its neighbour: a rectangle replaced
     # with different content, no motion anywhere.
@@ -204,12 +204,12 @@ def _():
     b[60:120, 80:160] = texture(seed=7)[60:120, 80:160]
     r = popping(a, b, block=32, search=8)
     area = (120 - 60) * (160 - 80) / a.size
-    assert r['fraction'] > area / 2, \
-        f'caught only {r["fraction"]:.3%} of a {area:.1%} patch'
-    assert r['p99'] > 0.1, f'p99 {r["p99"]:.3f} is too low for a hard swap'
+    assert r["fraction"] > area / 2, \
+        f"caught only {r['fraction']:.3%} of a {area:.1%} patch"
+    assert r["p99"] > 0.1, f"p99 {r['p99']:.3f} is too low for a hard swap"
 
 
-@test('a patch that swaps while the camera moves is still caught')
+@test("a patch that swaps while the camera moves is still caught")
 def _():
     # The case that matters and the one a raw difference cannot do: both
     # things happening at once.
@@ -218,32 +218,32 @@ def _():
     b[60:120, 80:160] = shift(texture(seed=11), 2, 3)[60:120, 80:160]
     moved = popping(a, shift(a, 2, 3), block=32, search=8)
     both = popping(a, b, block=32, search=8)
-    assert both['fraction'] > moved['fraction'] * 5, \
-        (f'motion alone {moved["fraction"]:.3%} vs motion plus a pop '
-         f'{both["fraction"]:.3%} - the two are not separated')
+    assert both["fraction"] > moved["fraction"] * 5, \
+        (f"motion alone {moved['fraction']:.3%} vs motion plus a pop "
+         f"{both['fraction']:.3%} - the two are not separated")
 
 
-@test('the mask lands on the patch that moved, not elsewhere')
+@test("the mask lands on the patch that moved, not elsewhere")
 def _():
     a = texture()
     b = a.copy()
     b[64:128, 64:128] = texture(seed=3)[64:128, 64:128]
-    m = popping(a, b, block=32, search=8)['mask']
+    m = popping(a, b, block=32, search=8)["mask"]
     inside = m[64:128, 64:128].mean()
     outside = (m.sum() - m[64:128, 64:128].sum()) / (m.size - 64 * 64)
-    assert inside > 0.5, f'only {inside:.1%} of the patch flagged'
-    assert outside < 0.05, f'{outside:.1%} flagged outside the patch'
+    assert inside > 0.5, f"only {inside:.1%} of the patch flagged"
+    assert outside < 0.05, f"{outside:.1%} flagged outside the patch"
 
 
-@test('identical frames score zero')
+@test("identical frames score zero")
 def _():
     a = texture()
     r = popping(a, a, block=32, search=4)
-    assert r['residual'] == 0.0, f'residual {r["residual"]}'
-    assert r['fraction'] == 0.0, f'fraction {r["fraction"]}'
+    assert r["residual"] == 0.0, f"residual {r['residual']}"
+    assert r["fraction"] == 0.0, f"fraction {r['fraction']}"
 
 
-@test('a sweep reports the peak, not just the mean')
+@test("a sweep reports the peak, not just the mean")
 def _():
     # Forty frames of clean motion with one pop in the middle. The mean is
     # diluted by the clean frames; the peak is what the eye actually sees.
@@ -255,27 +255,27 @@ def _():
             f[60:120, 80:160] = texture(seed=5)[60:120, 80:160]
         frames.append(f)
     s = sweep(frames, block=32, search=8)
-    assert s['pairs'] == 11
-    assert s['fraction_peak'] > s['fraction_mean'] * 3, \
-        'a single popped frame should stand out from the sweep'
-    assert s['worst_pair'] in (5, 6), f'blamed pair {s["worst_pair"]}'
+    assert s["pairs"] == 11
+    assert s["fraction_peak"] > s["fraction_mean"] * 3, \
+        "a single popped frame should stand out from the sweep"
+    assert s["worst_pair"] in (5, 6), f"blamed pair {s['worst_pair']}"
 
 
-@test('mismatched frame sizes are refused')
+@test("mismatched frame sizes are refused")
 def _():
     try:
         motion_field(texture(64, 64), texture(64, 96))
     except ValueError as e:
-        assert 'size' in str(e)
+        assert "size" in str(e)
         return
-    raise AssertionError('differing sizes should not be compared')
+    raise AssertionError("differing sizes should not be compared")
 
 
 # ======================================================================
 # height maps
 # ======================================================================
 
-SECTION = 'height maps'
+SECTION = "height maps"
 
 
 def brute_force(mask):
@@ -297,19 +297,19 @@ def brute_force(mask):
     return best_area
 
 
-@test('a solid mask gives the whole thing')
+@test("a solid mask gives the whole thing")
 def _():
     m = np.ones((7, 11), dtype=bool)
     t, l, h, w = largest_rectangle(m)
-    assert (t, l, h, w) == (0, 0, 7, 11), f'got {(t, l, h, w)}'
+    assert (t, l, h, w) == (0, 0, 7, 11), f"got {(t, l, h, w)}"
 
 
-@test('an empty mask gives nothing rather than raising')
+@test("an empty mask gives nothing rather than raising")
 def _():
     assert largest_rectangle(np.zeros((5, 5), dtype=bool)) == (0, 0, 0, 0)
 
 
-@test('the rectangle found is actually all valid')
+@test("the rectangle found is actually all valid")
 def _():
     rng = np.random.default_rng(0)
     for seed in range(12):
@@ -317,20 +317,20 @@ def _():
         t, l, h, w = largest_rectangle(m)
         if h and w:
             assert m[t:t + h, l:l + w].all(), \
-                f'seed {seed}: rectangle at {(t, l, h, w)} includes a hole'
+                f"seed {seed}: rectangle at {(t, l, h, w)} includes a hole"
 
 
-@test('it finds the largest, checked against brute force')
+@test("it finds the largest, checked against brute force")
 def _():
     rng = np.random.default_rng(7)
     for seed in range(10):
         m = rng.random((9, 11)) > 0.3
         _, _, h, w = largest_rectangle(m)
         assert h * w == brute_force(m), \
-            f'seed {seed}: found {h * w}, best is {brute_force(m)}'
+            f"seed {seed}: found {h * w}, best is {brute_force(m)}"
 
 
-@test('a diagonal polygon is handled, which is the real case')
+@test("a diagonal polygon is handled, which is the real case")
 def _():
     # The survey area sits at an angle, so no row or column of the file is
     # entirely empty and a naive bounding-box trim finds nothing to cut.
@@ -339,20 +339,20 @@ def _():
     m = (xx + yy > n * 0.45) & (xx + yy < n * 1.55) \
         & (xx - yy > -n * 0.55) & (xx - yy < n * 0.55)
     t, l, h, w = largest_rectangle(m)
-    assert m[t:t + h, l:l + w].all(), 'rectangle escaped the polygon'
+    assert m[t:t + h, l:l + w].all(), "rectangle escaped the polygon"
     assert h * w > 0.25 * m.sum(), \
-        f'kept only {h * w} of {m.sum()} valid pixels'
+        f"kept only {h * w} of {m.sum()} valid pixels"
 
 
-@test('a tall thin valid strip is found')
+@test("a tall thin valid strip is found")
 def _():
     m = np.zeros((40, 40), dtype=bool)
     m[:, 17:21] = True
     t, l, h, w = largest_rectangle(m)
-    assert (h, w) == (40, 4), f'got {h}x{w}'
+    assert (h, w) == (40, 4), f"got {h}x{w}"
 
 
-@test('nodata is excluded by value when there is no metadata')
+@test("nodata is excluded by value when there is no metadata")
 def _():
     from PIL import Image
     import tempfile
@@ -360,15 +360,15 @@ def _():
     a = np.full((20, 20), 5.0, dtype=np.float32)
     a[:4, :] = -9999.0
     with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / 'dsm.tif'
+        p = Path(d) / "dsm.tif"
         Image.fromarray(a).save(p)
         vals, good, _ = read_dsm(p)
     assert good.shape == a.shape
-    assert not good[:4, :].any(), 'sentinel counted as ground'
-    assert good[4:, :].all(), 'real ground dropped'
+    assert not good[:4, :].any(), "sentinel counted as ground"
+    assert good[4:, :].all(), "real ground dropped"
 
 
-@test('end to end: a DSM becomes a height map and a sidecar')
+@test("end to end: a DSM becomes a height map and a sidecar")
 def _():
     import json
     import tempfile
@@ -382,33 +382,33 @@ def _():
     a[(xx + yy) > n * 1.65] = -9999.0
 
     with tempfile.TemporaryDirectory() as d:
-        src = Path(d) / 'dsm.tif'
+        src = Path(d) / "dsm.tif"
         Image.fromarray(a).save(src)
-        rc = main([str(src), '--name', 'unit', '--out', d, '--size', '64'])
+        rc = main([str(src), "--name", "unit", "--out", d, "--size", "64"])
         assert rc == 0
 
-        png = Path(d) / 'unit.height.png'
-        side = Path(d) / 'unit.height.json'
-        assert png.exists() and side.exists(), 'outputs missing'
+        png = Path(d) / "unit.height.png"
+        side = Path(d) / "unit.height.json"
+        assert png.exists() and side.exists(), "outputs missing"
 
         img = read_height_png(png)
         levels = len(np.unique(np.round(img * 65535)))
         assert levels > 256, \
-            f'{levels} distinct heights; the 16-bit encoding did not survive'
+            f"{levels} distinct heights; the 16-bit encoding did not survive"
         assert abs(float(img.min())) < 1e-6 and abs(float(img.max()) - 1) < 1e-6, \
-            'height map does not use its full range'
-        assert max(img.shape) <= 64, f'not resampled: {img.shape}'
+            "height map does not use its full range"
+        assert max(img.shape) <= 64, f"not resampled: {img.shape}"
 
         meta = json.loads(side.read_text())
-        assert meta['metres_range'] > 0
-        assert meta['width'] == img.shape[1]
-        assert meta['height'] == img.shape[0]
+        assert meta["metres_range"] > 0
+        assert meta["width"] == img.shape[1]
+        assert meta["height"] == img.shape[0]
         # The sentinel must not have survived into the range.
-        assert meta['metres_low'] > -100, \
+        assert meta["metres_low"] > -100, \
             f"nodata leaked into the height range: {meta['metres_low']}"
 
 
-@test('smoothing lowers the roughness without moving the landforms')
+@test("smoothing lowers the roughness without moving the landforms")
 def _():
     import tempfile
     from PIL import Image
@@ -420,13 +420,13 @@ def _():
     a = (smoothform + rng.normal(0, 0.6, (n, n))).astype(np.float32)
 
     def run(passes, d):
-        main([str(d / 'dsm.tif'), '--name', f's{passes}', '--out', str(d),
-              '--size', '64', '--smooth', str(passes)])
-        return read_height_png(d / f's{passes}.height.png')
+        main([str(d / "dsm.tif"), "--name", f"s{passes}", "--out", str(d),
+              "--size", "64", "--smooth", str(passes)])
+        return read_height_png(d / f"s{passes}.height.png")
 
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        Image.fromarray(a).save(d / 'dsm.tif')
+        Image.fromarray(a).save(d / "dsm.tif")
         rough = run(0, d)
         smooth = run(2, d)
 
@@ -434,19 +434,19 @@ def _():
         return float(np.abs(np.diff(z, axis=1)).mean())
 
     assert roughness(smooth) < roughness(rough) * 0.8, \
-        f'{roughness(rough):.4f} -> {roughness(smooth):.4f}, barely changed'
+        f"{roughness(rough):.4f} -> {roughness(smooth):.4f}, barely changed"
     # The ridge is still a ridge: column means still rise and fall together.
     c1 = rough.mean(0)
     c2 = smooth.mean(0)
     corr = float(np.corrcoef(c1, c2)[0, 1])
-    assert corr > 0.95, f'landform changed shape, correlation {corr:.3f}'
+    assert corr > 0.95, f"landform changed shape, correlation {corr:.3f}"
 
 
 # ======================================================================
 # terrain analysis
 # ======================================================================
 
-SECTION = 'terrain analysis'
+SECTION = "terrain analysis"
 
 
 
@@ -476,31 +476,31 @@ def valley(n=41, slope_x=0.5, fall=0.2):
     return np.abs(xx - n // 2) * slope_x + (n - yy) * fall
 
 
-@test('slope is the gradient, and a plane has one everywhere')
+@test("slope is the gradient, and a plane has one everywhere")
 def _():
     s = slope(plane(gx=0.3))
-    assert np.allclose(s, 0.3, atol=1e-9), f'got {s.min()}..{s.max()}'
+    assert np.allclose(s, 0.3, atol=1e-9), f"got {s.min()}..{s.max()}"
     assert np.allclose(slope(np.zeros((9, 9))), 0.0)
 
 
-@test('slope respects the sample spacing')
+@test("slope respects the sample spacing")
 def _():
     z = plane(gx=1.0)
     assert np.allclose(slope(z, spacing=1.0), 1.0, atol=1e-9)
     assert np.allclose(slope(z, spacing=2.0), 0.5, atol=1e-9), \
-        'halving the resolution should halve the measured slope'
+        "halving the resolution should halve the measured slope"
 
 
-@test('TPI is positive on a peak and negative in a pit')
+@test("TPI is positive on a peak and negative in a pit")
 def _():
     z = cone()
     t = tpi(z, radius=6)
     c = z.shape[0] // 2
-    assert t[c, c] > 0, f'peak read {t[c, c]:.3f}'
-    assert tpi(-z, radius=6)[c, c] < 0, 'an inverted cone should read as a pit'
+    assert t[c, c] > 0, f"peak read {t[c, c]:.3f}"
+    assert tpi(-z, radius=6)[c, c] < 0, "an inverted cone should read as a pit"
 
 
-@test('TPI is near zero on a plane, whatever its tilt')
+@test("TPI is near zero on a plane, whatever its tilt")
 def _():
     # A planar hillside is not a ridge. If TPI said otherwise, every slope
     # in the scene would collect the ridge material.
@@ -508,18 +508,18 @@ def _():
         t = tpi(plane(gx=gx), radius=5)
         inner = t[8:-8, 8:-8]
         assert np.abs(inner).max() < 1e-6, \
-            f'tilt {gx} gave TPI up to {np.abs(inner).max():.4f}'
+            f"tilt {gx} gave TPI up to {np.abs(inner).max():.4f}"
 
 
-@test('curvature separates concave from convex')
+@test("curvature separates concave from convex")
 def _():
     yy, xx = grid(21)
     bowl = (xx - 10.0) ** 2 + (yy - 10.0) ** 2
-    assert curvature(bowl)[10, 10] > 0, 'a bowl should read concave'
-    assert curvature(-bowl)[10, 10] < 0, 'a dome should read convex'
+    assert curvature(bowl)[10, 10] > 0, "a bowl should read concave"
+    assert curvature(-bowl)[10, 10] < 0, "a dome should read convex"
 
 
-@test('flow collects in the valley, not on the flanks')
+@test("flow collects in the valley, not on the flanks")
 def _():
     z = valley()
     f = flow_accumulation(z)
@@ -527,114 +527,114 @@ def _():
     channel = f[:, n // 2].sum()
     flank = f[:, 3].sum()
     assert channel > flank * 10, \
-        f'channel drained {channel:.0f}, flank {flank:.0f}'
+        f"channel drained {channel:.0f}, flank {flank:.0f}"
 
 
-@test('flow accumulates downhill, so totals grow towards the outlet')
+@test("flow accumulates downhill, so totals grow towards the outlet")
 def _():
     z = valley()
     f = flow_accumulation(z)
     col = f[:, z.shape[0] // 2]
     # The V falls towards increasing y, so the far end carries the most.
-    assert col[-1] > col[0], f'{col[0]:.0f} at the top, {col[-1]:.0f} at the foot'
+    assert col[-1] > col[0], f"{col[0]:.0f} at the top, {col[-1]:.0f} at the foot"
 
 
-@test('every cell drains at least itself and no water is invented')
+@test("every cell drains at least itself and no water is invented")
 def _():
     rng = np.random.default_rng(2)
     z = rng.random((30, 30))
     f = flow_accumulation(z)
-    assert f.min() >= 1.0, f'a cell drained {f.min()}, less than itself'
+    assert f.min() >= 1.0, f"a cell drained {f.min()}, less than itself"
     assert f.max() <= z.size, \
-        f'one cell drained {f.max():.0f} of {z.size} cells'
+        f"one cell drained {f.max():.0f} of {z.size} cells"
 
 
-@test('a flat surface drains nowhere in particular')
+@test("a flat surface drains nowhere in particular")
 def _():
     f = flow_accumulation(np.zeros((20, 20)))
-    assert np.allclose(f, 1.0), 'flat ground routed water somewhere'
+    assert np.allclose(f, 1.0), "flat ground routed water somewhere"
 
 
-@test('landform finds a peak on a cone and a valley in a V')
+@test("landform finds a peak on a cone and a valley in a V")
 def _():
     names = lambda z: {LANDFORMS[i] for i in np.unique(landform(z))}  # noqa: E731
     c = names(cone())
-    assert 'peak' in c or 'ridge' in c, f'cone classified as {sorted(c)}'
+    assert "peak" in c or "ridge" in c, f"cone classified as {sorted(c)}"
     v = names(valley())
-    assert 'valley' in v or 'hollow' in v, f'V classified as {sorted(v)}'
+    assert "valley" in v or "hollow" in v, f"V classified as {sorted(v)}"
 
 
-@test('a level plane is flat and a tilted one is slope')
+@test("a level plane is flat and a tilted one is slope")
 def _():
     level = landform(np.zeros((41, 41)))
-    assert LANDFORMS[level[20, 20]] == 'flat', \
-        f'level ground read as {LANDFORMS[level[20, 20]]}'
+    assert LANDFORMS[level[20, 20]] == "flat", \
+        f"level ground read as {LANDFORMS[level[20, 20]]}"
     tilted = landform(plane(gx=0.5))
-    assert LANDFORMS[tilted[20, 20]] == 'slope', \
-        f'a hillside read as {LANDFORMS[tilted[20, 20]]}'
+    assert LANDFORMS[tilted[20, 20]] == "slope", \
+        f"a hillside read as {LANDFORMS[tilted[20, 20]]}"
 
 
-@test('landform thresholds are scale free')
+@test("landform thresholds are scale free")
 def _():
     # Expressed in standard deviations, so the same numbers work on a gentle
     # survey and on a mountain. A scene scaled up ten times must classify
     # identically or the rule would need retuning per capture.
     z = valley()
     assert (landform(z) == landform(z * 10.0)).all(), \
-        'scaling the terrain changed the classification'
+        "scaling the terrain changed the classification"
 
 
-@test('coverage sums to one at every cell')
+@test("coverage sums to one at every cell")
 def _():
     c = coverage(valley())
     total = sum(c.values())
     assert np.allclose(total, 1.0), \
-        f'coverage sums to {total.min():.3f}..{total.max():.3f}'
+        f"coverage sums to {total.min():.3f}..{total.max():.3f}"
 
 
-@test('collected material goes to the channel, exposed to the ridge')
+@test("collected material goes to the channel, exposed to the ridge")
 def _():
     # The claim the whole module exists to support.
     z = valley()
     c = coverage(z)
     n = z.shape[0]
-    chan = c['collected'][:, n // 2].mean()
-    flank = c['collected'][:, 3].mean()
+    chan = c["collected"][:, n // 2].mean()
+    flank = c["collected"][:, 3].mean()
     assert chan > flank, \
-        f'collected material preferred the flank: {chan:.3f} vs {flank:.3f}'
-    assert c['exposed'][:, 3].mean() > c['exposed'][:, n // 2].mean(), \
-        'exposed material preferred the channel'
+        f"collected material preferred the flank: {chan:.3f} vs {flank:.3f}"
+    assert c["exposed"][:, 3].mean() > c["exposed"][:, n // 2].mean(), \
+        "exposed material preferred the channel"
 
 
-@test('sharpness makes the rule more decisive without moving it')
+@test("sharpness makes the rule more decisive without moving it")
 def _():
     z = valley()
-    soft = coverage(z, sharpness=1.0)['collected']
-    hard = coverage(z, sharpness=6.0)['collected']
+    soft = coverage(z, sharpness=1.0)["collected"]
+    hard = coverage(z, sharpness=6.0)["collected"]
     spread = lambda a: float(a.std())  # noqa: E731
     assert spread(hard) > spread(soft), \
-        f'sharper rule was not more decisive: {spread(soft):.3f} vs {spread(hard):.3f}'
+        f"sharper rule was not more decisive: {spread(soft):.3f} vs {spread(hard):.3f}"
     # Same places, more strongly: where soft prefers collected, hard must too.
     agree = ((soft > 0.5) == (hard > 0.5)).mean()
-    assert agree > 0.9, f'sharpening moved the boundary: {agree:.1%} agreement'
+    assert agree > 0.9, f"sharpening moved the boundary: {agree:.1%} agreement"
 
 
-@test('custom rules replace the defaults')
+@test("custom rules replace the defaults")
 def _():
     z = valley()
     c = coverage(z, rules={
-        'steep': lambda m: m['slope'],
-        'gentle': lambda m: 1.0 - m['slope'],
+        "steep": lambda m: m["slope"],
+        "gentle": lambda m: 1.0 - m["slope"],
     })
-    assert set(c) == {'steep', 'gentle'}
+    assert set(c) == {"steep", "gentle"}
     assert np.allclose(sum(c.values()), 1.0)
 
 
-@test('a featureless surface gives no preference')
+@test("a featureless surface gives no preference")
 def _():
     c = coverage(np.zeros((20, 20)))
     for name, a in c.items():
-        assert np.isfinite(a).all(), f'{name} produced non-finite coverage'
+        assert np.isfinite(a).all(), f"{name} produced non-finite coverage"
     assert np.allclose(sum(c.values()), 1.0)
 
 
@@ -642,7 +642,7 @@ def _():
 # patch search
 # ======================================================================
 
-SECTION = 'patch search'
+SECTION = "patch search"
 
 
 def scene(xyz, scale=None, opacity=None):
@@ -683,40 +683,40 @@ def ground(extent=6.0, density=4000, seed=0, holes=0, hole_r=0.5):
     return scene(np.column_stack([xy[:, 0], xy[:, 1], z]))
 
 
-@test('clean ground is found at the defaults, with no loosening')
+@test("clean ground is found at the defaults, with no loosening")
 def _():
     s = ground()
     chosen, trail = auto_pick(s, 1.5, 4, up_axis=2, verbose=False,
                               stride=0.5, thickness=0.4)
-    assert len(chosen) >= 4, f'only {len(chosen)} patches on clean ground'
+    assert len(chosen) >= 4, f"only {len(chosen)} patches on clean ground"
     assert len(trail) == 1, \
-        f'loosened {len(trail) - 1} setting(s) when the defaults sufficed'
+        f"loosened {len(trail) - 1} setting(s) when the defaults sufficed"
 
 
-@test('the stats out-parameter reports the tally and the grid')
+@test("the stats out-parameter reports the tally and the grid")
 def _():
     s = ground()
     stats = {}
     pick_patches(s, 1.5, 4, up_axis=2, stride=0.5, thickness=0.4,
                  verbose=False, stats=stats)
-    for key in ('sparse', 'holes', 'tilt', 'buried', 'positions', 'viable'):
-        assert key in stats, f'{key} missing from stats'
-    assert stats['positions'] > 0
+    for key in ("sparse", "holes", "tilt", "buried", "positions", "viable"):
+        assert key in stats, f"{key} missing from stats"
+    assert stats["positions"] > 0
 
 
-@test('progress is called, and ends exactly at the total')
+@test("progress is called, and ends exactly at the total")
 def _():
     s = ground()
     seen = []
     pick_patches(s, 1.5, 4, up_axis=2, stride=0.5, thickness=0.4,
                  verbose=False, progress=lambda d, t, v: seen.append((d, t)))
-    assert seen, 'progress was never called'
+    assert seen, "progress was never called"
     done, total = seen[-1]
-    assert done == total, f'last progress was {done} of {total}'
-    assert all(d <= t for d, t in seen), 'progress went past the total'
+    assert done == total, f"last progress was {done} of {total}"
+    assert all(d <= t for d, t in seen), "progress went past the total"
 
 
-@test('holed ground fails the defaults and passes once coverage is loosened')
+@test("holed ground fails the defaults and passes once coverage is loosened")
 def _():
     # The case from the desert capture: the defaults return almost nothing,
     # and the tally blames coverage.
@@ -727,47 +727,47 @@ def _():
     loose = pick_patches(s, 1.5, 4, up_axis=2, stride=0.5, thickness=0.4,
                          verbose=False, min_cover=0.55)
     assert len(loose) > len(strict), \
-        (f'loosening coverage changed nothing: {len(strict)} -> {len(loose)}. '
-         f'tally was {stats}')
+        (f"loosening coverage changed nothing: {len(strict)} -> {len(loose)}. "
+         f"tally was {stats}")
 
 
-@test('auto_pick finds what the defaults could not, and records how')
+@test("auto_pick finds what the defaults could not, and records how")
 def _():
     s = ground(extent=9.0, holes=90, hole_r=0.42, seed=3)
     chosen, trail = auto_pick(s, 1.5, 4, up_axis=2, verbose=False,
                               stride=0.5, thickness=0.4)
-    assert len(chosen) >= 4, f'only {len(chosen)} after loosening'
-    assert len(trail) > 1, 'reported no loosening on a scene that needed it'
+    assert len(chosen) >= 4, f"only {len(chosen)} after loosening"
+    assert len(trail) > 1, "reported no loosening on a scene that needed it"
     # The trail has to be enough to repeat the run by hand.
     _, settings, _, _ = trail[-1]
-    assert settings != trail[0][1], 'settings identical to the defaults'
+    assert settings != trail[0][1], "settings identical to the defaults"
 
 
-@test('the trail is reported in the order it was tried')
+@test("the trail is reported in the order it was tried")
 def _():
     s = ground(holes=60, hole_r=0.42, seed=3)
     _, trail = auto_pick(s, 1.5, 4, up_axis=2, verbose=False,
                          stride=0.5, thickness=0.4)
-    assert trail[0][0] == 'defaults', f'first step was {trail[0][0]}'
+    assert trail[0][0] == "defaults", f"first step was {trail[0][0]}"
     counts = [got for _, _, _, got in trail]
     assert counts[-1] == max(counts), \
-        f'stopped on a worse result than one it had already: {counts}'
+        f"stopped on a worse result than one it had already: {counts}"
 
 
-@test('a scene that cannot work says so instead of looping')
+@test("a scene that cannot work says so instead of looping")
 def _():
     # Far too sparse for any setting to rescue.
     s = ground(density=40, seed=5)
     chosen, trail = auto_pick(s, 1.5, 4, up_axis=2, verbose=False,
                               stride=0.5, thickness=0.4)
-    assert len(chosen) < 4, 'expected this scene to fail'
-    assert len(trail) < 12, f'tried {len(trail)} times; should give up sooner'
+    assert len(chosen) < 4, "expected this scene to fail"
+    assert len(trail) < 12, f"tried {len(trail)} times; should give up sooner"
     note = describe_trail(trail, 4, 1.5)
-    assert 'not a tiling exemplar' in note, \
-        f'failure was not stated plainly:\n{note}'
+    assert "not a tiling exemplar" in note, \
+        f"failure was not stated plainly:\n{note}"
 
 
-@test('module state survives a failed search')
+@test("module state survives a failed search")
 def _():
     # auto_pick retires exhausted filters; it must not do that to the
     # module-level table, or the second scene gets fewer options.
@@ -775,10 +775,10 @@ def _():
     before = list(patches.RELAXATIONS)
     auto_pick(ground(density=40, seed=5), 1.5, 4, up_axis=2, verbose=False,
               stride=0.5, thickness=0.4)
-    assert patches.RELAXATIONS == before, 'RELAXATIONS was mutated'
+    assert patches.RELAXATIONS == before, "RELAXATIONS was mutated"
 
 
-@test('separation is loosened before anything that costs quality')
+@test("separation is loosened before anything that costs quality")
 def _():
     # Plenty of viable candidates, all close together: the fix is to let
     # them sit nearer each other, not to lower the bar for what counts as
@@ -787,11 +787,11 @@ def _():
     chosen, trail = auto_pick(s, 1.2, 4, up_axis=2, verbose=False,
                               stride=0.4, thickness=0.4)
     if len(trail) > 1:
-        assert 'separation' in trail[1][0], \
-            f'first relaxation was {trail[1][0]}, not separation'
+        assert "separation" in trail[1][0], \
+            f"first relaxation was {trail[1][0]}, not separation"
 
 
-@test('the screening render agrees with the full one on what it returns')
+@test("the screening render agrees with the full one on what it returns")
 def _():
     # The search screens with a coarse render for speed and measures the
     # survivors properly. If the two disagreed, the reported coverage would
@@ -801,14 +801,14 @@ def _():
                           verbose=False, min_cover=0.5, screen_cap=1_000)
     exact = pick_patches(s, 1.5, 4, up_axis=2, stride=0.5, thickness=0.4,
                          verbose=False, min_cover=0.5, screen_cap=10 ** 9)
-    assert coarse and exact, 'no patches to compare'
+    assert coarse and exact, "no patches to compare"
     for (_, ca, _, ia), (_, cb, _, ib) in zip(coarse, exact):
-        assert abs(ia['cover'] - ib['cover']) < 0.05, \
-            (f'coverage at {ca} differs between screening and exact: '
+        assert abs(ia["cover"] - ib["cover"]) < 0.05, \
+            (f"coverage at {ca} differs between screening and exact: "
              f"{ia['cover']:.3f} vs {ib['cover']:.3f}")
 
 
-@test('every search script builds the same settings dict')
+@test("every search script builds the same settings dict")
 def _():
     # If preview and export ever searched differently, --patches indices
     # would silently point at other patches.
@@ -817,25 +817,25 @@ def _():
 
     ns = argparse.Namespace(**{k: 1 for k in SEARCH_KEYS})
     kw = search_kwargs(ns)
-    assert set(kw) == set(SEARCH_KEYS), f'got {sorted(kw)}'
+    assert set(kw) == set(SEARCH_KEYS), f"got {sorted(kw)}"
     # thickness overrides when given, since the scripts derive it from size.
-    assert search_kwargs(ns, 0.375)['thickness'] == 0.375
+    assert search_kwargs(ns, 0.375)["thickness"] == 0.375
 
 
-@test('resolved settings are written back for the preset to record')
+@test("resolved settings are written back for the preset to record")
 def _():
     import argparse
     from bozkir.patches import apply_settings
 
-    ns = argparse.Namespace(min_cover=0.8, min_separation=1.0, unrelated='x')
-    apply_settings(ns, {'min_cover': 0.6, 'min_separation': 0.5,
-                        'not_an_arg': 99})
+    ns = argparse.Namespace(min_cover=0.8, min_separation=1.0, unrelated="x")
+    apply_settings(ns, {"min_cover": 0.6, "min_separation": 0.5,
+                        "not_an_arg": 99})
     assert ns.min_cover == 0.6 and ns.min_separation == 0.5
-    assert ns.unrelated == 'x', 'clobbered an unrelated field'
-    assert not hasattr(ns, 'not_an_arg'), 'invented a field'
+    assert ns.unrelated == "x", "clobbered an unrelated field"
+    assert not hasattr(ns, "not_an_arg"), "invented a field"
 
 
-@test('the settings that produced a candidate list reproduce it exactly')
+@test("the settings that produced a candidate list reproduce it exactly")
 def _():
     # The trap this exists to close: indices from one search only mean
     # anything against another search run the same way.
@@ -845,12 +845,12 @@ def _():
     settings = trail[-1][1]
     again = pick_patches(s, 1.5, 8, up_axis=2, verbose=False, **settings)
     assert len(again) == len(chosen), \
-        f'{len(chosen)} patches became {len(again)} on replay'
+        f"{len(chosen)} patches became {len(again)} on replay"
     for (_, a, _, _), (_, b, _, _) in zip(chosen, again):
-        assert a == b, f'candidate order changed on replay: {a} vs {b}'
+        assert a == b, f"candidate order changed on replay: {a} vs {b}"
 
 
-@test('the cache key changes when the source file does')
+@test("the cache key changes when the source file does")
 def _():
     # Regression: a retrained capture saved over the same name got the same
     # key, and the old cached model was loaded silently.
@@ -860,24 +860,24 @@ def _():
     from bozkir.scene import SceneConfig
 
     cfg = SceneConfig()
-    fd, name = tempfile.mkstemp(suffix='.ply')
+    fd, name = tempfile.mkstemp(suffix=".ply")
     os.close(fd)
     try:
-        with open(name, 'wb') as f:
-            f.write(b'x' * 100)
+        with open(name, "wb") as f:
+            f.write(b"x" * 100)
         first = cfg.key(name)
         time.sleep(1.1)                  # mtime has one-second resolution
-        with open(name, 'wb') as f:
-            f.write(b'y' * 200)
+        with open(name, "wb") as f:
+            f.write(b"y" * 200)
         second = cfg.key(name)
-        assert first != second, 'same key for a different file'
+        assert first != second, "same key for a different file"
         assert cfg.key() == SceneConfig().key(), \
-            'the settings-only key stopped being stable'
+            "the settings-only key stopped being stable"
     finally:
         os.unlink(name)
 
 
-@test('a recalled search returns the same candidates in the same order')
+@test("a recalled search returns the same candidates in the same order")
 def _():
     # The whole point. If a recall differed from a search, `--patches 2`
     # would mean one patch in preview and another in export.
@@ -889,14 +889,14 @@ def _():
     with tempfile.TemporaryDirectory() as d:
         first, _, hit1 = cached_search(s, 1.5, 2, kw, cache_dir=d)
         second, _, hit2 = cached_search(s, 1.5, 2, kw, cache_dir=d)
-    assert not hit1 and hit2, f'hits were {hit1}, {hit2}'
+    assert not hit1 and hit2, f"hits were {hit1}, {hit2}"
     assert len(first) == len(second), \
-        f'{len(first)} candidates became {len(second)} on recall'
+        f"{len(first)} candidates became {len(second)} on recall"
     for (sa, ca, pa, ia), (sb, cb, pb, ib) in zip(first, second):
-        assert ca == cb, f'centre moved: {ca} vs {cb}'
-        assert abs(sa - sb) < 1e-9, f'score moved at {ca}'
-        assert len(pa) == len(pb), f'patch size moved at {ca}'
-        assert abs(ia['cover'] - ib['cover']) < 1e-9, f'cover moved at {ca}'
+        assert ca == cb, f"centre moved: {ca} vs {cb}"
+        assert abs(sa - sb) < 1e-9, f"score moved at {ca}"
+        assert len(pa) == len(pb), f"patch size moved at {ca}"
+        assert abs(ia["cover"] - ib["cover"]) < 1e-9, f"cover moved at {ca}"
 
 
 @test('a different scene does not hit another scene\'s cache')
@@ -912,14 +912,14 @@ def _():
     with tempfile.TemporaryDirectory() as d:
         ca, _, _ = cached_search(a, 1.5, 2, kw, cache_dir=d)
         cb, _, hit = cached_search(b, 1.5, 2, kw, cache_dir=d)
-    assert not hit, 'a different scene hit the cache'
+    assert not hit, "a different scene hit the cache"
     centres_a = [c for _, c, _, _ in ca]
     centres_b = [c for _, c, _, _ in cb]
     assert centres_a != centres_b or len(ca) != len(cb), \
-        'two different scenes produced identical candidates'
+        "two different scenes produced identical candidates"
 
 
-@test('changing a setting that moves candidates misses the cache')
+@test("changing a setting that moves candidates misses the cache")
 def _():
     import tempfile
     from bozkir.patches import cached_search
@@ -930,10 +930,10 @@ def _():
                                       min_cover=0.8), cache_dir=d)
         _, _, hit = cached_search(s, 1.5, 2, dict(stride=0.5, thickness=0.4,
                                                   min_cover=0.6), cache_dir=d)
-    assert not hit, 'a looser min_cover reused a stricter search'
+    assert not hit, "a looser min_cover reused a stricter search"
 
 
-@test('separation is not part of the key, since it only re-selects')
+@test("separation is not part of the key, since it only re-selects")
 def _():
     # It decides which accepted candidates are kept, not which are
     # accepted. Keeping it out of the key is what lets the sweep try
@@ -944,10 +944,10 @@ def _():
     base = dict(stride=0.5, thickness=0.4, min_cover=0.6)
     k1 = search_key(s, 1.5, 2, dict(base, min_separation=1.0))
     k2 = search_key(s, 1.5, 2, dict(base, min_separation=0.5))
-    assert k1 == k2, 'separation changed the key'
+    assert k1 == k2, "separation changed the key"
 
 
-@test('choose respects separation and count without searching')
+@test("choose respects separation and count without searching")
 def _():
     from bozkir.patches import choose
 
@@ -956,11 +956,11 @@ def _():
     assert len(wide) <= 5
     for i, (_, (x, _), _, _) in enumerate(wide):
         for _, (ox, _), _, _ in wide[i + 1:]:
-            assert abs(x - ox) >= 2.0, f'{x} and {ox} are too close'
-    assert len(choose(cands, 3, 1.0, 0.0)) == 3, 'count not respected'
+            assert abs(x - ox) >= 2.0, f"{x} and {ox} are too close"
+    assert len(choose(cands, 3, 1.0, 0.0)) == 3, "count not respected"
 
 
-@test('a corrupt cache file is ignored rather than fatal')
+@test("a corrupt cache file is ignored rather than fatal")
 def _():
     import tempfile
     from pathlib import Path as P
@@ -970,17 +970,17 @@ def _():
     kw = dict(stride=0.6, thickness=0.4, min_cover=0.6)
     with tempfile.TemporaryDirectory() as d:
         key = search_key(s, 1.5, 2, kw)
-        (P(d) / f'search_{key}.json').write_text('{not json')
+        (P(d) / f"search_{key}.json").write_text("{not json")
         cands, _, hit = cached_search(s, 1.5, 2, kw, cache_dir=d)
-    assert not hit, 'claimed a hit on a corrupt file'
-    assert cands, 'no candidates after ignoring the corrupt file'
+    assert not hit, "claimed a hit on a corrupt file"
+    assert cands, "no candidates after ignoring the corrupt file"
 
 
 # ======================================================================
 # class split
 # ======================================================================
 
-SECTION = 'class split'
+SECTION = "class split"
 
 
 
@@ -1019,14 +1019,14 @@ SCRUB = (0.22, 0.28, 0.18)
 GRAVEL = (0.45, 0.44, 0.43)
 
 
-@test('two materials split into two groups')
+@test("two materials split into two groups")
 def _():
     g = split_classes(candidates([(SAND, 8), (SCRUB, 6)]), classes=2)
-    assert len(g) == 2, f'got {len(g)} groups'
-    assert all(len(x) == 4 for x in g), f'sizes {[len(x) for x in g]}'
+    assert len(g) == 2, f"got {len(g)} groups"
+    assert all(len(x) == 4 for x in g), f"sizes {[len(x) for x in g]}"
 
 
-@test('the groups are the materials, not an arbitrary cut')
+@test("the groups are the materials, not an arbitrary cut")
 def _():
     g = split_classes(candidates([(SAND, 8), (SCRUB, 6)]), classes=2)
     means = [np.array([appearance(c[2]) for c in grp])[:, :3].mean(0)
@@ -1034,10 +1034,10 @@ def _():
     # One group pale, one dark. Which comes first does not matter.
     lum = sorted(float(m.mean()) for m in means)
     assert lum[0] < 0.35 and lum[1] > 0.55, \
-        f'group luminances {lum}, expected one dark and one pale'
+        f"group luminances {lum}, expected one dark and one pale"
 
 
-@test('members of a group look like each other')
+@test("members of a group look like each other")
 def _():
     # Each group still has to tile, so within-group similarity is the
     # property that must survive the split.
@@ -1045,33 +1045,33 @@ def _():
     for gi, grp in enumerate(g):
         f = np.array([appearance(c[2]) for c in grp])
         spread = float(np.linalg.norm(f - f.mean(0), axis=1).mean())
-        assert spread < 0.1, f'group {gi} spread {spread:.3f} is too varied'
+        assert spread < 0.1, f"group {gi} spread {spread:.3f} is too varied"
 
 
-@test('separation reports a real split as large and a fake one as small')
+@test("separation reports a real split as large and a fake one as small")
 def _():
     two = split_classes(candidates([(SAND, 8), (SCRUB, 6)]), classes=2)
     one = split_classes(candidates([(SAND, 14)]), classes=2)
     assert class_separation(two) > 5, \
-        f'a genuine two-material split scored {class_separation(two):.2f}'
+        f"a genuine two-material split scored {class_separation(two):.2f}"
     assert class_separation(one) < 3, \
-        (f'a single material split scored {class_separation(one):.2f}; '
-         'noise was mistaken for a second class')
+        (f"a single material split scored {class_separation(one):.2f}; "
+         "noise was mistaken for a second class")
 
 
-@test('three materials split three ways')
+@test("three materials split three ways")
 def _():
     g = split_classes(candidates([(SAND, 6), (SCRUB, 6), (GRAVEL, 6)]),
                       classes=3)
-    assert len(g) == 3, f'got {len(g)} groups'
+    assert len(g) == 3, f"got {len(g)} groups"
     means = sorted(float(np.array([appearance(c[2]) for c in grp])[:, :3]
                          .mean())
                    for grp in g)
     assert means[1] - means[0] > 0.05 and means[2] - means[1] > 0.05, \
-        f'three groups but not three materials: {means}'
+        f"three groups but not three materials: {means}"
 
 
-@test('the split is deterministic')
+@test("the split is deterministic")
 def _():
     # --patches indices refer to positions in this list, so a run that
     # ordered its groups differently would silently mean other patches.
@@ -1080,17 +1080,17 @@ def _():
     b = split_classes(c, classes=2)
     ca = [[x[1] for x in g] for g in a]
     cb = [[x[1] for x in g] for g in b]
-    assert ca == cb, 'two runs produced different groups'
+    assert ca == cb, "two runs produced different groups"
 
 
-@test('the largest group comes first')
+@test("the largest group comes first")
 def _():
     g = split_classes(candidates([(SAND, 12), (SCRUB, 5)]), classes=2,
                       per_class=99)
-    assert len(g[0]) >= len(g[1]), f'sizes {[len(x) for x in g]}'
+    assert len(g[0]) >= len(g[1]), f"sizes {[len(x) for x in g]}"
 
 
-@test('a group too small to tile is returned rather than padded')
+@test("a group too small to tile is returned rather than padded")
 def _():
     # A capture with one good material and a trace of another should hand
     # back the trace as it is. Padding it from the other class would make
@@ -1098,23 +1098,23 @@ def _():
     g = split_classes(candidates([(SAND, 10), (SCRUB, 2)]), classes=2,
                       per_class=4)
     small = min(g, key=len)
-    assert len(small) == 2, f'small group came back with {len(small)}'
+    assert len(small) == 2, f"small group came back with {len(small)}"
 
 
-@test('asking for one class is the old behaviour')
+@test("asking for one class is the old behaviour")
 def _():
     c = candidates([(SAND, 8)])
     assert split_classes(c, classes=1) == [c[:4]]
 
 
-@test('fewer candidates than classes does not divide by zero')
+@test("fewer candidates than classes does not divide by zero")
 def _():
     c = candidates([(SAND, 1)])
     g = split_classes(c, classes=4)
     assert len(g) == 1 and len(g[0]) == 1
 
 
-@test('a single material still selects a usable set')
+@test("a single material still selects a usable set")
 def _():
     # The common case, and it must not get worse: one material, one group,
     # four patches that look alike.
@@ -1128,10 +1128,10 @@ def _():
     s1 = float(np.linalg.norm(f1 - f1.mean(0), axis=1).mean())
     s2 = float(np.linalg.norm(f2 - f2.mean(0), axis=1).mean())
     assert s1 < s2 * 2.5, \
-        f'splitting a single material gave a worse set: {s1:.4f} vs {s2:.4f}'
+        f"splitting a single material gave a worse set: {s1:.4f} vs {s2:.4f}"
 
 
-@test('a nearly constant dimension cannot outvote the real difference')
+@test("a nearly constant dimension cannot outvote the real difference")
 def _():
     # Regression: standardising the near-constant spread dimensions blew
     # noise up to the size of the colour gap, and one dark patch of two was
@@ -1140,20 +1140,20 @@ def _():
                       per_class=99)
     small = min(g, key=len)
     assert len(small) == 2, \
-        (f'the dark group came back with {len(small)} of 2; '
-         'a near-constant feature is being amplified again')
+        (f"the dark group came back with {len(small)} of 2; "
+         "a near-constant feature is being amplified again")
     f = np.array([appearance(c[2]) for c in small])
-    assert float(f[:, :3].mean()) < 0.35, 'the small group is not the dark one'
+    assert float(f[:, :3].mean()) < 0.35, "the small group is not the dark one"
 
 
-@test('a lopsided split still finds the minority material')
+@test("a lopsided split still finds the minority material")
 def _():
     for minority in (2, 3, 5):
         g = split_classes(candidates([(SAND, 20), (SCRUB, minority)]),
                           classes=2, per_class=99)
         small = min(g, key=len)
         assert len(small) == minority, \
-            f'{minority} dark patches came back as {len(small)}'
+            f"{minority} dark patches came back as {len(small)}"
 
 
 
@@ -1161,7 +1161,7 @@ def _():
 # class-aware tile sets
 # ======================================================================
 
-SECTION = 'class tiles'
+SECTION = "class tiles"
 
 
 def _class_patch(level, n=900, seed=0):
@@ -1178,7 +1178,7 @@ def _class_patch(level, n=900, seed=0):
                   sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
 
 
-@test('every class carries the same set of edge codes')
+@test("every class carries the same set of edge codes")
 def _():
     # Every class must have every code: a cell takes its code from the
     # neighbours and its class from the terrain, independently.
@@ -1191,10 +1191,10 @@ def _():
         return sorted(tuple(int(x) for x in c) for c in codes)
 
     assert tile_codes(0.0) == tile_codes(-0.35), \
-        'two classes produced different code sets'
+        "two classes produced different code sets"
 
 
-@test('the code set covers every neighbour pair')
+@test("the code set covers every neighbour pair")
 def _():
     from bozkir.wang import build_tile_set
 
@@ -1202,12 +1202,12 @@ def _():
     v = [_class_patch(0.6, seed=10 + i) for i in range(2)]
     _, codes = build_tile_set(h, v, 1.0, up_axis=2)
     got = {tuple(int(x) for x in c) for c in codes}
-    assert len(got) == 16, f'{len(got)} distinct codes, expected 16'
+    assert len(got) == 16, f"{len(got)} distinct codes, expected 16"
     # For any already-placed left and top neighbour there is a tile.
     for w in (0, 1):
         for nn in (0, 1):
             assert any(c[3] == w and c[0] == nn for c in got), \
-                f'no tile for west={w}, north={nn}'
+                f"no tile for west={w}, north={nn}"
 
 
 
@@ -1216,20 +1216,20 @@ def _():
 # generated terrain
 # ======================================================================
 
-SECTION = 'erosion'
+SECTION = "erosion"
 
 
-@test('fractal noise is in range and varies with the seed')
+@test("fractal noise is in range and varies with the seed")
 def _():
     a = fbm((32, 32), seed=1)
     b = fbm((32, 32), seed=2)
     assert a.shape == (32, 32)
-    assert 0.0 <= a.min() and a.max() <= 1.0, f'{a.min()}..{a.max()}'
-    assert not np.allclose(a, b), 'two seeds gave the same field'
-    assert np.allclose(a, fbm((32, 32), seed=1)), 'not deterministic'
+    assert 0.0 <= a.min() and a.max() <= 1.0, f"{a.min()}..{a.max()}"
+    assert not np.allclose(a, b), "two seeds gave the same field"
+    assert np.allclose(a, fbm((32, 32), seed=1)), "not deterministic"
 
 
-@test('ridged noise has sharper crests than fractal noise')
+@test("ridged noise has sharper crests than fractal noise")
 def _():
     # Folding each octave about its midpoint turns smooth maxima into
     # creases, so the high end of the distribution is reached by fewer
@@ -1237,7 +1237,7 @@ def _():
     def creasing(a):
         # Mean curvature relative to the field's own scale. A crease is a
         # discontinuity in the first derivative, so it shows in the second.
-        p = np.pad(a, 1, mode='edge')
+        p = np.pad(a, 1, mode="edge")
         lap = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
                - 4 * a)
         return float(np.abs(lap).mean() / max(a.std(), 1e-9))
@@ -1246,10 +1246,10 @@ def _():
         f = creasing(fbm((96, 96), seed=seed))
         r = creasing(ridged((96, 96), seed=seed))
         assert r > f * 1.3, \
-            f'seed {seed}: ridged {r:.3f} is not sharper than fractal {f:.3f}'
+            f"seed {seed}: ridged {r:.3f} is not sharper than fractal {f:.3f}"
 
 
-@test('erosion cuts a drainage network into noise')
+@test("erosion cuts a drainage network into noise")
 def _():
     # The claim the module exists for. Noise has scattered sinks; a
     # landscape has a branching network, so more of it should carry
@@ -1262,10 +1262,10 @@ def _():
         return float((lf > 2.5).mean())
 
     assert network(z) > network(base) * 1.5, \
-        f'network {network(base):.3f} -> {network(z):.3f}, barely changed'
+        f"network {network(base):.3f} -> {network(z):.3f}, barely changed"
 
 
-@test('after erosion the low ground is the draining ground')
+@test("after erosion the low ground is the draining ground")
 def _():
     # A real valley is both low and wet. On noise the two are only weakly
     # related; erosion is what ties them together.
@@ -1277,10 +1277,10 @@ def _():
         return float(np.corrcoef(a.ravel(), lf.ravel())[0, 1])
 
     assert tie(z) < tie(base) - 0.05, \
-        f'height-flow correlation {tie(base):+.3f} -> {tie(z):+.3f}'
+        f"height-flow correlation {tie(base):+.3f} -> {tie(z):+.3f}"
 
 
-@test('sediment settles where the water arrives')
+@test("sediment settles where the water arrives")
 def _():
     # The map that lets the material rule read what the generator did
     # instead of inferring it from the shape afterwards.
@@ -1288,10 +1288,10 @@ def _():
     z, sed = erode(base, iterations=40)
     lf = np.log1p(flow_accumulation(z))
     corr = float(np.corrcoef(lf.ravel(), sed.ravel())[0, 1])
-    assert corr > 0.2, f'sediment barely follows drainage: {corr:+.3f}'
+    assert corr > 0.2, f"sediment barely follows drainage: {corr:+.3f}"
 
 
-@test('erosion conserves the shape of the field, not its detail')
+@test("erosion conserves the shape of the field, not its detail")
 def _():
     # It should carve, not replace: the eroded terrain must still resemble
     # what it started from at coarse scale, or the noise settings would be
@@ -1303,10 +1303,10 @@ def _():
         return a.reshape(8, 8, 8, 8).mean(axis=(1, 3)).ravel()
 
     corr = float(np.corrcoef(coarse(base), coarse(z))[0, 1])
-    assert corr > 0.9, f'erosion changed the landscape shape: {corr:.3f}'
+    assert corr > 0.9, f"erosion changed the landscape shape: {corr:.3f}"
 
 
-@test('more iterations deepen valleys without changing where they are')
+@test("more iterations deepen valleys without changing where they are")
 def _():
     base = fbm((64, 64), seed=9)
     short, _ = erode(base, iterations=10)
@@ -1314,25 +1314,25 @@ def _():
     lf_s = np.log1p(flow_accumulation(short))
     lf_l = np.log1p(flow_accumulation(long))
     agree = float(np.corrcoef(lf_s.ravel(), lf_l.ravel())[0, 1])
-    assert agree > 0.5, f'the network moved: {agree:.3f}'
+    assert agree > 0.5, f"the network moved: {agree:.3f}"
 
 
-@test('generate returns two normalised fields')
+@test("generate returns two normalised fields")
 def _():
     z, sed = generate(size=64, seed=1, iterations=20)
-    for name, a in (('height', z), ('sediment', sed)):
-        assert a.shape == (64, 64), f'{name} is {a.shape}'
+    for name, a in (("height", z), ("sediment", sed)):
+        assert a.shape == (64, 64), f"{name} is {a.shape}"
         assert abs(a.min()) < 1e-9 and abs(a.max() - 1) < 1e-9, \
-            f'{name} is not normalised: {a.min()}..{a.max()}'
+            f"{name} is not normalised: {a.min()}..{a.max()}"
 
 
-@test('a flat input does not divide by zero')
+@test("a flat input does not divide by zero")
 def _():
     z, sed = erode(np.zeros((32, 32)), iterations=5)
     assert np.isfinite(z).all() and np.isfinite(sed).all()
 
 
-@test('the generator writes what the viewer reads')
+@test("the generator writes what the viewer reads")
 def _():
     # The ladder: terrain_gen writes the same pair heightmap.py does, so
     # the renderer needs no change to use generated terrain.
@@ -1343,24 +1343,24 @@ def _():
 
     with tempfile.TemporaryDirectory() as d:
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = _tg_main(['--name', 'x', '--out', d, '--size', 64,
-                           '--iterations', 10] and
-                          ['--name', 'x', '--out', d, '--size', '64',
-                           '--iterations', '10'])
+            rc = _tg_main(["--name", "x", "--out", d, "--size", 64,
+                           "--iterations", 10] and
+                          ["--name", "x", "--out", d, "--size", "64",
+                           "--iterations", "10"])
         assert rc == 0
-        png = Path(d) / 'x.height.png'
-        side = Path(d) / 'x.height.json'
+        png = Path(d) / "x.height.png"
+        side = Path(d) / "x.height.json"
         assert png.exists() and side.exists()
         img = read_height_png(png)
-        assert img.shape == (64, 64), f'shape {img.shape}'
+        assert img.shape == (64, 64), f"shape {img.shape}"
         meta = json.loads(side.read_text())
-        assert meta['width'] == 64 and meta['height'] == 64
-        assert (Path(d) / meta['sediment']).exists(), 'sediment map missing'
+        assert meta["width"] == 64 and meta["height"] == 64
+        assert (Path(d) / meta["sediment"]).exists(), "sediment map missing"
 
 
 
 
-@test('a height grid can be rasterised from a point cloud')
+@test("a height grid can be rasterised from a point cloud")
 def _():
     # A drone survey has a DSM; a phone capture does not. Both contain the
     # ground, so the surface is read out of the points instead.
@@ -1371,13 +1371,13 @@ def _():
     z = 0.3 * (x * x + y * y) / 9 + rng.normal(0, 0.01, n)
     g = height_from_points(np.column_stack([x, y, z]), resolution=48)
     assert g.shape == (48, 48)
-    assert np.isfinite(g).all(), 'gaps left in the grid'
+    assert np.isfinite(g).all(), "gaps left in the grid"
     c = 24
     assert g[c, c] < g[c, 4], \
-        f'the bowl came out the wrong way up: {g[c, c]:.3f} vs {g[c, 4]:.3f}'
+        f"the bowl came out the wrong way up: {g[c, c]:.3f} vs {g[c, 4]:.3f}"
 
 
-@test('the ground is read under the clutter, not through it')
+@test("the ground is read under the clutter, not through it")
 def _():
     # A percentile rather than the minimum: the lowest point in a column is
     # as likely to be a floater below the surface as the surface itself,
@@ -1391,10 +1391,10 @@ def _():
     z[:40] = -5.0
     g = height_from_points(np.column_stack([x, y, z]), resolution=24)
     assert abs(float(np.median(g)) - 1.0) < 0.1, \
-        f'floaters pulled the surface to {np.median(g):.2f}'
+        f"floaters pulled the surface to {np.median(g):.2f}"
 
 
-@test('empty cells are filled rather than left as holes')
+@test("empty cells are filled rather than left as holes")
 def _():
     # A capture is a polygon; the grid is a rectangle. Gaps left as NaN
     # would poison every derivative computed from the field.
@@ -1405,13 +1405,13 @@ def _():
     x, y = r * np.cos(a), r * np.sin(a)      # a disc, so corners are empty
     z = x * 0.2
     g = height_from_points(np.column_stack([x, y, z]), resolution=32)
-    assert np.isfinite(g).all(), 'corners left unfilled'
+    assert np.isfinite(g).all(), "corners left unfilled"
     raw = height_from_points(np.column_stack([x, y, z]), resolution=32,
                              fill=False)
-    assert not np.isfinite(raw).all(), 'fill=False should leave the holes'
+    assert not np.isfinite(raw).all(), "fill=False should leave the holes"
 
 
-@test('the grid is square in world units, not stretched to the cloud')
+@test("the grid is square in world units, not stretched to the cloud")
 def _():
     # A grid stretched to the bounding box would make slope and flow depend
     # on which way the capture happened to be walked.
@@ -1426,12 +1426,12 @@ def _():
     gx = float(np.abs(np.diff(g, axis=1)).mean())
     gy = float(np.abs(np.diff(g, axis=0)).mean())
     assert 0.3 < gx / max(gy, 1e-9) < 3.0, \
-        f'axes scaled differently: {gx:.4f} across, {gy:.4f} down'
+        f"axes scaled differently: {gx:.4f} across, {gy:.4f} down"
 
 
 
 
-@test('a height field survives the round trip at 16 bits')
+@test("a height field survives the round trip at 16 bits")
 def _():
     # The encoding exists because 16-bit greyscale does not reach a browser
     # at 16 bits. This checks the replacement actually carries the precision
@@ -1441,14 +1441,14 @@ def _():
     yy, xx = np.mgrid[0:n, 0:n]
     a = np.sin(xx / 20.0) * 0.4 + yy / (n * 3.0)      # a gentle slope
     with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / 'h.png'
+        path = Path(d) / "h.png"
         norm = write_height_png(a, path)
         back = read_height_png(path)
     err = float(np.abs(back - norm).max())
-    assert err < 2.0 / 65535, f'lost precision: max error {err:.2e}'
+    assert err < 2.0 / 65535, f"lost precision: max error {err:.2e}"
 
 
-@test('the encoding carries far more than 256 levels')
+@test("the encoding carries far more than 256 levels")
 def _():
     # Eight bits is what 16-bit greyscale actually delivered to the page.
     # A gentle slope in 256 levels has flat plateaus, and flow routing
@@ -1457,14 +1457,14 @@ def _():
     n = 256
     a = np.linspace(0, 1, n * n).reshape(n, n)
     with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / 'h.png'
+        path = Path(d) / "h.png"
         write_height_png(a, path)
         back = read_height_png(path)
     levels = len(np.unique(np.round(back * 65535)))
-    assert levels > 10000, f'only {levels} distinct heights survived'
+    assert levels > 10000, f"only {levels} distinct heights survived"
 
 
-@test('reading one channel alone would have been eight bits')
+@test("reading one channel alone would have been eight bits")
 def _():
     # The point of the split, stated as a test: the red channel by itself -
     # which is all a browser gave back from a 16-bit greyscale file - holds
@@ -1473,14 +1473,14 @@ def _():
     n = 256
     a = np.linspace(0, 1, n * n).reshape(n, n)
     with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / 'h.png'
+        path = Path(d) / "h.png"
         write_height_png(a, path)
-        rgb = np.asarray(Image.open(path).convert('RGB'))
+        rgb = np.asarray(Image.open(path).convert("RGB"))
     assert len(np.unique(rgb[..., 0])) <= 256
-    assert len(np.unique(rgb[..., 1])) > 1, 'green carries nothing'
+    assert len(np.unique(rgb[..., 1])) > 1, "green carries nothing"
 
 
-@test('older greyscale height files still read')
+@test("older greyscale height files still read")
 def _():
     # Files written before the encoding changed carry no marker and were
     # 16-bit greyscale. They must still load rather than be misread as
@@ -1488,13 +1488,13 @@ def _():
     import tempfile
     a = (np.linspace(0, 1, 64 * 64).reshape(64, 64) * 65535).astype(np.uint16)
     with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / 'old.png'
+        path = Path(d) / "old.png"
         Image.fromarray(a).save(path)
         back = read_height_png(path, encoding=None)
     assert abs(float(back.max()) - 1.0) < 1e-3 and float(back.min()) < 1e-3
 
 
-@test('both writers mark the encoding in the sidecar')
+@test("both writers mark the encoding in the sidecar")
 def _():
     # The browser reads the encoding from the sidecar. A writer that
     # forgot to mark it would send packed bytes to be read as greyscale.
@@ -1505,10 +1505,10 @@ def _():
 
     with tempfile.TemporaryDirectory() as d:
         with contextlib.redirect_stdout(io.StringIO()):
-            tg(['--name', 'e', '--out', d, '--size', '48',
-                '--iterations', '5'])
-        meta = json.loads((Path(d) / 'e.height.json').read_text())
-    assert meta.get('encoding') == 'rg16', f"sidecar says {meta.get('encoding')}"
+            tg(["--name", "e", "--out", d, "--size", "48",
+                "--iterations", "5"])
+        meta = json.loads((Path(d) / "e.height.json").read_text())
+    assert meta.get("encoding") == "rg16", f"sidecar says {meta.get('encoding')}"
 
 
 
@@ -1516,7 +1516,7 @@ def _():
 # the rule, Python against the viewer
 # ======================================================================
 
-SECTION = 'rule parity'
+SECTION = "rule parity"
 
 
 def _bridge(fn, cases):
@@ -1524,8 +1524,8 @@ def _bridge(fn, cases):
     import json
     import subprocess
     here = Path(__file__).resolve().parent
-    out = subprocess.run(['node', str(here / 'bridge.mjs')],
-                         input=json.dumps({'fn': fn, 'cases': cases}),
+    out = subprocess.run(["node", str(here / "bridge.mjs")],
+                         input=json.dumps({"fn": fn, "cases": cases}),
                          capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 
@@ -1538,23 +1538,23 @@ def _rule_cases():
     cases = []
 
     def add(z, n, opts, classes=2):
-        cases.append({'z': np.asarray(z, float).ravel().tolist(), 'n': n,
-                      'classes': classes, 'opts': opts})
+        cases.append({"z": np.asarray(z, float).ravel().tolist(), "n": n,
+                      "classes": classes, "opts": opts})
 
     for seed in range(3):
         z = fbm((64, 64), seed=seed)
         add(z, 16, {})
-        add(z, 16, {'spacing': 2.5, 'balance': 0.3, 'coherence': 2,
-                    'altitude': 0.4, 'sharpness': 3})
-        add(z, 16, {'balance': 0.5, 'coherence': 1, 'altitude': 0.0})
-        add(z, 16, {'balance': 0.3,
-                    'sediment': rng.random(64 * 64).tolist()})
-    add(np.zeros((32, 32)), 8, {'balance': 0.3})    # every cell ties
+        add(z, 16, {"spacing": 2.5, "balance": 0.3, "coherence": 2,
+                    "altitude": 0.4, "sharpness": 3})
+        add(z, 16, {"balance": 0.5, "coherence": 1, "altitude": 0.0})
+        add(z, 16, {"balance": 0.3,
+                    "sediment": rng.random(64 * 64).tolist()})
+    add(np.zeros((32, 32)), 8, {"balance": 0.3})    # every cell ties
     add(np.zeros((32, 32)), 8, {})
-    add(fbm((24, 24), seed=9), 24, {'balance': 0.7})  # no oversampling
+    add(fbm((24, 24), seed=9), 24, {"balance": 0.7})  # no oversampling
     add(fbm((60, 60), seed=4), 20, {}, classes=3)
     for k, shares in ((3, [0.2, 0.5, 0.3]), (4, [0.25] * 4)):
-        add(fbm((64, 64), seed=11), 16, {'balance': shares}, classes=k)
+        add(fbm((64, 64), seed=11), 16, {"balance": shares}, classes=k)
     return cases
 
 
@@ -1562,13 +1562,13 @@ def _run_js(cases):
     import json
     import shutil
     import subprocess
-    if not shutil.which('node'):
+    if not shutil.which("node"):
         return None
     here = Path(__file__).resolve().parent
-    return _bridge('classify', cases)
+    return _bridge("classify", cases)
 
 
-@test('the Python rule picks the same class as the viewer in every cell')
+@test("the Python rule picks the same class as the viewer in every cell")
 def _():
     # The validation script and the figures measure bozkir/landform.py. If
     # it drifted from web/landform.js they would be measuring a rule nobody
@@ -1576,83 +1576,83 @@ def _():
     cases = _rule_cases()
     js = _run_js(cases)
     if js is None:
-        print('      (skipped: node not found)')
+        print("      (skipped: node not found)")
         return
     for k, (c, j) in enumerate(zip(cases, js)):
-        o = dict(c['opts'])
-        if 'sediment' in o:
-            o['sediment'] = np.array(o['sediment'])
-        p = rule.classify(np.array(c['z']), c['n'], c['classes'], **o)
-        diff = int((p['cls'] != np.array(j['cls'])).sum())
-        assert diff == 0, f'case {k}: {diff} cells differ from the viewer'
-        err = float(np.abs(p['strength'] - np.array(j['strength'])).max())
-        assert err < 1e-9, f'case {k}: strength differs by {err:.2e}'
-        bad = int((p['runner_up'] != np.array(j['runnerUp'])).sum())
-        assert bad == 0, f'case {k}: {bad} cells name a different runner-up'
-        assert p['source'] == j['source'], f'case {k}: source differs'
+        o = dict(c["opts"])
+        if "sediment" in o:
+            o["sediment"] = np.array(o["sediment"])
+        p = rule.classify(np.array(c["z"]), c["n"], c["classes"], **o)
+        diff = int((p["cls"] != np.array(j["cls"])).sum())
+        assert diff == 0, f"case {k}: {diff} cells differ from the viewer"
+        err = float(np.abs(p["strength"] - np.array(j["strength"])).max())
+        assert err < 1e-9, f"case {k}: strength differs by {err:.2e}"
+        bad = int((p["runner_up"] != np.array(j["runnerUp"])).sum())
+        assert bad == 0, f"case {k}: {bad} cells name a different runner-up"
+        assert p["source"] == j["source"], f"case {k}: source differs"
 
 
-@test('balance gives exactly the share asked for')
+@test("balance gives exactly the share asked for")
 def _():
     from bozkir.erosion import fbm
     z = fbm((96, 96), seed=3).ravel()
     for share in (0.2, 0.5, 0.8):
-        cls = rule.classify(z, 24, 2, balance=share)['cls']
+        cls = rule.classify(z, 24, 2, balance=share)["cls"]
         got = float((cls == 0).mean())
         assert abs(got - share) < 1.5 / cls.size, \
-            f'asked for {share:.0%}, got {got:.1%}'
+            f"asked for {share:.0%}, got {got:.1%}"
 
 
-@test('several classes each get the share of the grid they were given')
+@test("several classes each get the share of the grid they were given")
 def _():
     from bozkir.erosion import fbm
     z = fbm((96, 96), seed=8).ravel()
     for shares in ([0.2, 0.5, 0.3], [0.25] * 4, [0.1, 0.1, 0.4, 0.4]):
         r = rule.classify(z, 24, len(shares), balance=shares)
-        got = [float((r['cls'] == k).mean()) for k in range(len(shares))]
+        got = [float((r["cls"] == k).mean()) for k in range(len(shares))]
         for want, have in zip(shares, got):
-            assert abs(want - have) < 2.0 / r['cls'].size, \
-                f'asked {shares}, got {[round(g, 3) for g in got]}'
-        assert (r['cls'] >= 0).all(), 'a cell was left without a class'
+            assert abs(want - have) < 2.0 / r["cls"].size, \
+                f"asked {shares}, got {[round(g, 3) for g in got]}"
+        assert (r["cls"] >= 0).all(), "a cell was left without a class"
 
 
-@test('a cell placed against its preference reads as undecided')
+@test("a cell placed against its preference reads as undecided")
 def _():
     from bozkir.erosion import fbm
     z = fbm((96, 96), seed=2).ravel()
     # One class squeezed to a tenth of the grid must push cells elsewhere.
     r = rule.classify(z, 24, 3, balance=[0.1, 0.1, 0.8])
-    moved = r['strength'] == 0
-    assert moved.any(), 'no cell was displaced by the quotas'
+    moved = r["strength"] == 0
+    assert moved.any(), "no cell was displaced by the quotas"
     for i in np.flatnonzero(moved)[:20]:
-        assert r['runner_up'][i] != r['cls'][i], \
-            'a displaced cell points at the class it already has'
+        assert r["runner_up"][i] != r["cls"][i], \
+            "a displaced cell points at the class it already has"
 
 
-@test('the Python map functions match their definitions on known surfaces')
+@test("the Python map functions match their definitions on known surfaces")
 def _():
     n = 16
     j, i = np.mgrid[0:n, 0:n].astype(float)
     plane = (0.5 * i).ravel()
     s = rule.slope(plane, n)
-    assert np.allclose(s.reshape(n, n)[:, 1:-1], 0.5), 'slope of a plane'
+    assert np.allclose(s.reshape(n, n)[:, 1:-1], 0.5), "slope of a plane"
     assert np.allclose(rule.tpi(plane, n, 2).reshape(n, n)[3:-3, 3:-3], 0), \
-        'TPI of a plane is not zero in the interior'
+        "TPI of a plane is not zero in the interior"
     v = np.abs(i - n // 2).ravel()           # V-shaped valley along a column
     acc = rule.flow(v, n).reshape(n, n)
-    assert acc[:, n // 2].max() == acc.max(), 'flow did not collect in the valley'
+    assert acc[:, n // 2].max() == acc.max(), "flow did not collect in the valley"
 
 
 # ======================================================================
 # validating the rule against a survey
 # ======================================================================
 
-SECTION = 'rule validation'
+SECTION = "rule validation"
 
 from bozkir import validate as val                                # noqa: E402
 
 
-@test('validation caveats: one plane, disagreeing truths, a lucky p')
+@test("validation caveats: one plane, disagreeing truths, a lucky p")
 def _():
     # The three things found by hand on the desert survey, now said by the
     # script: none of them may fire on a clean result.
@@ -1664,14 +1664,14 @@ def _():
     assert val.plane_fit_r2(hills.ravel(), m) < 0.2
 
     def row(p, share):
-        return {'p': p, 'share': share}
-    lucky = {24: {'colour': {'rule': row(0.7, 0.18), 'drainage': row(0.02, 0.18)},
-                  'height': {'rule': row(0.9, 0.03), 'drainage': row(0.5, 0.03)}}}
+        return {"p": p, "share": share}
+    lucky = {24: {"colour": {"rule": row(0.7, 0.18), "drainage": row(0.02, 0.18)},
+                  "height": {"rule": row(0.9, 0.03), "drainage": row(0.5, 0.03)}}}
     notes = val.caveats(lucky, plane_r2=0.95)
     assert len(notes) == 3, notes
-    assert 'plane' in notes[0] and 'disagree' in notes[1] and '4 comparisons' in notes[2]
-    clean = {24: {'colour': {'rule': row(0.001, 0.2)},
-                  'height': {'rule': row(0.002, 0.25)}}}
+    assert "plane" in notes[0] and "disagree" in notes[1] and "4 comparisons" in notes[2]
+    clean = {24: {"colour": {"rule": row(0.001, 0.2)},
+                  "height": {"rule": row(0.002, 0.25)}}}
     assert val.caveats(clean, plane_r2=0.3) == []
 
 
@@ -1685,23 +1685,23 @@ def _geotiff(path, a, dx, x0=500000.0, y0=4000000.0):
     Image.fromarray(a).save(path, tiffinfo=ifd)
 
 
-@test('a GeoTIFF is placed where its tags say')
+@test("a GeoTIFF is placed where its tags say")
 def _():
     import tempfile
     a = np.arange(12, dtype=np.float32).reshape(3, 4)
     a[0, 0] = -9999
     with tempfile.TemporaryDirectory() as d:
-        _geotiff(Path(d) / 'a.tif', a, 0.5, x0=10.0, y0=20.0)
-        r = val.read_geotiff(Path(d) / 'a.tif')
-    assert not r.valid[0, 0] and r.valid[1:].all(), 'nodata not masked'
+        _geotiff(Path(d) / "a.tif", a, 0.5, x0=10.0, y0=20.0)
+        r = val.read_geotiff(Path(d) / "a.tif")
+    assert not r.valid[0, 0] and r.valid[1:].all(), "nodata not masked"
     close(r.dx, 0.5)
     row, col = r.world_to_pixel(10.25 + 0.5 * 2, 20.0 - 0.25)
-    close(float(row), 0.0, msg='row')
-    close(float(col), 2.0, msg='col')
-    close(float(val.sample_bilinear(r, 11.25, 19.75)), 2.0, msg='sample')
+    close(float(row), 0.0, msg="row")
+    close(float(col), 2.0, msg="col")
+    close(float(val.sample_bilinear(r, 11.25, 19.75)), 2.0, msg="sample")
 
 
-@test('the validation finds a planted relationship and not an absent one')
+@test("the validation finds a planted relationship and not an absent one")
 def _():
     from bozkir.erosion import fbm
     n = 16
@@ -1709,18 +1709,18 @@ def _():
     low = z.reshape(-1) < np.quantile(z, 0.3)
     frac = low.reshape(64, 64).reshape(n, 4, n, 4).mean(axis=(1, 3)).ravel()
     planted = val.evaluate(z.ravel(), frac, n, 1.0, altitude=0.8)
-    assert planted['rule']['p'] < 0.05, \
+    assert planted["rule"]["p"] < 0.05, \
         f"missed scrub planted on low ground: p {planted['rule']['p']:.3f}"
-    assert planted['rule']['kappa'] > planted['rule, flipped']['kappa']
+    assert planted["rule"]["kappa"] > planted["rule, flipped"]["kappa"]
 
     unrelated = fbm((n, n), seed=77).ravel()
     frac = (unrelated > np.quantile(unrelated, 0.7)).astype(float)
     none = val.evaluate(z.ravel(), frac, n, 1.0)
-    assert none['rule']['p'] > 0.01, \
+    assert none["rule"]["p"] > 0.01, \
         f"found a relationship that is not there: p {none['rule']['p']:.3f}"
 
 
-@test('kappa is 1 for agreement, near 0 for chance, -ish for opposition')
+@test("kappa is 1 for agreement, near 0 for chance, -ish for opposition")
 def _():
     a = np.array([1, 1, 0, 0, 1, 0, 1, 0], bool)
     close(val.kappa(a, a), 1.0)
@@ -1732,184 +1732,184 @@ def _():
 # named terrains
 # ======================================================================
 
-SECTION = 'terrain profiles'
+SECTION = "terrain profiles"
 
 from bozkir.erosion import PROFILES, generate, terrace            # noqa: E402
 
 
-@test('every named profile generates a terrain of its own character')
+@test("every named profile generates a terrain of its own character")
 def _():
     out = {}
     for name in PROFILES:
         z, sed = generate(size=96, seed=0, profile=name)
         assert z.shape == (96, 96) and sed.shape == (96, 96)
-        assert np.isfinite(z).all(), f'{name} produced non-finite heights'
-        close(float(z.min()), 0.0, 1e-9, f'{name} low')
-        close(float(z.max()), 1.0, 1e-9, f'{name} high')
+        assert np.isfinite(z).all(), f"{name} produced non-finite heights"
+        close(float(z.min()), 0.0, 1e-9, f"{name} low")
+        close(float(z.max()), 1.0, 1e-9, f"{name} high")
         gy, gx = np.gradient(z)
         out[name] = float(np.hypot(gx, gy).mean())
-    assert out['rolling'] < out['desert'], \
+    assert out["rolling"] < out["desert"], \
         f"rolling is not gentler than desert: {out}"
     # Two profiles that came out identical would be a menu of one terrain.
-    a = generate(size=96, seed=0, profile='canyon')[0]
-    b = generate(size=96, seed=0, profile='rolling')[0]
-    assert np.abs(a - b).mean() > 0.05, 'two profiles produced the same ground'
+    a = generate(size=96, seed=0, profile="canyon")[0]
+    b = generate(size=96, seed=0, profile="rolling")[0]
+    assert np.abs(a - b).mean() > 0.05, "two profiles produced the same ground"
 
 
-@test('terracing makes flats with steps between them')
+@test("terracing makes flats with steps between them")
 def _():
     ramp = np.linspace(0, 1, 200)[None, :].repeat(8, 0)
     t = terrace(ramp, 5)
-    assert t.min() >= 0 and t.max() <= 1, 'terracing left 0..1'
+    assert t.min() >= 0 and t.max() <= 1, "terracing left 0..1"
     # A ramp has one slope everywhere; a terraced ramp has flats and risers,
     # so the spread of its slopes has to be wider.
     assert np.diff(t, axis=1).std() > np.diff(ramp, axis=1).std() * 5, \
-        'terracing did not flatten anything'
+        "terracing did not flatten anything"
     close(float(terrace(ramp, 1, sharpness=0).mean()),
-          float(ramp.mean()), 0.06, msg='one step should barely change a ramp')
+          float(ramp.mean()), 0.06, msg="one step should barely change a ramp")
 
 
-@test('an unknown profile says so instead of silently generating something')
+@test("an unknown profile says so instead of silently generating something")
 def _():
     try:
-        generate(size=32, profile='alps')
+        generate(size=32, profile="alps")
     except ValueError as e:
-        assert 'alps' in str(e) and 'canyon' in str(e), \
-            'the error should name what was asked for and what exists'
+        assert "alps" in str(e) and "canyon" in str(e), \
+            "the error should name what was asked for and what exists"
     else:
-        assert False, 'an unknown profile was accepted'
+        assert False, "an unknown profile was accepted"
 
 
 # ======================================================================
 # what the viewer can load
 # ======================================================================
 
-SECTION = 'catalogue'
+SECTION = "catalogue"
 
 from bozkir.catalogue import rebuild, scan                        # noqa: E402
 
 
-@test('the catalogue lists tilesets and terrains separately')
+@test("the catalogue lists tilesets and terrains separately")
 def _():
     import json
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         f = Path(d)
-        (f / 'desert.splat').write_bytes(b'x' * 2_000_000)
-        (f / 'desert.json').write_text(json.dumps(
-            {'classes': 2, 'tile_size': 1.5, 'tiles': [{}, {}, {}]}))
-        (f / 'mesa.height.json').write_text(json.dumps(
-            {'width': 512, 'height': 512, 'source': 'generated mesa seed 3',
-             'sediment': 'mesa.sediment.png',
-             'settings': {'profile': 'mesa', 'seed': 3}}))
+        (f / "desert.splat").write_bytes(b"x" * 2_000_000)
+        (f / "desert.json").write_text(json.dumps(
+            {"classes": 2, "tile_size": 1.5, "tiles": [{}, {}, {}]}))
+        (f / "mesa.height.json").write_text(json.dumps(
+            {"width": 512, "height": 512, "source": "generated mesa seed 3",
+             "sediment": "mesa.sediment.png",
+             "settings": {"profile": "mesa", "seed": 3}}))
         index = rebuild(f, quiet=True)
 
-        assert [s['name'] for s in index['scenes']] == ['desert']
-        assert index['scenes'][0]['classes'] == 2
-        assert index['scenes'][0]['tiles'] == 3
-        close(index['scenes'][0]['megabytes'], 2.0, 0.01, msg='size')
+        assert [s["name"] for s in index["scenes"]] == ["desert"]
+        assert index["scenes"][0]["classes"] == 2
+        assert index["scenes"][0]["tiles"] == 3
+        close(index["scenes"][0]["megabytes"], 2.0, 0.01, msg="size")
 
-        assert [t['name'] for t in index['terrains']] == ['mesa']
-        assert index['terrains'][0]['profile'] == 'mesa'
-        assert index['terrains'][0]['sediment'] is True
+        assert [t["name"] for t in index["terrains"]] == ["mesa"]
+        assert index["terrains"][0]["profile"] == "mesa"
+        assert index["terrains"][0]["sediment"] is True
 
         # And it is on disk where the viewer looks for it.
-        again = json.loads((f / 'index.json').read_text())
-        assert again == index, 'the file does not match what was returned'
+        again = json.loads((f / "index.json").read_text())
+        assert again == index, "the file does not match what was returned"
 
 
-@test('a data folder with nothing in it, or broken files, still indexes')
+@test("a data folder with nothing in it, or broken files, still indexes")
 def _():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         f = Path(d)
-        assert scan(f) == {'scenes': [], 'terrains': []}
+        assert scan(f) == {"scenes": [], "terrains": []}
         # A manifest that is not valid JSON must not stop the rest.
-        (f / 'broken.splat').write_bytes(b'x')
-        (f / 'broken.json').write_text('{ not json')
+        (f / "broken.splat").write_bytes(b"x")
+        (f / "broken.json").write_text("{ not json")
         index = scan(f)
-        assert index['scenes'][0]['name'] == 'broken'
-        assert index['scenes'][0]['has_manifest'] is False
-    assert rebuild(Path(d) / 'gone', quiet=True) is None
+        assert index["scenes"][0]["name"] == "broken"
+        assert index["scenes"][0]["has_manifest"] is False
+    assert rebuild(Path(d) / "gone", quiet=True) is None
 
 
 # ======================================================================
 # the browser's terrain generator against this one
 # ======================================================================
 
-SECTION = 'terrain parity'
+SECTION = "terrain parity"
 
 
-@test('the browser generates the same terrain as Python, bit for bit')
+@test("the browser generates the same terrain as Python, bit for bit")
 def _():
     # A profile and a seed must name the same ground in Python and JS.
     import json
     import shutil
     import subprocess
-    if not shutil.which('node'):
-        print('      (skipped: node not found)')
+    if not shutil.which("node"):
+        print("      (skipped: node not found)")
         return
-    cases = [{'size': 40, 'seed': s, 'profile': p}
+    cases = [{"size": 40, "seed": s, "profile": p}
              for p in PROFILES for s in (0, 3)]
-    for c, j in zip(cases, _bridge('generate', cases)):
+    for c, j in zip(cases, _bridge("generate", cases)):
         z, sed = generate(**c)
-        dz = float(np.abs(z.ravel() - np.array(j['z'])).max())
-        ds = float(np.abs(sed.ravel() - np.array(j['sediment'])).max())
+        dz = float(np.abs(z.ravel() - np.array(j["z"])).max())
+        ds = float(np.abs(sed.ravel() - np.array(j["sediment"])).max())
         assert dz < 1e-12 and ds < 1e-12, \
             f"{c['profile']} seed {c['seed']}: height differs by {dz:.1e}, " \
             f"sediment by {ds:.1e}"
 
 
-@test('after erosion every cell drains off the map')
+@test("after erosion every cell drains off the map")
 def _():
     # Filled at the start and the end, so the drainage the material rule
     # reads is one network, not puddles.
     from bozkir.erosion import fill_depressions
-    z, _ = generate(size=64, seed=4, profile='hills')
+    z, _ = generate(size=64, seed=4, profile="hills")
     refilled = fill_depressions(z)
     lifted = float((refilled - z).max())
     rng = float(z.max() - z.min())
-    assert lifted < 1e-3 * rng, f'pits remain: filling lifted {lifted:.2e}'
+    assert lifted < 1e-3 * rng, f"pits remain: filling lifted {lifted:.2e}"
 
 
 # ======================================================================
 # fighting repetition
 # ======================================================================
 
-SECTION = 'repetition'
+SECTION = "repetition"
 
 from bozkir.wang import minimal_codes, layout as wang_layout      # noqa: E402
 from bozkir.patches import salience                              # noqa: E402
 
 
-@test('the minimal set has two tiles for every pair the layout fixes')
+@test("the minimal set has two tiles for every pair the layout fixes")
 def _():
     # Cohen et al. 2003: two choices at every step is enough to never
     # repeat. The layout here and in the viewer fixes west and south.
     from collections import Counter
     for k in (2, 3, 4):
         codes = minimal_codes(k, k)
-        assert len(codes) == 2 * k * k, f'{k} colours: {len(codes)} tiles'
-        assert len(set(codes)) == len(codes), f'{k} colours: duplicate tiles'
+        assert len(codes) == 2 * k * k, f"{k} colours: {len(codes)} tiles"
+        assert len(set(codes)) == len(codes), f"{k} colours: duplicate tiles"
         per_pair = Counter((c[3], c[2]) for c in codes)
         assert set(per_pair.values()) == {2} and len(per_pair) == k * k, \
-            f'{k} colours: some (west, south) pair has {per_pair}'
+            f"{k} colours: some (west, south) pair has {per_pair}"
         # Every colour equally often on the free sides, or the tiling leans.
         for side in (0, 1):
             use = Counter(c[side] for c in codes)
             assert len(set(use.values())) == 1, \
-                f'{k} colours: side {side} is unbalanced {dict(use)}'
+                f"{k} colours: side {side} is unbalanced {dict(use)}"
 
 
-@test('a layout over the minimal set always matches and never repeats a row')
+@test("a layout over the minimal set always matches and never repeats a row")
 def _():
     codes = minimal_codes(3, 3)
     g = wang_layout(codes, 40, 40, seed=7)
     c = np.asarray(codes)
-    assert (c[g[:, 1:], 3] == c[g[:, :-1], 1]).all(), 'west/east mismatch'
-    assert (c[g[1:, :], 2] == c[g[:-1, :], 0]).all(), 'south/north mismatch'
+    assert (c[g[:, 1:], 3] == c[g[:, :-1], 1]).all(), "west/east mismatch"
+    assert (c[g[1:, :], 2] == c[g[:-1, :], 0]).all(), "south/north mismatch"
     rows = {tuple(r) for r in g}
-    assert len(rows) == len(g), 'two rows came out identical'
+    assert len(rows) == len(g), "two rows came out identical"
 
 
 def _flat_patch(spot, seed=0, n=20000):
@@ -1926,15 +1926,15 @@ def _flat_patch(spot, seed=0, n=20000):
                   sh_degree=0)
 
 
-@test('salience tells a landmark from texture')
+@test("salience tells a landmark from texture")
 def _():
     plain = [salience(_flat_patch(False, s), 1.0) for s in range(3)]
     spot = [salience(_flat_patch(True, s), 1.0) for s in range(3)]
-    assert max(plain) < 4, f'plain texture read as a landmark: {plain}'
-    assert min(spot) > 20, f'a bright spot went unnoticed: {spot}'
+    assert max(plain) < 4, f"plain texture read as a landmark: {plain}"
+    assert min(spot) > 20, f"a bright spot went unnoticed: {spot}"
 
 
-@test('scrub and mixed ground are texture, not landmarks')
+@test("scrub and mixed ground are texture, not landmarks")
 def _():
     # The first version of salience flagged every patch of the rarer
     # material: bushes on sand put a third of the cells far from the
@@ -1960,27 +1960,27 @@ def _():
     assert bush.mean() > 0.2
     s_scrub = salience(patch(rgb), 1.0)
     s_half = salience(patch(half), 1.0)
-    assert s_scrub < 4, f'scrub texture read as a landmark: {s_scrub:.1f}'
-    assert s_half < 4, f'a material boundary read as a landmark: {s_half:.1f}'
+    assert s_scrub < 4, f"scrub texture read as a landmark: {s_scrub:.1f}"
+    assert s_half < 4, f"a material boundary read as a landmark: {s_half:.1f}"
 
 
-@test('a landmark costs a patch its place in the ranking')
+@test("a landmark costs a patch its place in the ranking")
 def _():
     from bozkir.patches import score_patch
     a, ia = score_patch(_flat_patch(False, 1), 2, 1.0)
     b, ib = score_patch(_flat_patch(True, 1), 2, 1.0)
-    assert 'salience' in ia and 'salience' in ib
-    assert b < a / 3, f'landmark patch scored {b:.3g} against {a:.3g}'
+    assert "salience" in ia and "salience" in ib
+    assert b < a / 3, f"landmark patch scored {b:.3g} against {a:.3g}"
 
 
 # ======================================================================
 # honest defaults: what every new capture runs into
 # ======================================================================
 
-SECTION = 'capture checks'
+SECTION = "capture checks"
 
 
-@test('a capture with material standing on it reads the right way up')
+@test("a capture with material standing on it reads the right way up")
 def _():
     from bozkir.scene import upness, UPSIDE_DOWN_BELOW
 
@@ -1996,24 +1996,24 @@ def _():
     up = upness(s, 2)
     s.xyz = s.xyz * np.array([1, 1, -1])
     down = upness(s, 2)
-    assert up > 1.5, f'right way up read {up:.2f}'
-    assert down < UPSIDE_DOWN_BELOW, f'upside down read {down:.2f}'
+    assert up > 1.5, f"right way up read {up:.2f}"
+    assert down < UPSIDE_DOWN_BELOW, f"upside down read {down:.2f}"
 
 
 def _script(name):
     import importlib.util
-    here = Path(__file__).resolve().parents[1] / 'scripts' / f'{name}.py'
-    spec = importlib.util.spec_from_file_location(f'_s_{name}', here)
+    here = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_s_{name}", here)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-@test('overlapping patches in a class are reported, separate ones are not')
+@test("overlapping patches in a class are reported, separate ones are not")
 def _():
     import contextlib
     import io
-    ew = _script('export_wang')
+    ew = _script("export_wang")
 
     def said(chosen):
         buf = io.StringIO()
@@ -2022,16 +2022,16 @@ def _():
         return buf.getvalue()
     apart = [(1, (x, y), None, {}) for x in (0, 2, 4) for y in (0, 2)]
     crowded = [(1, (x, y), None, {}) for x in (0, 1.2, 2.4) for y in (0, 1.2)]
-    assert said(apart) == '', 'separate patches were reported as overlapping'
+    assert said(apart) == "", "separate patches were reported as overlapping"
     out = said(crowded)
-    assert 'share ground' in out and 'area' in out, out
+    assert "share ground" in out and "area" in out, out
 
 
 @test('a tile size far from the capture\'s scale is reported')
 def _():
     import contextlib
     import io
-    ew = _script('export_wang')
+    ew = _script("export_wang")
 
     class S:
         pass
@@ -2043,23 +2043,23 @@ def _():
         with contextlib.redirect_stdout(buf):
             ew.scale_report(s, size)
         return buf.getvalue()
-    assert said(0.027, 1.5) == '', 'a metric capture was flagged'
-    assert '--size' in said(0.0003, 1.5), 'a centimetre-scale capture passed'
-    assert '--size' in said(0.5, 1.5), 'a kilometre-scale capture passed'
+    assert said(0.027, 1.5) == "", "a metric capture was flagged"
+    assert "--size" in said(0.0003, 1.5), "a centimetre-scale capture passed"
+    assert "--size" in said(0.5, 1.5), "a kilometre-scale capture passed"
 
 
-@test('graph-cut seams are the default, and can be turned off')
+@test("graph-cut seams are the default, and can be turned off")
 def _():
     # Straight diagonals slice any distinctive feature into the same
-    # triangle in every tile; desert and bigsur both needed --cut to lose
-    # that. So it is on unless asked otherwise.
-    src = (Path(__file__).resolve().parents[1] / 'scripts' /
-           'export_wang.py').read_text()
-    assert 'BooleanOptionalAction, default=True' in src, \
-        'graph cut is not on by default'
+    # triangle in every tile; graph-cut seams lose that. So it is on
+    # unless asked otherwise.
+    src = (Path(__file__).resolve().parents[1] / "scripts" /
+           "export_wang.py").read_text()
+    assert "BooleanOptionalAction, default=True" in src, \
+        "graph cut is not on by default"
 
 
-@test('the plane index cuts exactly the same patches, faster')
+@test("the plane index cuts exactly the same patches, faster")
 def _():
     from bozkir.ply import Splats
     from bozkir.tile import PlaneIndex, extract_patch
@@ -2077,25 +2077,25 @@ def _():
         a = extract_patch(s, c, size, index=idx)
         b = extract_patch(s, c, size)
         assert len(a) == len(b) and np.array_equal(a.xyz, b.xyz), \
-            f'cut at {c} size {size} differs with the index'
+            f"cut at {c} size {size} differs with the index"
 
 
-@test('make_tileset reads the exporter the way a person would')
+@test("make_tileset reads the exporter the way a person would")
 def _():
-    mt = _script('make_tileset')
-    assert mt.verdict(0, 'wrote web/data/x.splat\n')[0] == 'good'
-    word, why = mt.verdict(0, '  ! 6 patches from a 4 x 5 area; 8 pair(s) '
-                              'share ground\nwrote x\n')
-    assert word == 'marginal' and 'share ground' in why[0]
-    word, why = mt.verdict(1, 'searching\n  only 0 patches passed, need 4.\n')
-    assert word == 'no' and any('only 0 patches' in w for w in why)
+    mt = _script("make_tileset")
+    assert mt.verdict(0, "wrote web/data/x.splat\n")[0] == "good"
+    word, why = mt.verdict(0, "  ! 6 patches from a 4 x 5 area; 8 pair(s) "
+                              "share ground\nwrote x\n")
+    assert word == "marginal" and "share ground" in why[0]
+    word, why = mt.verdict(1, "searching\n  only 0 patches passed, need 4.\n")
+    assert word == "no" and any("only 0 patches" in w for w in why)
 
 
-@test('the landmark metric ignores repeating texture but not repeating landmarks')
+@test("the landmark metric ignores repeating texture but not repeating landmarks")
 def _():
     # Brightness repetition rated the calmest desert tileset the most
     # repetitive; the eye reacts to landmarks, not grain.
-    rep = _script('repetition')
+    rep = _script("repetition")
     r = np.random.default_rng(0)
     res = 16
     texture = np.tile(r.random((res, res)) * 0.2 + 0.4, (12, 12))
@@ -2105,13 +2105,13 @@ def _():
             marked[j * res + 5:j * res + 8, i * res + 9:i * res + 12] = 0.95
     t = rep.lattice_excess(rep.landmarks(texture, res), res)[2]
     m = rep.lattice_excess(rep.landmarks(marked, res), res)[2]
-    assert t < 0.1, f'repeating texture read as landmarks: {t:.2f}'
-    assert m > 0.8, f'a repeating landmark was missed: {m:.2f}'
+    assert t < 0.1, f"repeating texture read as landmarks: {t:.2f}"
+    assert m > 0.8, f"a repeating landmark was missed: {m:.2f}"
 
 
-@test('the repetition metric finds a grid, and finds none in noise')
+@test("the repetition metric finds a grid, and finds none in noise")
 def _():
-    rep = _script('repetition')
+    rep = _script("repetition")
     r = np.random.default_rng(0)
     res = 16
     tile = r.random((res, res))
@@ -2119,15 +2119,15 @@ def _():
     noise = r.random((12 * res, 12 * res))           # nothing repeats
     _, _, grid = rep.lattice_excess(periodic, res)
     _, _, none = rep.lattice_excess(noise, res)
-    assert grid > 0.9, f'a perfectly repeating tile read {grid:.2f}'
-    assert abs(none) < 0.05, f'noise read {none:.2f}'
+    assert grid > 0.9, f"a perfectly repeating tile read {grid:.2f}"
+    assert abs(none) < 0.05, f"noise read {none:.2f}"
 
 
-@test('busyness is high for four different triangles and low for one ground')
+@test("busyness is high for four different triangles and low for one ground")
 def _():
     # The second axis the eye used on the desert tilesets: a tile whose four
     # triangles differ shows its construction as an X.
-    rep = _script('repetition')
+    rep = _script("repetition")
     r = np.random.default_rng(0)
     res = 32
     y, x = (np.mgrid[0:res, 0:res] + 0.5) / res
@@ -2136,12 +2136,12 @@ def _():
     grain = r.random((res, res))
     busy = rep.busyness(blocks + r.random((res, res)) * 0.02)
     calm = rep.busyness(grain)
-    assert busy > 0.9, f'four flat triangles read {busy:.2f}'
-    assert calm < 0.05, f'uniform grain read {calm:.2f}'
+    assert busy > 0.9, f"four flat triangles read {busy:.2f}"
+    assert calm < 0.05, f"uniform grain read {calm:.2f}"
     assert rep.busyness(np.full((res, res), 0.5)) == 0.0
 
 
-@test('a turned patch turns its splats and their orientations together')
+@test("a turned patch turns its splats and their orientations together")
 def _():
     # Rotated patches become new edge colours, so a wrong turn would show as
     # splats lying across the grain of the ground around them.
@@ -2160,16 +2160,16 @@ def _():
         T[a, a] = T[b, b] = 0.0
         T[a, b], T[b, a] = -1.0, 1.0
         t = rotate_patch(s, 1, up)
-        assert np.allclose(t.xyz, s.xyz @ T.T), f'up {up}: positions'
+        assert np.allclose(t.xyz, s.xyz @ T.T), f"up {up}: positions"
         err = np.abs(quat_to_matrix(t.rot) - T @ quat_to_matrix(s.rot)).max()
-        assert err < 1e-5, f'up {up}: orientations off by {err:.1e}'
+        assert err < 1e-5, f"up {up}: orientations off by {err:.1e}"
         four = s
         for _ in range(4):
             four = rotate_patch(four, 1, up)
-        assert np.allclose(four.xyz, s.xyz), f'up {up}: four turns'
+        assert np.allclose(four.xyz, s.xyz), f"up {up}: four turns"
 
 
-@test('purity tells a clean patch from one carrying the other material')
+@test("purity tells a clean patch from one carrying the other material")
 def _():
     from bozkir.patches import purity
     sand, scrub = [0.52, 0.47, 0.42], [0.20, 0.21, 0.16]
@@ -2185,18 +2185,18 @@ def _():
     holed.sh_dc = (rgb - 0.5) / SH_C0
     a = purity(clean, scrub, [sand])
     b = purity(holed, scrub, [sand])
-    assert a > 0.99, f'a clean patch read {a:.2f}'
-    assert 0.6 < b < 0.85, f'a patch with a sand opening read {b:.2f}'
+    assert a > 0.99, f"a clean patch read {a:.2f}"
+    assert 0.6 < b < 0.85, f"a patch with a sand opening read {b:.2f}"
 
 
 # ======================================================================
 # the scripts, end to end
 # ======================================================================
 
-SECTION = 'script smoke'
+SECTION = "script smoke"
 
 
-@test('preview_patches and export_wang run end to end on a small capture')
+@test("preview_patches and export_wang run end to end on a small capture")
 def _():
     # End to end: catches wiring breaks no unit test sees. Small, no graph
     # cut, no caches, all in a temp folder.
@@ -2219,41 +2219,75 @@ def _():
                    sh_degree=0)
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
-        save_ply(scene, d / 'flat.ply')
+        save_ply(scene, d / "flat.ply")
         env = dict(os.environ)
         runs = [
-            ['scripts/preview_patches.py', str(d / 'flat.ply'), '--no-cache',
-             '--no-search-cache', '--out', str(d / 'sheet.png')],
-            ['scripts/export_wang.py', str(d / 'flat.ply'), '--no-cut',
-             '--no-cache', '-o', str(d / 'flat.splat')],
+            ["scripts/preview_patches.py", str(d / "flat.ply"), "--no-cache",
+             "--no-search-cache", "--out", str(d / "sheet.png")],
+            ["scripts/export_wang.py", str(d / "flat.ply"), "--no-cut",
+             "--no-cache", "-o", str(d / "flat.splat")],
         ]
         outs = []
         for cmd in runs:
             p = subprocess.run([sys.executable] + cmd, cwd=root, env=env,
                                capture_output=True, text=True)
             assert p.returncode == 0, \
-                f'{cmd[0]} failed:\n{p.stdout[-600:]}\n{p.stderr[-600:]}'
+                f"{cmd[0]} failed:\n{p.stdout[-600:]}\n{p.stderr[-600:]}"
             outs.append(p.stdout)
-        assert ' sal ' in outs[0], 'the preview table lost its salience column'
-        assert (d / 'sheet.png').exists(), 'no preview sheet written'
-        m = json.loads((d / 'flat.json').read_text())
-        assert m['wang'] and len(m['tiles']) == 16, \
+        assert " sal " in outs[0], "the preview table lost its salience column"
+        assert (d / "sheet.png").exists(), "no preview sheet written"
+        m = json.loads((d / "flat.json").read_text())
+        assert m["wang"] and len(m["tiles"]) == 16, \
             f"expected 16 Wang tiles, got {len(m['tiles'])}"
-        assert (d / 'flat.splat').stat().st_size == 32 * m['total']
+        assert (d / "flat.splat").stat().st_size == 32 * m["total"]
         # And the far-field atlas bakes from what the exporter wrote.
-        p = subprocess.run([sys.executable, 'scripts/bake_atlas.py', 'flat',
-                            '--dir', str(d), '--res', '16'], cwd=root,
+        p = subprocess.run([sys.executable, "scripts/bake_atlas.py", "flat",
+                            "--dir", str(d), "--res", "16"], cwd=root,
                            env=env, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout[-400:] + p.stderr[-400:]
-        a = json.loads((d / 'flat.atlas.json').read_text())
-        assert a['count'] == 16 and a['cols'] * a['rows'] >= 16
+        a = json.loads((d / "flat.atlas.json").read_text())
+        assert a["count"] == 16 and a["cols"] * a["rows"] >= 16
         from PIL import Image as _I
-        img = np.asarray(_I.open(d / 'flat.atlas.png'))
-        assert img.shape == (a['rows'] * 16, a['cols'] * 16, 4)
-        assert img[..., 3].mean() > 100, 'atlas tiles came out empty'
+        img = np.asarray(_I.open(d / "flat.atlas.png"))
+        assert img.shape == (a["rows"] * 16, a["cols"] * 16, 4)
+        assert img[..., 3].mean() > 100, "atlas tiles came out empty"
 
 
-@test('export_wang --frames writes frames, a centre pool and an atlas of both')
+@test("export_wang runs with two materials (purity ranking on)")
+def _():
+    # Every other end-to-end run has one material, which is how a name clash
+    # in main() that crashed every two-material export went unseen.
+    import json
+    import subprocess
+    import sys
+    import tempfile
+    from bozkir.ply import Splats, SH_C0, save_ply
+    root = Path(__file__).resolve().parents[1]
+    r = np.random.default_rng(2)
+    n = 80000
+    xy = r.random((n, 2)) * 6.0 - 3.0
+    rgb = np.where((xy[:, 0] < 0)[:, None], [0.30, 0.25, 0.18], [0.70, 0.68, 0.62])
+    rgb = np.clip(rgb + r.normal(0, 0.04, (n, 3)), 0, 1)
+    scene = Splats(xyz=np.c_[xy, r.normal(0, 0.008, n)],
+                   opacity=np.full(n, 0.95),
+                   scale=np.c_[np.full((n, 2), 0.05), np.full(n, 0.008)],
+                   rot=np.tile([1.0, 0, 0, 0], (n, 1)),
+                   sh_dc=(rgb - 0.5) / SH_C0, sh_rest=np.zeros((n, 0, 3)),
+                   sh_degree=0)
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        save_ply(scene, d / "two.ply")
+        p = subprocess.run([sys.executable, "scripts/export_wang.py", str(d / "two.ply"),
+                            "--classes", "2", "--no-cut", "--no-cache", "--no-search-cache",
+                            "-o", str(d / "two.splat")],
+                           cwd=root, capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
+        assert "purity " in p.stdout, p.stdout[-800:]
+        m = json.loads((d / "two.json").read_text())
+        assert m["classes"] == 2 and len(m["tiles"]) == 32, (m["classes"], len(m["tiles"]))
+
+
+@test("export_wang --frames writes frames, a centre pool and an atlas of both")
 def _():
     import json
     import os
@@ -2275,98 +2309,98 @@ def _():
                    sh_degree=0)
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
-        save_ply(scene, d / 'fr.ply')
-        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'fr.ply'),
-                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
-                            '--level-tone', '-o', str(d / 'fr.splat')],
+        save_ply(scene, d / "fr.ply")
+        p = subprocess.run([sys.executable, "scripts/export_wang.py", str(d / "fr.ply"),
+                            "--no-cut", "--no-cache", "--no-search-cache", "--frames",
+                            "--level-tone", "-o", str(d / "fr.splat")],
                            cwd=root, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
-        assert 'turns: ' in p.stdout and 'quiet edges: ' in p.stdout, p.stdout[-800:]
-        m, s = read_splat(d / 'fr.splat', d / 'fr.json')
-        f, cs = m['frames'], m['centres']
-        assert cs and len(f['turns']) == m['classes'], f
+        assert "turns: " in p.stdout and "quiet edges: " in p.stdout, p.stdout[-800:]
+        m, s = read_splat(d / "fr.splat", d / "fr.json")
+        f, cs = m["frames"], m["centres"]
+        assert cs and len(f["turns"]) == m["classes"], f
         rad = lambda a, c: np.hypot(*s.xyz[a:a + c, :2].T)
-        for t in m['tiles']:
-            assert rad(*t['levels'][0]).min() >= f['inner'] - 1e-6
+        for t in m["tiles"]:
+            assert rad(*t["levels"][0]).min() >= f["inner"] - 1e-6
         for c in cs:
-            assert rad(*c['levels'][0]).max() <= f['outer'] + 1e-6
-            assert c['levels'][-1][0] + c['levels'][-1][1] <= m['total']
-        p = subprocess.run([sys.executable, 'scripts/bake_atlas.py', 'fr', '--dir', str(d),
-                            '--res', '16'], cwd=root, capture_output=True, text=True)
+            assert rad(*c["levels"][0]).max() <= f["outer"] + 1e-6
+            assert c["levels"][-1][0] + c["levels"][-1][1] <= m["total"]
+        p = subprocess.run([sys.executable, "scripts/bake_atlas.py", "fr", "--dir", str(d),
+                            "--res", "16"], cwd=root, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout[-400:] + p.stderr[-400:]
-        a = json.loads((d / 'fr.atlas.json').read_text())
-        assert a['count'] == len(m['tiles']) + len(cs) and a['tiles'] == len(m['tiles'])
-        assert len(a['seen']) == a['count']
+        a = json.loads((d / "fr.atlas.json").read_text())
+        assert a["count"] == len(m["tiles"]) + len(cs) and a["tiles"] == len(m["tiles"])
+        assert len(a["seen"]) == a["count"]
         # Ripples: a turned centre would meet them out of step, so whole tiles.
         u = (xy[:, 0] * np.cos(0.5) + xy[:, 1] * np.sin(0.5)) / 0.25
         rgb = np.clip(0.5 + 0.12 * np.sin(2 * np.pi * u)[:, None]
                       + r.normal(0, 0.02, (n, 3)), 0, 1)
         scene.sh_dc = (rgb - 0.5) / SH_C0
-        save_ply(scene, d / 'rip.ply')
-        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'rip.ply'),
-                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
-                            '-o', str(d / 'rip.splat')],
+        save_ply(scene, d / "rip.ply")
+        p = subprocess.run([sys.executable, "scripts/export_wang.py", str(d / "rip.ply"),
+                            "--no-cut", "--no-cache", "--no-search-cache", "--frames",
+                            "-o", str(d / "rip.splat")],
                            cwd=root, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
-        assert 'centres: no, whole tiles kept' in p.stdout, p.stdout[-1200:]
-        m, s = read_splat(d / 'rip.splat', d / 'rip.json')
-        assert m['centres'] == [] and not m['frames']['turns'][0]['any']
-        assert rad(*m['tiles'][0]['levels'][0]).min() < m['frames']['inner']
+        assert "centres: no, whole tiles kept" in p.stdout, p.stdout[-1200:]
+        m, s = read_splat(d / "rip.splat", d / "rip.json")
+        assert m["centres"] == [] and not m["frames"]["turns"][0]["any"]
+        assert rad(*m["tiles"][0]["levels"][0]).min() < m["frames"]["inner"]
         # desert13's way: patches on their edges, large rounded-square centres.
-        p = subprocess.run([sys.executable, 'scripts/export_wang.py', str(d / 'fr.ply'),
-                            '--no-cut', '--no-cache', '--no-search-cache', '--frames',
-                            '--diamonds', '--centre-shape', '6', '--centre-size', '0',
-                            '--pool-share', '0.5', '-o', str(d / 'sq.splat')],
+        p = subprocess.run([sys.executable, "scripts/export_wang.py", str(d / "fr.ply"),
+                            "--no-cut", "--no-cache", "--no-search-cache", "--frames",
+                            "--diamonds", "--centre-shape", "6", "--centre-size", "0",
+                            "--pool-share", "0.5", "-o", str(d / "sq.splat")],
                            cwd=root, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout[-800:] + p.stderr[-800:]
-        assert 'rounded squares' in p.stdout and 'quarter turns' in p.stdout, p.stdout[-1200:]
-        m, s = read_splat(d / 'sq.splat', d / 'sq.json')
-        f, cs = m['frames'], m['centres']
-        assert cs and f['shape'] == 6 and f['outer'] <= 0.44 * m['size'] + 1e-6, f
+        assert "rounded squares" in p.stdout and "quarter turns" in p.stdout, p.stdout[-1200:]
+        m, s = read_splat(d / "sq.splat", d / "sq.json")
+        f, cs = m["frames"], m["centres"]
+        assert cs and f["shape"] == 6 and f["outer"] <= 0.44 * m["size"] + 1e-6, f
         sq = lambda a, c: (np.abs(s.xyz[a:a + c, :2]) ** 6).sum(1) ** (1 / 6)
-        for t in m['tiles']:
-            assert sq(*t['levels'][0]).min() >= f['inner'] - 1e-6
+        for t in m["tiles"]:
+            assert sq(*t["levels"][0]).min() >= f["inner"] - 1e-6
         for c in cs:
-            assert sq(*c['levels'][0]).max() <= f['outer'] + 1e-6
+            assert sq(*c["levels"][0]).max() <= f["outer"] + 1e-6
 
 
-SECTION = 'viewer guide'
+SECTION = "viewer guide"
 
 
-@test('docs/viewer-guide.md is what web/info.json says')
+@test("docs/viewer-guide.md is what web/info.json says")
 def _():
     # The info drawer and the guide are one text; edit the JSON, then
     # run scripts/viewer_guide.py.
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root / 'scripts'))
+    sys.path.insert(0, str(root / "scripts"))
     import viewer_guide
-    topics = json.loads((root / 'web/info.json').read_text(encoding='utf-8'))
+    topics = json.loads((root / "web/info.json").read_text(encoding="utf-8"))
     want = viewer_guide.render(topics)
-    have = (root / 'docs/viewer-guide.md').read_text(encoding='utf-8')
-    ok(have.replace('\r\n', '\n') == want,
-       'docs/viewer-guide.md is stale: run python scripts/viewer_guide.py')
+    have = (root / "docs/viewer-guide.md").read_text(encoding="utf-8")
+    ok(have.replace("\r\n", "\n") == want,
+       "docs/viewer-guide.md is stale: run python scripts/viewer_guide.py")
 
 
-@test('every info topic the page points at exists, and every link resolves')
+@test("every info topic the page points at exists, and every link resolves")
 def _():
     import re
     root = Path(__file__).resolve().parents[1]
-    topics = json.loads((root / 'web/info.json').read_text(encoding='utf-8'))
-    html = (root / 'web/index.html').read_text(encoding='utf-8')
+    topics = json.loads((root / "web/info.json").read_text(encoding="utf-8"))
+    html = (root / "web/index.html").read_text(encoding="utf-8")
     for name in re.findall(r'data-info="([^"]+)"', html):
-        ok(name in topics, f'index.html asks for info topic {name!r}, which info.json lacks')
+        ok(name in topics, f"index.html asks for info topic {name!r}, which info.json lacks")
     for k, t in topics.items():
-        ok(t.get('title') and t.get('short'), f'topic {k!r} needs a title and a short line')
-        for r in t.get('related', []):
-            ok(r in topics, f'topic {k!r} relates to missing {r!r}')
+        ok(t.get("title") and t.get("short"), f"topic {k!r} needs a title and a short line")
+        for r in t.get("related", []):
+            ok(r in topics, f"topic {k!r} relates to missing {r!r}")
 
 
 # ====================================================================== run
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     for section, name, msg in FAILURES:
-        print(f'FAIL  [{section}] {name}\n      {msg}')
+        print(f"FAIL  [{section}] {name}\n      {msg}")
     if ONLY and not PASSED and not FAILURES:
-        print(f'nothing matched {" ".join(ONLY)}')
-    print(f'\n{PASSED} passed, {len(FAILURES)} failed')
+        print(f"nothing matched {' '.join(ONLY)}")
+    print(f"\n{PASSED} passed, {len(FAILURES)} failed")
     sys.exit(1 if FAILURES else 0)

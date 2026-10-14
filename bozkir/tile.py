@@ -290,7 +290,7 @@ def haze_splats(t, size, up_axis=2):
     quartile). Training leaves them as soft fill in a canopy; from above
     they sit under the detail, from low down in front of it. On the ground
     they are the ground's cover, and stay in the fill (sparing them there
-    starved desert13's sand of hole-free patches)."""
+    starved the desert's sand of hole-free patches)."""
     if not len(t):
         return np.zeros(0, bool)
     s = np.sort(np.asarray(t.scale, np.float64), axis=1)

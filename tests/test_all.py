@@ -14,6 +14,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import bozkir.cut  # noqa: E402
+import bozkir.holes  # noqa: E402
+import bozkir.materials  # noqa: E402
+import bozkir.pick  # noqa: E402
 from bozkir.ply import Splats, quat_to_matrix, SH_C0  # noqa: E402
 from bozkir.render import (project_orthographic, rasterize,   # noqa: E402
                            render_orthographic, DILATION)
@@ -1390,9 +1394,24 @@ def test_presets_stack():
             pass
 
 
+def test_ground_is_the_published_method():
+    """The tracked file holds one method, flat, that any capture can use."""
+    from bozkir.presets import PRESETS, load_all, resolve
+    p = load_all(PRESETS)
+    assert set(p) == {"ground", "desert13"}
+    g = p["ground"]
+    assert "base" not in g and g["classes"] == "auto" and g["class_scale"] == "auto"
+    assert g["frames"] and g["level_tone"] and g["diamonds"] and g["pure_share"] > 0
+    assert g["centre_shape"] > 2 and g["centre_size"] == 0 and 0 < g["pool_share"] < 1
+    assert resolve(p, ["desert13"]) == g
+
+
 def test_desert4_is_desert3_plus_todays_flags():
-    """desert3 stays as it was, so v1 rebuilds exactly."""
-    from bozkir.presets import load_all, resolve
+    """desert3 stays as it was, so v1 rebuilds exactly. These presets live
+    in the working copy's local file; without it there is nothing to check."""
+    from bozkir.presets import LOCAL, load_all, resolve
+    if not LOCAL.exists():
+        return
     p = load_all()
     d3, d4 = resolve(p, ["desert3"]), resolve(p, ["desert4"])
     assert "base" not in d4
@@ -1422,7 +1441,7 @@ def test_desert4_is_desert3_plus_todays_flags():
     assert 1 < d10["faint_fill"] <= 6                      # gentle, under the fill's own 6
     assert d10["tone_order"] and d10["seen_shares"] and d10["decal_class"] == -1
     # ground: everything decided by the capture, one preset for any of them.
-    g = p["ground"]
+    g = p["ground11"]
     assert "base" not in g and g["class_scale"] == "auto" and g["pure_share"] > 0
     assert g["classes"] == "auto" and resolve(p, ["desert11"]) == g
     # desert12: the same, with frames and levels true to their tiles.
@@ -1430,7 +1449,7 @@ def test_desert4_is_desert3_plus_todays_flags():
     assert d12["frames"] and d12["level_tone"] and not g.get("frames")
     assert {k: v for k, v in d12.items() if k not in ("frames", "level_tone")} == g
     # desert13: edge patches on their edges, centres as large rounded squares.
-    d13 = resolve(p, ["desert13"])
+    d13 = resolve(p, ["ground"])
     assert d13["diamonds"] and d13["centre_shape"] > 2 and d13["centre_size"] == 0
     assert 0 < d13["pool_share"] < 1
     assert {k: v for k, v in d13.items()
@@ -1712,10 +1731,10 @@ def test_apart_keeps_a_materials_patches_off_shared_ground():
     # Best first: a tight cluster, then patches further out.
     cands = [(0, (x, y), None, {}) for x, y in
              [(0, 0), (0.6, 0), (0, 0.6), (3, 0), (1.2, 1.2), (0, 3), (3, 3)]]
-    got = [c[1] for c in ew.apart(cands, 4, 1.5)]
+    got = [c[1] for c in bozkir.pick.apart(cands, 4, 1.5)]
     assert got == [(0, 0), (3, 0), (0, 3), (3, 3)], got
     # Too few apart: overlapping ones fill in, best first.
-    got = [c[1] for c in ew.apart(cands[:3], 3, 1.5)]
+    got = [c[1] for c in bozkir.pick.apart(cands[:3], 3, 1.5)]
     assert got == [(0, 0), (0.6, 0), (0, 0.6)], got
 
 
@@ -1727,10 +1746,10 @@ def test_dense_first_leaves_thin_patches_out():
     spec.loader.exec_module(ew)
     sizes = [25723, 6836, 22027, 5852, 20000, 5043, 15644, 6245]   # desert6's sand
     cands = [(0, (i * 2.0, 0.0), np.zeros(n), {}) for i, n in enumerate(sizes)]
-    got = [len(c[2]) for c in ew.dense_first(cands, 3)]
+    got = [len(c[2]) for c in bozkir.pick.dense_first(cands, 3)]
     assert got == [25723, 22027, 20000, 15644], got
     # Too few dense ones: the densest thin ones fill in.
-    got = [len(c[2]) for c in ew.dense_first(cands, 6)]
+    got = [len(c[2]) for c in bozkir.pick.dense_first(cands, 6)]
     assert got == [25723, 22027, 20000, 15644, 6836, 6245], got
 
 
@@ -1788,9 +1807,9 @@ def test_apart_alike_keeps_a_material_from_mixing_dark_and_pale():
     cands = [(0, (0, 0), patch(0.20), {}), (0, (3, 0), patch(0.32), {}),
              (0, (0, 3), patch(0.14), {}), (0, (3, 3), patch(0.21), {}),
              (0, (0.5, 0), patch(0.20), {})]
-    got = [c[1] for c in ew.apart_alike(cands, 3, 1.5)]
+    got = [c[1] for c in bozkir.pick.apart_alike(cands, 3, 1.5)]
     assert got == [(0, 0), (3, 3), (0, 3)], got          # the pale one left out
-    got = [c[1] for c in ew.apart_alike(cands, 2, 1.5, apart_too=False)]
+    got = [c[1] for c in bozkir.pick.apart_alike(cands, 2, 1.5, apart_too=False)]
     assert got == [(0, 0), (0.5, 0)], got
 
 
@@ -1864,12 +1883,12 @@ def test_even_out_moves_the_tone_and_keeps_the_detail():
     ew = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ew)
     p = _flat_patch(3, [0.40, 0.36, 0.30], std=0.06)
-    q = ew.even_out(p, np.array([0.45, 0.41, 0.35]), 0.08)
-    assert np.allclose(ew.even_mean(q), [0.45, 0.41, 0.35], atol=0.01)
+    q = bozkir.cut.even_out(p, np.array([0.45, 0.41, 0.35]), 0.08)
+    assert np.allclose(bozkir.cut.even_mean(q), [0.45, 0.41, 0.35], atol=0.01)
     d = q.base_rgb - p.base_rgb
     assert np.allclose(d.std(axis=0), 0, atol=0.01), "detail changed, not only the tone"
-    far = ew.even_out(p, np.array([0.70, 0.70, 0.70]), 0.08)
-    assert np.all(ew.even_mean(far) - ew.even_mean(p) < 0.09), "moved further than allowed"
+    far = bozkir.cut.even_out(p, np.array([0.70, 0.70, 0.70]), 0.08)
+    assert np.all(bozkir.cut.even_mean(far) - bozkir.cut.even_mean(p) < 0.09), "moved further than allowed"
 
 
 def test_split_materials_is_not_led_by_a_few_markers():
@@ -1941,7 +1960,7 @@ def test_centres_come_from_ground_of_their_own():
     spot = [(1, (x, y), _flat_patch(int(x * 40 + y * 4), [0.53, 0.48, 0.43], 0.03, n=800), {})
             for x in np.arange(0, 3.01, 0.25) for y in np.arange(9, 11.41, 0.25)]
     edge = [(1, (-4.0, 0.0), _flat_patch(999, [0.53, 0.48, 0.43], 0.03, n=800), {})]
-    got = ew.pick_centres(edge, edge + spot, 18, 1.5)
+    got = bozkir.pick.pick_centres(edge, edge + spot, 18, 1.5)
     assert 2 <= len(got) < 18, len(got)
     pts = [c[1] for c in edge + got]
     for i in range(len(pts)):
@@ -1959,7 +1978,7 @@ def test_centres_keep_their_materials_colour():
     own = [bush(100 + i, 20.0 + 2.0 * i) for i in range(2)]
     brown = [(1, (40.0 + 2.0 * i, 0.0), _flat_patch(200 + i, [0.41, 0.36, 0.33], 0.03, n=900), {})
              for i in range(6)]
-    got = ew.pick_centres(edge, edge + own + brown, 18, 1.5)
+    got = bozkir.pick.pick_centres(edge, edge + own + brown, 18, 1.5)
     assert len(got) == 2 and all(c in own for c in got), [c[1] for c in got]
 
 
@@ -1998,8 +2017,8 @@ def test_holes_from_above_are_found():
     p = _flat_patch(2, [0.5, 0.45, 0.4], n=20000, half=0.75)
     keep = np.flatnonzero(np.hypot(p.xyz[:, 0] - 0.3, p.xyz[:, 1] + 0.2) > 0.2)
     holed = p.subset(keep)
-    n0 = ew.holes(whole, 1.5, 2)[0]
-    n1, area, mask = ew.holes(holed, 1.5, 2)
+    n0 = bozkir.holes.holes(whole, 1.5, 2)[0]
+    n1, area, mask = bozkir.holes.holes(holed, 1.5, 2)
     assert n0 == 0 and n1 == 1 and 300 < area < 1400, (n0, n1, area)
 
 
@@ -2013,7 +2032,7 @@ def test_patches_with_holes_are_passed_over():
             p = p.subset(np.flatnonzero(np.hypot(p.xyz[:, 0], p.xyz[:, 1]) > 0.2))
         return (1, (x, 0.0), p, {})
     cands = [cand(0, 0.0, False), cand(1, 2.0, True), cand(2, 4.0, False), cand(3, 6.0, False)]
-    got = ew.apart_alike(cands, 4, 1.5, accept=lambda c: ew.hole_free(c, 1.5, 2, 0.99))
+    got = bozkir.pick.apart_alike(cands, 4, 1.5, accept=lambda c: bozkir.holes.hole_free(c, 1.5, 2, 0.99))
     assert sorted(c[1][0] for c in got) == [0.0, 4.0, 6.0], [c[1] for c in got]
     assert cands[1][3]["holed"] and not cands[0][3]["holed"]
 
@@ -2042,7 +2061,7 @@ def test_the_ground_slab_follows_the_ground_not_the_bush():
     h = wide.xyz[:, 2]
     g = ground_level(h, 0.375)
     wide = wide.subset(np.flatnonzero((h >= g - 0.094) & (h <= g + 0.375)))
-    got = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.2, "wide": wide, "cut": 2.03})],
+    got = bozkir.cut.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.2, "wide": wide, "cut": 2.03})],
                              1, args, 2, None, s, 0.74)[0]
     assert len(got) > 0.9 * inside.sum(), (len(got), int(inside.sum()))
 
@@ -2053,7 +2072,7 @@ def test_the_rim_is_not_taken_for_bush_when_shrinking():
     ew = _export_module()
     bush = [(1, (2.0 * i, 0.0), _flat_patch(i, [0.23 + 0.01 * i, 0.25, 0.19], 0.03, n=900), {})
             for i in range(6)]
-    alike = ew.colour_alike(bush)
+    alike = bozkir.pick.colour_alike(bush)
     rim = (1, (40.0, 0.0), _flat_patch(99, [0.39, 0.34, 0.31], 0.03, n=900), {})
     more = (1, (44.0, 0.0), _flat_patch(98, [0.26, 0.27, 0.21], 0.03, n=900), {})
     assert not alike(rim) and alike(more)
@@ -2075,9 +2094,9 @@ def test_a_material_can_be_cut_larger_and_shrunk():
                sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
     args = argparse.Namespace(size=1.5, thickness=0.375, extract_margin=0.35, max_per_tile=0)
     near = lambda half: s.subset(np.flatnonzero(np.all(np.abs(xy) <= half, axis=1)))
-    plain = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(1.0125)})],
+    plain = bozkir.cut.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(1.0125)})],
                                1, args, 2)[0]
-    small = ew.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(2.025),
+    small = bozkir.cut.prepare_patches([(1.0, (0.0, 0.0), s, {"relief": 0.1, "wide": near(2.025),
                                                       "cut": 3.0})], 1, args, 2, None, s, 0.5)[0]
     reach = lambda p: float(np.abs(p.xyz[:, :2]).max())
     assert abs(reach(small) - reach(plain)) < 0.1, (reach(small), reach(plain))
@@ -2092,7 +2111,7 @@ def test_a_material_can_be_cut_larger_and_shrunk():
     wide = tilted.subset(np.flatnonzero(np.all(np.abs(xy) <= 2.025, axis=1)))
     h = wide.xyz[:, 2]
     clipped = wide.subset(np.flatnonzero((h > -0.1) & (h < 0.375)))   # a level slab's cut
-    got = ew.prepare_patches([(1.0, (0.0, 0.0), tilted, {"relief": 0.1, "wide": clipped,
+    got = bozkir.cut.prepare_patches([(1.0, (0.0, 0.0), tilted, {"relief": 0.1, "wide": clipped,
                                                          "cut": 3.0})], 1, args, 2, None,
                              tilted, 0.5)[0]
     x = got.xyz[:, 0]
@@ -2166,9 +2185,9 @@ def test_thickness_tells_a_crust_from_a_haze():
 
 def test_haze_gets_a_small_part_of_the_map_not_none():
     ew = _export_module()
-    got = ew.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.5)
+    got = bozkir.materials.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.5)
     assert abs(sum(got) - 1) < 1e-9 and 0.04 < got[2] < 0.15 and got[0] > got[1] > got[2], got
-    same = ew.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.0)
+    same = bozkir.materials.weigh_shares([0.49, 0.27, 0.24], [0.01, 0.012, 0.10], 0.0)
     assert np.allclose(same, [0.49, 0.27, 0.24])
 
 
@@ -2180,7 +2199,7 @@ def test_class_reasons_name_what_a_material_lacks():
     sand = mat([0.55, 0.51, 0.45], np.arange(0, 12, 1.6))
     twin = mat([0.56, 0.52, 0.46], np.arange(20, 32, 1.6))    # the same colour
     bush = mat([0.22, 0.25, 0.15], [40.0, 40.5, 41.0])         # one spot
-    why = ew.class_reasons([sand, twin, bush], [0.6, 0.35, 0.05], 1.5, 6, 0.1)
+    why = bozkir.materials.class_reasons([sand, twin, bush], [0.6, 0.35, 0.05], 1.5, 6, 0.1)
     assert why[0] == [] or all("colour" in w for w in why[0]), why
     assert any("colour" in w for w in why[1])
     assert any("ground" in w for w in why[2]) and any("apart" in w for w in why[2]), why
@@ -2390,11 +2409,11 @@ def test_height_order_measures_how_materials_follow_height():
     hill = 0.3 * np.sin(xy[:, 0]) * np.cos(xy[:, 1])        # hollows and crests
     low = [pos(x, y, h) for (x, y), h in zip(xy, hill) if h < 0]
     high = [pos(x, y, h) for (x, y), h in zip(xy, hill) if h >= 0]
-    assert ew.height_order([low, high]) < 0.1             # by height
+    assert bozkir.materials.height_order([low, high]) < 0.1             # by height
     mixed = [pos(x, y, h) for (x, y), h in zip(xy, hill)]
-    p = ew.height_order([mixed[::2], mixed[1::2]])
+    p = bozkir.materials.height_order([mixed[::2], mixed[1::2]])
     assert 0.35 < p < 0.65, p                               # unrelated
-    assert ew.height_order([high, low]) > 0.9               # the other way round
+    assert bozkir.materials.height_order([high, low]) > 0.9               # the other way round
 
 
 def test_a_tile_is_checked_for_holes_with_its_neighbours_edges():
@@ -2404,13 +2423,13 @@ def test_a_tile_is_checked_for_holes_with_its_neighbours_edges():
     a = _source_patch(0, 0, n=4000)
     b = _source_patch(9, 9, n=4000)
     codes = [(0, 0, 0, 0), (1, 1, 1, 1)]
-    seen = ew.with_neighbours([a, b], codes, [0, 0], 1.0, band=0.1)
+    seen = bozkir.holes.with_neighbours([a, b], codes, [0, 0], 1.0, band=0.1)
     x, y = seen[0].xyz[:, 0], seen[0].xyz[:, 1]
     assert len(seen[0]) > len(a)
     for far in (x > 0.5, x < -0.5, y > 0.5, y < -0.5):
         assert 0 < far.sum() and np.abs(np.r_[x[far], y[far]]).max() <= 0.6 + 1e-6
-    alone = ew.with_neighbours([a], [codes[0]], [0], 1.0)[0]       # its own edges match
-    assert len(ew.with_neighbours([a, b], codes, [0, 1], 1.0)[0]) == len(alone), \
+    alone = bozkir.holes.with_neighbours([a], [codes[0]], [0], 1.0)[0]       # its own edges match
+    assert len(bozkir.holes.with_neighbours([a, b], codes, [0, 1], 1.0)[0]) == len(alone), \
         "a tile of another material lent its edge"
 
 
@@ -2451,11 +2470,11 @@ def test_a_centre_is_judged_by_how_sharp_it_is_where_it_shows():
     edges = [cand(0, 1, 3000, 0.01), cand(3, 2, 3000, 0.01)]
     blurry = cand(6, 3, 3300, 0.03)
     small_cut = cand(9, 4, 2000, 0.01, half=0.66)
-    pool, _, _, why = ew.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo,
+    pool, _, _, why = bozkir.pick.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo,
                                    middles=False, by_sharpness=True)
     assert [c[1][0] for c in pool] == [9], why
     assert any("larger splats" in k and v == 1 for k, v in why.items()), why
-    pool, _, _, why = ew.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo, middles=False)
+    pool, _, _, why = bozkir.pick.pick_pool(edges, [blurry, small_cut], 5, 1.5, 1.5, geo, middles=False)
     assert 9 not in [c[1][0] for c in pool], "the old count let the small cut in"
 
 
@@ -2487,11 +2506,11 @@ def test_the_centre_pool_stays_off_the_frames():
                 cand(6.0, 0.0, 5),     # clear
                 cand(6.3, 0.0, 6),     # overlaps the one before
                 cand(0.0, 3.0, 7)]     # clear
-    pool, mids, shared, why = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo)
+    pool, mids, shared, why = bozkir.pick.pick_pool(edges, material, 10, 1.5, 1.5, geo)
     got = sorted(c[1] for c in pool)
     assert why["candidates"] == 5 and why["too close to a centre taken"] == 3, why
     assert mids == 2 and not any(shared) and got == [(0, 0), (0.0, 3.0), (3, 0), (6.0, 0.0)], got
-    pool, _, _, _ = ew.pick_pool(edges, material, 3, 1.5, 1.5, geo)
+    pool, _, _, _ = bozkir.pick.pick_pool(edges, material, 3, 1.5, 1.5, geo)
     assert len(pool) == 3
 
 
@@ -2513,10 +2532,10 @@ def test_a_short_pool_takes_ground_the_frames_share_only_when_asked():
     shares = [shared_with_frames(c[1], [e[1] for e in edges], 1.5, geo, 1.5, True)
               for c in material]
     assert shares[1] > 0.8 and shares[2] < 0.02 < shares[0] < shares[1], shares
-    pool, mids, _, why = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
+    pool, mids, _, why = bozkir.pick.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
                                  diamonds=True)
     assert mids == 0 and not pool and why["on the frames' ground"] == 3, why
-    pool, _, shared, _ = ew.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
+    pool, _, shared, _ = bozkir.pick.pick_pool(edges, material, 10, 1.5, 1.5, geo, middles=False,
                                    share=0.6, diamonds=True)
     got = [c[1] for c in pool]
     assert got == [(0.75, 1.5), (0.75, 0.0)] and shared[0] < 0.02 < shared[1] <= 0.6, shared
@@ -2535,7 +2554,7 @@ def test_quiet_edges_leave_spotted_frames_out():
             p.sh_dc = ((rgb - 0.5) / SH_C0).astype(np.float32)
         return (1.0, (x, 0.0), p, {})
     cands = [cand(2 * k, k, k < 2) for k in range(6)]        # the first two spotted
-    picked, line = ew.quiet_edges(cands[:2], cands, 2, 1.5, 0.34, 1.5)
+    picked, line = bozkir.pick.quiet_edges(cands[:2], cands, 2, 1.5, 0.34, 1.5)
     assert line.startswith("quiet edges: yes"), line
     assert all(c[1][0] >= 4 for c in picked), [c[1] for c in picked]
 

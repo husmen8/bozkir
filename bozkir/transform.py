@@ -1,6 +1,6 @@
 """Rotating a Gaussian scene, and finding its ground plane.
 
-Captures come with an arbitrary orientation (bigsur arrived at 81 degrees),
+Captures come with an arbitrary orientation (81 degrees off is not rare),
 and everything later assumes a known up. Rotating a Gaussian means turning
 both its position and its orientation; turning only positions looks
 plausible and gets every shape wrong.

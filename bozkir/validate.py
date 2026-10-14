@@ -304,9 +304,8 @@ def plane_fit_r2(z, m):
 
 def caveats(grids, plane_r2=None, alpha=0.05):
     """Caveats to read before trusting the table, as sentences. `grids` is
-    the report's {grid: {truth: {name: score}}}. The checks I first made by
-    hand on the desert survey: one slope, disagreeing truths, and one
-    small p among many comparisons."""
+    the report's {grid: {truth: {name: score}}}. Three checks: one slope,
+    disagreeing truths, and one small p among many comparisons."""
     notes = []
     # 0.8 is a judgement, not a test: past it, most of the relief is the
     # tilt, and what remains is too little to hold distinct landforms.

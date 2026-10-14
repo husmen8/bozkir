@@ -13,8 +13,8 @@ separates the images is the boundary artifact and nothing else.
 Using two copies of the SAME patch matters: identical content on both
 sides means a visible seam cannot be a content mismatch.
 
-    python scripts/experiments/seam_baseline.py data/aligned/garden.ply
-    python scripts/experiments/seam_baseline.py data/aligned/garden.ply --size 1.5 --elev 3
+    python scripts/experiments/seam_baseline.py data/aligned/scene.ply
+    python scripts/experiments/seam_baseline.py data/aligned/scene.ply --size 1.5 --elev 3
 """
 
 import argparse

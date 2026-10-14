@@ -1,5 +1,5 @@
 # Publishes web/ as the site root, so the live demo is the same page as
-# `cd web && python -m http.server`. Needs Settings > Pages > Source set to
+# `python scripts/serve.py`. Needs Settings > Pages > Source set to
 # "GitHub Actions" once.
 name: pages
 

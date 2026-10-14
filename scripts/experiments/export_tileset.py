@@ -10,8 +10,8 @@ ignoring height. Candidate regions are ranked by how much they look like
 ground - dense, flat, and not dominated by one tall object - because a
 patch containing a table leg does not tile.
 
-    python scripts/experiments/export_tileset.py data/raw/bicycle.ply --clean --size 1.2
-    python scripts/experiments/export_tileset.py data/raw/bicycle.ply --clean --tiles 8
+    python scripts/experiments/export_tileset.py data/raw/scene.ply --clean --size 1.2
+    python scripts/experiments/export_tileset.py data/raw/scene.ply --clean --tiles 8
 """
 
 import argparse

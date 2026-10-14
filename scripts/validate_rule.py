@@ -1,8 +1,7 @@
 """Score the material rule against where material really is.
 
-    python scripts/validate_rule.py C:/odm/copr/odm_dem/dtm.tif ^
-        C:/odm/copr/odm_orthophoto/odm_orthophoto.tif ^
-        --dsm C:/odm/copr/odm_dem/dsm.tif
+    python scripts/validate_rule.py <odm>/odm_dem/dtm.tif \
+        <odm>/odm_orthophoto/odm_orthophoto.tif --dsm <odm>/odm_dem/dsm.tif
 
 Runs the viewer's rule on the survey DTM and scores it against where scrub
 really grows, on grids 24, 16 and 32, with chance measured by torus shifts.

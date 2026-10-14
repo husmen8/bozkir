@@ -1,10 +1,10 @@
 """Decals for a finished tileset: distinct pieces of the capture (a shrub
 and its shadow) baked into copies of the tileset's plain tiles.
 
-    python scripts/decals.py bake web/data/desert_base -o web/data/desert_final
-    python scripts/decals.py bake web/data/desert_base --preset desert4 -o web/data/desert_final
-    python scripts/decals.py sheet web/data/desert_base
-    python scripts/bake_atlas.py desert_final
+    python scripts/decals.py bake web/data/scene_base -o web/data/scene
+    python scripts/decals.py bake web/data/scene_base --preset ground -o web/data/scene
+    python scripts/decals.py sheet web/data/scene_base
+    python scripts/bake_atlas.py scene
 
 Without --pick, bake takes the best --decals candidates itself and draws
 them to out/decals_<new name>.png to look over. `sheet` shows every
@@ -35,7 +35,7 @@ from bozkir.catalogue import rebuild as reindex  # noqa: E402
 from bozkir.pack import pack, read_splat, tile_levels  # noqa: E402
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.scene import scene_from_args  # noqa: E402
-from bozkir.tile import fill_opacity as _fill_opacity, haze_splats  # noqa: E402
+from bozkir.holes import filled  # noqa: E402
 
 
 def capture_of(manifest, override=None):
@@ -44,6 +44,8 @@ def capture_of(manifest, override=None):
     shrub's upright splats are the shrub."""
     st = manifest.get("settings", {})
     path = Path(override or st.get("path", ""))
+    if not path.is_absolute() and not path.exists():
+        path = Path(__file__).resolve().parents[1] / path
     if not path.exists():
         raise SystemExit(f"capture {path} not found; pass --capture")
     ns = SimpleNamespace(
@@ -122,13 +124,6 @@ def sheet(args, m):
           f"to choose by hand: --pick 3,7,12")
 
 
-def fill_opacity(v, size, up, fill, st):
-    """The export's fill, sparing haze when its settings did
-    (--fill-spare-haze)."""
-    return _fill_opacity(v, size, up, fill,
-                         spare=haze_splats(v, size, up) if st.get("fill_spare_haze") else None)
-
-
 def into_centres(args, m, all_splats, pieces, parts, cursor, fill, lod, compensate):
     """Frames: a decal goes into a copy of a pool centre, in its middle (the
     frames, and so the matching, are untouched). Returns (the centres with
@@ -153,7 +148,7 @@ def into_centres(args, m, all_splats, pieces, parts, cursor, fill, lod, compensa
             if fill > 0:
                 # The decal's own faint parts filled; the centre's rim as it
                 # was (a fill there would thicken it).
-                full = fill_opacity(v, size, up, fill, st)
+                full = filled(v, size, up, fill, bool(st.get("fill_spare_haze")))
                 plane = [q for q in range(3) if q != up]
                 inside = np.hypot(*v.xyz[:, plane].T) < args.decal_radius
                 v.opacity = np.where(inside, full.opacity, v.opacity).astype(np.float32)
@@ -205,11 +200,12 @@ def bake(args, m, raw):
                                args.tileset.with_suffix(".json"))
     if args.decal_class < 0:
         # The material with the largest share: shrubs stand on open ground.
-        # Class 0 was that until desert10 ordered materials by tone, and the
-        # shrubs went into the bush where nobody saw them.
+        # Not class 0: materials are ordered by tone, and a shrub placed in
+        # the bush does not show.
         sh = m.get("shares") or [1.0]
         args.decal_class = int(np.argmax(sh))
-        print(f"  decals go on class {args.decal_class}, the largest share ({sh[args.decal_class]:.0%})")
+        print(f"  decals go on class {args.decal_class}, "
+              f"the largest share ({sh[args.decal_class]:.0%})")
     fill = float(st.get("fill_opacity") or 0.0)
     lod = max(int(m.get("lod", 1)), 1)
     compensate = bool(st.get("lod_compensate", True))
@@ -243,7 +239,7 @@ def bake(args, m, raw):
             at = rng.uniform(-reach, reach, 2) if reach > 0 else (0.0, 0.0)
             v = dec.place(base, pieces[j], args.decal_radius, size, up, at=at)
             if fill > 0:
-                v = fill_opacity(v, size, up, fill, st)
+                v = filled(v, size, up, fill, bool(st.get("fill_spare_haze")))
             levels = []
             for part in tile_levels(v, lod, size, up, compensate,
                                     bool(st.get("level_tone"))):
@@ -286,7 +282,7 @@ def bake(args, m, raw):
     print(f"  then: python scripts/bake_atlas.py {out.name}")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["sheet", "bake"])
@@ -320,7 +316,7 @@ def main():
     ap.add_argument("--out-dir", type=Path, default=Path("out"),
                     help="where the images go")
     add_preset_args(ap)
-    args = apply_preset(ap)
+    args = apply_preset(ap, argv)
 
     tileset = args.tileset.with_suffix("") if args.tileset.suffix in (".splat", ".json") \
         else args.tileset

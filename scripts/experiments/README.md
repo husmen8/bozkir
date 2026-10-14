@@ -10,3 +10,5 @@ each one imports and builds its parser, so they keep working.
   separately against drawing the whole scene at once.
 - `render_view.py`, `render_ortho.py` - CPU reference renders of a PLY,
   perspective and top-down, from before the WebGL viewer.
+- `align.py` - writes a capture turned ground-up to `data/aligned/`; the
+  scripts now align on load (`bozkir/scene.py`).

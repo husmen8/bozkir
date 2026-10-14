@@ -19,6 +19,15 @@ out/
 scenes/
 downloads/
 
+# Local debugging tools.
+scripts/experiments/probe_patch.py
+scripts/experiments/to_ply.py
+
+# A working copy's own capture presets (bozkir/presets.py), and its notes
+# on captures that are not published.
+capture_presets.local.json
+docs/captures.md
+
 # Copies of tilesets taken before re-exporting, and saved patches. Local
 # safety nets, not part of the project.
 /backup/

@@ -2,8 +2,8 @@
 thumbnails (landmarks in red), with an index for each that goes straight
 into export_wang:
 
-    python scripts/preview_patches.py data/raw/desert.ply --preset desert3
-    python scripts/export_wang.py data/raw/desert.ply --preset desert3 \
+    python scripts/preview_patches.py data/raw/scene.ply --preset ground
+    python scripts/export_wang.py data/raw/scene.ply --preset ground \
         --patches 3,7,11,2
 """
 
@@ -27,8 +27,9 @@ from bozkir.patches import (appearance, apply_settings, auto_pick,  # noqa: E402
 from bozkir import presets as presets_mod  # noqa: E402
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", type=Path)
     ap.add_argument("--size", type=float, default=1.5)
     ap.add_argument("--count", type=int, default=24,
@@ -101,7 +102,7 @@ def main():
     ap.add_argument("--out", type=Path, default=Path("out"))
     add_scene_args(ap)
     add_preset_args(ap)
-    args = apply_preset(ap)
+    args = apply_preset(ap, argv)
 
     s = scene_from_args(args)
     up = args.up_axis
@@ -112,7 +113,7 @@ def main():
 
     def progress(done, total, viable):
         msg = (f"\r  {done}/{total} positions, {viable} viable"
-               f"   {100.0 * done / total:4.0f}%")
+               f"   {100.0 * done / max(total, 1):4.0f}%")
         width[0] = max(width[0], len(msg))
         sys.stdout.write(msg.ljust(width[0]))
         sys.stdout.flush()
@@ -187,7 +188,7 @@ def main():
     for (i, x, y, n, relief, tilt, cover, mean, _, rim, mid, sal) in rows:
         mark = "  <- landmark" if sal > 8 else ""
         print(f"  {i:>3} ({x:6.2f},{y:6.2f}) {n:>8,} {relief:>7.2f} "
-              f"{tilt:>5.1f}\u00b0 {rim:>6.2f} {mid:>6.2f} {cover:>6.0%} "
+              f"{tilt:>5.1f}° {rim:>6.2f} {mid:>6.2f} {cover:>6.0%} "
               f"{sal:>5.0f}  "
               f"{mean[0]:.2f} {mean[1]:.2f} {mean[2]:.2f}{mark}")
 

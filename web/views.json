@@ -2,7 +2,7 @@
   "_about": "Named viewer settings (not to be confused with the repo root's capture_presets.json, which holds capture settings for the Python pipeline). Each key is a panel control's id and the value it is set to, exactly as if the slider had been moved by hand. 'reliefscale': 'grid' means match the grid size. Keys about the preset itself: 'short' is the button's text and 'label' its tooltip; 'view' presses a camera button; 'camera' frames a shot (azimuth and elevation in degrees, distance in tiles); 'research' shows the button only in Research mode; 'chapter' makes it a story step instead of a button, with 'caption' shown over the canvas ({tiles}, {size}, {world}, {scene}, {source}, {collects}, {exposed} are filled in from the tileset). Add your own; the viewer lists whatever is here.",
   "readme": {
     "short": "balanced",
-    "label": "README settings",
+    "label": "Rule on, 24 × 24 cells.",
     "grid": 24,
     "reliefscale": "grid",
     "relief": 1.2,
@@ -12,7 +12,6 @@
     "classbalance": 0.3,
     "classsharp": 3,
     "classblend": true,
-    "blendwidth": 0.25,
     "shade": 0.4,
     "exposure": 1.0,
     "saturation": 1.0,
@@ -26,7 +25,7 @@
   },
   "vista": {
     "short": "vista",
-    "label": "wide vista, low camera",
+    "label": "40 × 40 cells, low camera, dusk sky.",
     "grid": 40,
     "reliefscale": "grid",
     "relief": 1.4,
@@ -36,7 +35,6 @@
     "classbalance": 0.35,
     "classsharp": 3,
     "classblend": true,
-    "blendwidth": 0.3,
     "shade": 0.5,
     "exposure": 1.1,
     "saturation": 1.1,
@@ -53,7 +51,7 @@
   },
   "heights": {
     "short": "by height",
-    "label": "material by height alone",
+    "label": "Material by altitude alone, no region filter.",
     "grid": 24,
     "reliefscale": "grid",
     "relief": 1.2,
@@ -71,7 +69,7 @@
   },
   "plain": {
     "short": "no rule",
-    "label": "Just the capture: no terrain, no material rule, no far field. For scenes that are not ground tiles (garden, bicycle) and for comparing against the plain splats.",
+    "label": "The capture alone: no terrain, no rule, no far field. For scenes that are not ground tiles.",
     "relief": 0,
     "classrule": false,
     "classblend": false,
@@ -81,7 +79,7 @@
   },
   "proof-on": {
     "short": "figure: rule on",
-    "label": "rule on, for the on/off figure",
+    "label": "Rule on, flat light, survey view: the on/off figure.",
     "grid": 24,
     "reliefscale": "grid",
     "relief": 1.2,
@@ -104,7 +102,7 @@
   },
   "proof-off": {
     "short": "figure: rule off",
-    "label": "rule off, the same in every other way",
+    "label": "Rule off, identical otherwise.",
     "grid": 24,
     "reliefscale": "grid",
     "relief": 1.2,
@@ -128,9 +126,10 @@
   "ch1": {
     "chapter": 1,
     "short": "capture",
-    "label": "One tile of ground, close up.",
-    "caption": "<b>1 · capture</b> One tile: {size} of {source}, rebuilt so that its four edges can meet other tiles. Everything that follows is built from {tiles} of these.",
-    "grid": 1,
+    "label": "Tiles of ground, close up, outlined.",
+    "caption": "<b>1 · capture</b> Each outlined square is one tile: {size} of {source}, rebuilt so that its four edges can meet other tiles. Everything that follows is built from {tiles} of these.",
+    "grid": 3,
+    "edges": true,
     "relief": 0,
     "classrule": false,
     "classview": false,
@@ -139,15 +138,15 @@
     "macro": 0,
     "camera": {
       "azimuth": 45,
-      "elevation": 50,
-      "distance": 1.7
+      "elevation": 55,
+      "distance": 3.4
     }
   },
   "ch2": {
     "chapter": 2,
     "short": "tiles",
     "label": "Wang tiles and their edge colours.",
-    "caption": "<b>2 · tiles</b> Wang tiles. Each edge carries a colour (the bands), and a tile may only sit next to one whose touching edge has the same colour, so any layout is seamless with no search. This part reimplements GSWT (Zeng, Ma and Sander, 2025).",
+    "caption": "<b>2 · tiles</b> Wang tiles. Each edge carries a colour (the bands); a tile sits only next to tiles whose touching edge has the same colour, and the patch for that colour is centred on the edge, so the ground continues across it with no search. This part reimplements GSWT (Zeng, Ma and Sander, 2025).",
     "grid": 5,
     "relief": 0,
     "classrule": false,
@@ -166,7 +165,7 @@
     "chapter": 3,
     "short": "world",
     "label": "The tiles laid over terrain, materials at random.",
-    "caption": "<b>3 · world</b> The same {tiles} tiles laid over generated, eroded terrain, {world} across, and the land carried on to the horizon. Here each tile's material is chosen at random: the baseline.",
+    "caption": "<b>3 · world</b> The same {tiles} tiles over generated, eroded terrain, {world} across, continued to the horizon by the far field. Each cell's material is chosen at random: the baseline.",
     "grid": 48,
     "relief": 1.2,
     "reliefscale": "grid",
@@ -189,7 +188,7 @@
     "chapter": 4,
     "short": "rule",
     "label": "The same world with materials placed by the land.",
-    "caption": "<b>4 · rule</b> Now each material is placed by the shape of the land: {collects} collects in hollows and channels, {exposed} stays on steep and convex ground. This rule is the new part. Compare with step 3, or turn on \"show the decision\" under materials.",
+    "caption": "<b>4 · rule</b> Each material placed from the terrain: {collects} collects in hollows and channels, {exposed} stays on steep, convex ground. In Hybrid GSWT this coverage is painted by hand; here it is computed. Compare with step 3, or turn on show the decision under materials.",
     "grid": 48,
     "relief": 1.2,
     "reliefscale": "grid",
@@ -206,7 +205,6 @@
     "classbalance": 0.3,
     "classsharp": 3,
     "classblend": true,
-    "blendwidth": 0.25,
     "camera": {
       "azimuth": 35,
       "elevation": 24,

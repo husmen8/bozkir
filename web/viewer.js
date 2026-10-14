@@ -11,842 +11,29 @@ import { Capture } from './capture.js';
 import { generatedField, listCached, loadHeightField, openness, roughnessMask } from './heightfield.js';
 import { Benchmark, report } from './benchmark.js';
 import { classify, sampleGrid, wanderField } from './landform.js';
-import { GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from './terrain.js';
+import { GROUPS as TERRAIN_GROUPS } from './terrain.js';
 import { starterTileset } from './starter.js';
 import { decalVariants, placeDecals } from './decals.js';
 import { groundLevel, pickCentre, pickTurn, poolsByClass, turnCosSin, cellHash,
          ringProfile, toneTerms, partnerClass, spotDraws, SPOT_WARP,
          gradedPool } from './frames.js';
-import { initUI, loadProgress, loadDone, loadFailed, updateCard, setChapters,
+import { initUI, store, loadProgress, loadDone, loadFailed, updateCard, setChapters,
          endChapters, takeView } from './ui.js';
+import { SPLAT_VERT, SPLAT_FRAG, FAR_VERT, FAR_FRAG, LINE_VERT, LINE_FRAG,
+         SKY_VERT, SKY_FRAG } from './shaders.js';
+import { glTools } from './gl.js';
+import { unpack, meanClassColours } from './splat.js';
+import { Orbit } from './camera.js';
 
-const BUILD = 'bozkir viewer 6.7 (shares per material, ragged edges)';
+const BUILD = 'bozkir viewer 1.0';
 console.log('%c' + BUILD, 'color:#c8a05a');
 
-const STRIDE = 32;        // bytes per splat in the .splat format
-const DILATION = 0.3;     // matches DILATION in bozkir/render.py
-
-// ============================================================== shaders
-
-// The ground as both vertex shaders see it: height field, detail relief and
-// the analytic fallback. Shared so splats and far field always agree.
-// Needs uField, uFieldSize, uFieldExtent, uHasField, uOpen, uHasOpen,
-// uRelief and uWave declared first.
-const TERRAIN_GLSL = `
-// Mirror into 0..m like HeightField does, so a small field repeats
-// without a cliff at the join.
-float mirrorCoord(float t, float m) {
-  if (m <= 0.0) return 0.0;
-  float p = 2.0 * m;
-  float v = mod(t, p);
-  if (v < 0.0) v += p;
-  return v <= m ? v : p - v;
-}
-
-float fieldAt(vec2 world) {
-  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
-  float scale = longEdge / max(uFieldExtent, 1e-6);
-  float u = world.x * scale + (uFieldSize.x - 1.0) * 0.5;
-  float v = (uFieldSize.y - 1.0) * 0.5 - world.y * scale;
-  u = mirrorCoord(u, uFieldSize.x - 1.0);
-  v = mirrorCoord(v, uFieldSize.y - 1.0);
-
-  ivec2 p0 = ivec2(floor(u), floor(v));
-  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
-  vec2 f = vec2(u, v) - vec2(p0);
-  float a = texelFetch(uField, ivec2(p0.x, p0.y), 0).r;
-  float b = texelFetch(uField, ivec2(p1.x, p0.y), 0).r;
-  float c = texelFetch(uField, ivec2(p0.x, p1.y), 0).r;
-  float d = texelFetch(uField, ivec2(p1.x, p1.y), 0).r;
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-// Detail relief: tile-scale creases so close ground is not a smooth curve
-// (a big world has ~2 height samples per tile and erosion rounds crests).
-// Ridged value noise on an integer hash, bit-identical to detailAt() in
-// the JS, so camera, cells, splats and far field agree.
-uniform float uDetail;       // amplitude in world units; 0 is off
-uniform float uDetailFreq;   // lattice cells per world unit
-float dHash(ivec2 c) {
-  uint h = uint(c.x) * 0x27D4EB2Du ^ uint(c.y) * 0x165667B1u;
-  h = (h ^ (h >> 15u)) * 0x85EBCA6Bu;
-  h ^= h >> 13u;
-  return float(h & 0xFFFFFFu) / 16777215.0;
-}
-float dValue(vec2 q) {
-  vec2 i = floor(q), f = q - i;
-  vec2 s = f * f * (3.0 - 2.0 * f);
-  ivec2 c = ivec2(i);
-  float a = dHash(c), b = dHash(c + ivec2(1, 0));
-  float d = dHash(c + ivec2(0, 1)), e = dHash(c + ivec2(1, 1));
-  return mix(mix(a, b, s.x), mix(d, e, s.x), s.y);
-}
-float maskAt(vec2 world) {
-  if (uHasOpen < 0.5) return 1.0;
-  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
-  float scale = longEdge / max(uFieldExtent, 1e-6);
-  float u = mirrorCoord(world.x * scale + (uFieldSize.x - 1.0) * 0.5, uFieldSize.x - 1.0);
-  float v = mirrorCoord((uFieldSize.y - 1.0) * 0.5 - world.y * scale, uFieldSize.y - 1.0);
-  ivec2 p0 = ivec2(floor(u), floor(v));
-  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
-  vec2 f = vec2(u, v) - vec2(p0);
-  float a = texelFetch(uOpen, p0, 0).g, b = texelFetch(uOpen, ivec2(p1.x, p0.y), 0).g;
-  float c = texelFetch(uOpen, ivec2(p0.x, p1.y), 0).g, d = texelFetch(uOpen, p1, 0).g;
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-float detailAt(vec2 p) {
-  if (uDetail <= 0.0) return 0.0;
-  vec2 q = p * uDetailFreq;
-  float r1 = 1.0 - abs(2.0 * dValue(q) - 1.0);
-  float r2 = 1.0 - abs(2.0 * dValue(q * 2.03 + vec2(17.3, 5.1)) - 1.0);
-  return uDetail * maskAt(p) * ((r1 * r1 + 0.5 * r2 * r2) / 1.5 - 0.5);
-}
-float terrainHeight(vec2 p) {
-  if (uRelief <= 0.0) return 0.0;
-  if (uHasField > 0.5) {
-    // Centred on zero: relief raises and lowers about the middle.
-    return uRelief * (fieldAt(p) - 0.5) * 2.0 + detailAt(p);
-  }
-  float f = 1.0 / max(uWave, 0.01);
-  return uRelief * (sin(f * p.x) * cos(f * p.y)
-    + 0.5 * sin(2.3 * f * p.x + 1.7) * cos(1.9 * f * p.y + 0.4)) + detailAt(p);
-}
-`;
-
-const SPLAT_VERT = `#version 300 es
-precision highp float;
-precision highp int;
-
-const float DILATION = ${DILATION.toFixed(4)};
-
-uniform sampler2D uData;      // RGBA32F, 3 texels per splat
-uniform sampler2D uColour;    // RGBA8,   1 texel per splat
-uniform mat3 uView;           // world -> camera, rows are the camera axes
-uniform vec3 uEye;
-// Tile centres, one per slot of a merged group (unmerged draws use slot 0).
-uniform vec2 uCellXY[8];
-
-// Per-splat class blending. Hybrid GSWT picks the class per Gaussian, which
-// is why their boundaries look organic; a per-tile choice is a staircase.
-// Near a boundary both classes are drawn and each splat survives only if a
-// fixed hash of its index falls on its class's side of the mix - stable
-// frame to frame, and repeated tiles at different mixes keep different
-// splats. uMix < 0 turns it off. The weight varies across the tile from
-// its corners (shared with the neighbours, so the boundary is continuous
-// instead of one level per tile) and is broken up by noise where the rule
-// is undecided, so the boundary wanders (height-blend terrain splatting).
-uniform float uMix;
-uniform vec4 uMixCorners;     // own-class weight at sw, se, nw, ne
-uniform float uMixNoise;      // +1 for the cell's class, -1 for the other
-// Blend by spot (spotShare, spotField in frames.js): each spot is one
-// material or another. Which, from the drawn material's field over the
-// grid around the cell (7 x 7 values at half-cell steps from -1 to 2 cells:
-// 1 inside it, 0.5 where it ties, less where another leads), read where
-// noise moves the point by up to uMixWarp cells, so boundaries wander in
-// and out of both sides; sharpened, so only a narrow strip dissolves,
-// where a splat standing above its ground keeps more of its chance (as in
-// the frames' ring). 0: splat by splat from the corners, as before (two
-// thinned layers, see-through).
-uniform float uSpots;
-uniform vec4 uMixField[13];
-uniform float uMixWarp;
-float mixField(int k) { return uMixField[k >> 2][k & 3]; }
-// Frames (bozkir/frames.py): per slot, how the patch is turned in its cell
-// (cos, sin), what it is (0 a whole tile, 1 a frame, 2 a centre) and the
-// height of its ground; and the ring where frame and centre meet.
-uniform vec2 uSlotTurn[8];
-uniform float uSlotRole[8];
-uniform float uSlotZ0[8];
-// A centre's tint, so its ground meets its frame's along the ring: seven
-// terms per slot (toneTerms in frames.js), carried in as r^k.
-uniform vec3 uSlotTone[56];
-uniform vec4 uRing;           // radius, half width, wobble (world units), shape
-uniform vec2 uProm;           // height over the ground: starts to count, counts fully
-uniform float uRelief;        // height field amplitude
-uniform float uWave;          // height field wavelength, world units
-uniform vec2 uGridRot;        // cos, sin of the grid's rotation
-uniform int uSubdiv;          // tangent frames per tile edge; 1 is GSWT,
-                              // 0 means one frame per splat
-uniform float uTileSize;
-uniform vec3 uEdgeN, uEdgeE, uEdgeS, uEdgeW;
-uniform float uEdgeMark;      // band width as a fraction of the tile; 0 is off
-uniform float uFade;          // level-of-detail cross-fade weight
-uniform vec3 uTint;
-uniform float uTintAmount;
-uniform vec3 uFogColour;
-uniform float uFogDensity;
-uniform vec2 uFocal;
-uniform vec2 uViewport;
-uniform float uGain;
-uniform float uNear;
-
-in vec2 aCorner;              // quad corner, -2..2
-// Splat index from the sorted order buffer; the top 3 bits are the cell's
-// slot in a merged group.
-in uint aIndex;
-
-out vec2 vCorner;
-out vec4 vColour;
-out float vFar;                // 0 before the far field, 1 past its start
-uniform float uFarOn;
-uniform float uFarStart;
-uniform float uFarBand;
-
-// The height field. Must match height() in the JS exactly: the rule and the
-// overlay use the JS copy, the geometry this one. (It once had only the
-// sine branch, so classes came from real drainage and were drawn on sine
-// waves.) texelFetch + manual bilinear because R32F is not filterable
-// everywhere, and so it matches heightfield.js exactly.
-uniform sampler2D uField;
-uniform vec2 uFieldSize;      // texels
-uniform float uFieldExtent;   // world units across the long edge
-uniform float uHasField;
-uniform sampler2D uOpen;      // sky openness, built from the height field
-uniform float uHasOpen;
-uniform float uShade;         // how much of it to apply
-uniform float uExposure;
-uniform float uSaturation;
-uniform float uMacro;         // variation over the land; 0 is off
-
-${TERRAIN_GLSL}
-
-// Slow brightness variation over the land, at scales of several tiles.
-// A tileset repeats at one tile; this does not, so it breaks the lattice the
-// eye picks out (landscape 'macro variation'). The same function in the far
-// field, so the hand-over keeps it. Render-time only; figures turn it off.
-float macroAt(vec2 p) {
-  vec2 w = p / uTileSize;
-  float m = 0.6 * dValue(w / 11.0 + 3.7) + 0.4 * dValue(w / 4.3 + 17.1);
-  return 1.0 + uMacro * 0.36 * (m - 0.5);
-}
-
-// Sky openness, 0 in a hollow and 1 in the open. From a texture: it needs
-// the ground around the point and does not change with the camera.
-float openAt(vec2 world) {
-  float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
-  float scale = longEdge / max(uFieldExtent, 1e-6);
-  float u = world.x * scale + (uFieldSize.x - 1.0) * 0.5;
-  float v = (uFieldSize.y - 1.0) * 0.5 - world.y * scale;
-  u = mirrorCoord(u, uFieldSize.x - 1.0);
-  v = mirrorCoord(v, uFieldSize.y - 1.0);
-  ivec2 p0 = ivec2(floor(u), floor(v));
-  ivec2 p1 = min(p0 + 1, ivec2(uFieldSize) - 1);
-  vec2 f = vec2(u, v) - vec2(p0);
-  float a = texelFetch(uOpen, ivec2(p0.x, p0.y), 0).r;
-  float b = texelFetch(uOpen, ivec2(p1.x, p0.y), 0).r;
-  float c = texelFetch(uOpen, ivec2(p0.x, p1.y), 0).r;
-  float d = texelFetch(uOpen, ivec2(p1.x, p1.y), 0).r;
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-// Surface gradient by central differences.
-vec2 terrainGrad(vec2 p) {
-  if (uRelief <= 0.0) return vec2(0.0);
-  // Step of one texel on a field, a fraction of the wavelength otherwise.
-  float e = uHasField > 0.5
-    ? max(uFieldExtent, 1e-6) / max(max(uFieldSize.x, uFieldSize.y), 2.0)
-    : max(uWave, 0.01) * 0.01;
-  // With detail on, the step must be finer than the detail's own creases.
-  if (uDetail > 0.0) e = min(e, 0.15 / max(uDetailFreq, 1e-6));
-  return vec2(
-    (terrainHeight(p + vec2(e, 0.0)) - terrainHeight(p - vec2(e, 0.0))),
-    (terrainHeight(p + vec2(0.0, e)) - terrainHeight(p - vec2(0.0, e)))
-  ) / (2.0 * e);
-}
-
-// Two frames. Positions use the orthonormal one (splats keep their ground
-// spacing); covariance uses the true Jacobian, whose tangents are longer on
-// a slope. Normalising both thinned material on steep ground by
-// sqrt(1 + |grad h|^2).
-mat3 terrainFrame(vec2 g) {
-  if (uRelief <= 0.0) return mat3(1.0);
-  vec3 a = normalize(vec3(1.0, 0.0, g.x));
-  vec3 b = normalize(vec3(0.0, 1.0, g.y));
-  return mat3(a, b, normalize(cross(a, b)));
-}
-
-mat3 terrainJacobian(vec2 g) {
-  if (uRelief <= 0.0) return mat3(1.0);
-  vec3 a = vec3(1.0, 0.0, g.x);
-  vec3 b = vec3(0.0, 1.0, g.y);
-  return mat3(a, b, normalize(cross(a, b)));
-}
-
-vec4 fetch(uint i, int slot) {
-  int t = int(i) * 3 + slot;
-  return texelFetch(uData, ivec2(t & 2047, t >> 11), 0);
-}
-
-// Distance from the cell's middle as the centre's shape measures it
-// (ringNorm in frames.js): a disc for 2 or less, the p-norm's rounded square.
-float ringNorm(vec2 l, float p) {
-  if (p <= 2.0) return length(l);
-  float m = max(abs(l.x), abs(l.y));
-  if (m <= 0.0) return 0.0;
-  vec2 u = abs(l) / m;
-  return m * pow(pow(u.x, p) + pow(u.y, p), 1.0 / p);
-}
-
-// Frames: whether a splat of a frame (role 1) or a centre (role 2) stays
-// where the two meet. The ring's line wobbles along the ground, the same
-// for both sides; across it each side's share falls off, sharpened so most
-// of the ring is one side or the other (hex-tiling's gamma). A splat
-// standing above its ground and opaque keeps more of its chance, so a tuft
-// near the line is kept whole, not cut (height-based blending). Mirrors
-// centreShare and keepChance in frames.js.
-bool keepInRing(vec4 a, uint sid, float role, float z0, vec2 cellXY) {
-  float r = ringNorm(a.xy, uRing.w);
-  float reach = uRing.y + uRing.z;
-  if (r < uRing.x - reach) return role > 1.5;
-  if (r > uRing.x + reach) return role < 1.5;
-  vec2 dir = a.xy / max(length(a.xy), 1e-6);
-  vec2 g = cellXY + uRing.x * vec2(uGridRot.x * dir.x - uGridRot.y * dir.y,
-                                   uGridRot.y * dir.x + uGridRot.x * dir.y);
-  float t = max(uTileSize, 1e-6);
-  float n = 0.65 * dValue(g / (0.23 * t)) + 0.35 * dValue(g / (0.09 * t) + 17.0) - 0.5;
-  float rho = uRing.x + 2.0 * uRing.z * n;
-  float s = clamp(0.5 - 0.5 * (r - rho) / max(uRing.y, 1e-6), 0.0, 1.0);
-  float s3 = s * s * s, o3 = (1.0 - s) * (1.0 - s) * (1.0 - s);
-  float share = s3 / max(s3 + o3, 1e-6);
-  if (role < 1.5) share = 1.0 - share;
-  float prom = clamp((a.z - z0 - uProm.x) / max(uProm.y - uProm.x, 1e-6), 0.0, 1.0)
-             * smoothstep(0.15, 0.5, a.w);
-  float keep = pow(share, 1.0 / (1.0 + 3.0 * prom));
-  uint h = (sid ^ 0x68E31DA4u) * 747796405u + 2891336453u;
-  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
-  return float((h >> 22u) ^ h) / 4294967296.0 < keep;
-}
-
-void main() {
-  uint slot = aIndex >> 29u;
-  uint sid = aIndex & 0x1FFFFFFFu;
-  int si = int(slot);
-  vec2 cellXY = uCellXY[si];
-
-  vec4 a = fetch(sid, 0);     // position.xyz, opacity
-  // A centre is turned in its cell; everything else has turn (1, 0).
-  vec2 turn = uSlotTurn[si];
-  a.xy = vec2(turn.x * a.x - turn.y * a.y, turn.y * a.x + turn.x * a.y);
-  float role = uSlotRole[si];
-  if (role > 0.5 && !keepInRing(a, sid, role, uSlotZ0[si], cellXY)) {
-    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-    return;
-  }
-  if (uMix >= 0.0) {
-    vec2 t = clamp(a.xy / max(uTileSize, 1e-6) + 0.5, 0.0, 1.0);
-    float w = mix(mix(uMixCorners.x, uMixCorners.y, t.x),
-                  mix(uMixCorners.z, uMixCorners.w, t.x), t.y);
-    vec2 g = cellXY + vec2(uGridRot.x * a.x - uGridRot.y * a.y,
-                           uGridRot.y * a.x + uGridRot.x * a.y);
-    if (uSpots > 0.5) {
-      // The same world point moves the same way from either cell.
-      float T = max(uTileSize, 1e-6);
-      // Three scales, down to a sixth of a tile, so the line is ragged.
-      vec2 d = vec2(0.55 * dValue(g / (1.1 * T)) + 0.3 * dValue(g / (0.4 * T) + 5.0)
-                      + 0.15 * dValue(g / (0.15 * T) + 9.0),
-                    0.55 * dValue(g / (1.1 * T) + 41.0) + 0.3 * dValue(g / (0.4 * T) + 77.0)
-                      + 0.15 * dValue(g / (0.15 * T) + 23.0))
-             - 0.5;
-      vec2 u = (clamp(a.xy / T + 0.5 + 2.0 * uMixWarp * d, -1.0, 2.0) + 1.0) * 2.0;
-      vec2 f0 = min(floor(u), vec2(5.0)), fr = u - f0;
-      int k = int(f0.y) * 7 + int(f0.x);
-      w = mix(mix(mixField(k), mixField(k + 1), fr.x),
-              mix(mixField(k + 7), mixField(k + 8), fr.x), fr.y);
-    } else {
-      float n = 0.65 * dValue(g * 1.3) + 0.35 * dValue(g * 3.1 + 17.0) - 0.5;
-      // Complementary for the other class: 1 - w exactly, noise and all.
-      w = clamp(w + uMixNoise * n * 4.0 * w * (1.0 - w), 0.0, 1.0);
-    }
-    // Fixed hash of the index, flat enough that the threshold means what it says.
-    uint h = sid * 747796405u + 2891336453u;
-    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
-    float r = float((h >> 22u) ^ h) / 4294967296.0;
-    if (uSpots > 0.5) {
-      float s = clamp(0.5 + (w - 0.5) * 4.0, 0.0, 1.0);
-      float s3 = s * s * s, o3 = (1.0 - s) * (1.0 - s) * (1.0 - s);
-      float prom = clamp((a.z - uSlotZ0[si] - uProm.x) / max(uProm.y - uProm.x, 1e-6), 0.0, 1.0)
-                 * smoothstep(0.15, 0.5, a.w);
-      w = pow(s3 / max(s3 + o3, 1e-6), 1.0 / (1.0 + 3.0 * prom));
-    }
-    if (r > w) {
-      // Behind the camera: cheaper than a discard, keeps the fragment
-      // shader branch-free.
-      gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-      return;
-    }
-  }
-  vec4 b = fetch(sid, 1);     // scale.xyz
-  vec4 q = fetch(sid, 2);     // rotation w,x,y,z
-
-  // GSWT Eq. 4-5 warps a whole tile by the frame at its centre, which is
-  // wrong towards the edges, so neighbours disagree along their border.
-  // uSubdiv gives each sub-cell its own frame (1 = GSWT); 0 anchors every
-  // splat at its own position, so the frame is continuous and no seam is left.
-  // Turn the tile with the grid first.
-  vec3 local = vec3(uGridRot.x * a.x - uGridRot.y * a.y,
-                    uGridRot.y * a.x + uGridRot.x * a.y,
-                    a.z);
-  mat3 spin = mat3(uGridRot.x, uGridRot.y, 0.0,
-                   -uGridRot.y, uGridRot.x, 0.0,
-                   0.0, 0.0, 1.0)
-           * mat3(turn.x, turn.y, 0.0, -turn.y, turn.x, 0.0, 0.0, 0.0, 1.0);
-
-  vec2 anchorLocal;
-  if (uSubdiv <= 0) {
-    anchorLocal = local.xy;
-  } else {
-    float sub = uTileSize / float(uSubdiv);
-    vec2 idx = clamp(floor((local.xy + uTileSize * 0.5) / sub),
-                     0.0, float(uSubdiv) - 1.0);
-    anchorLocal = (idx + 0.5) * sub - uTileSize * 0.5;
-  }
-  vec2 anchorWorld = cellXY + anchorLocal;
-
-  vec2 grad = terrainGrad(anchorWorld);
-  mat3 warp = terrainFrame(grad);
-  vec3 origin = vec3(anchorWorld, terrainHeight(anchorWorld));
-  vec3 world = origin + warp * (local - vec3(anchorLocal, 0.0));
-
-  vec3 cam = uView * (world - uEye);
-  vFar = uFarOn > 0.5 ? smoothstep(uFarStart - uFarBand, uFarStart, cam.z) : 0.0;
-  if (cam.z < uNear) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-
-  float w = q.x, x = q.y, y = q.z, z = q.w;
-  mat3 R = mat3(
-    1.0 - 2.0*(y*y + z*z), 2.0*(x*y + w*z),       2.0*(x*z - w*y),
-    2.0*(x*y - w*z),       1.0 - 2.0*(x*x + z*z), 2.0*(y*z + w*x),
-    2.0*(x*z + w*y),       2.0*(y*z - w*x),       1.0 - 2.0*(x*x + y*y)
-  );
-  // Sigma' = W Sigma W^T = (W R S)(W R S)^T.
-  mat3 M = terrainJacobian(grad) * spin * R
-         * mat3(b.x, 0.0, 0.0, 0.0, b.y, 0.0, 0.0, 0.0, b.z);
-  mat3 sigma = M * transpose(M);
-
-  // The Taylor expansion only holds near the axis: clamp to a slightly
-  // enlarged frustum first.
-  float invz = 1.0 / cam.z;
-  float limx = 1.3 * uViewport.x * 0.5 / uFocal.x;
-  float limy = 1.3 * uViewport.y * 0.5 / uFocal.y;
-  float cx = clamp(cam.x * invz, -limx, limx) * cam.z;
-  float cy = clamp(cam.y * invz, -limy, limy) * cam.z;
-
-  mat3 J = mat3(
-    uFocal.x * invz, 0.0, 0.0,
-    0.0, uFocal.y * invz, 0.0,
-    -uFocal.x * cx * invz * invz, -uFocal.y * cy * invz * invz, 0.0
-  );
-  mat3 T = J * uView;
-  mat3 c3 = T * sigma * transpose(T);
-
-  float ca = c3[0][0] + DILATION;
-  float cb = c3[1][0];
-  float cc = c3[1][1] + DILATION;
-
-  float mid = 0.5 * (ca + cc);
-  float rad = sqrt(max(mid * mid - (ca * cc - cb * cb), 0.1));
-  float l1 = mid + rad;
-  float l2 = max(mid - rad, 0.1);
-  if (l1 < 0.15) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-
-  vec2 dir = normalize(vec2(cb, l1 - ca));
-  // Axis sqrt(2*lambda) with alpha = exp(-|corner|^2): at |corner| = 1 both
-  // are at exp(-1).
-  vec2 major = min(sqrt(2.0 * l1), 1024.0) * dir * uGain;
-  vec2 minor = min(sqrt(2.0 * l2), 1024.0) * vec2(dir.y, -dir.x) * uGain;
-
-  vec2 centre = vec2(uFocal.x * cam.x * invz, uFocal.y * cam.y * invz);
-  vec2 px = centre + aCorner.x * major + aCorner.y * minor;
-
-  gl_Position = vec4(2.0 * px.x / uViewport.x,
-                     -2.0 * px.y / uViewport.y, 0.0, 1.0);
-  vCorner = aCorner;
-  int ci = int(sid);
-  vec4 col = texelFetch(uColour, ivec2(ci & 2047, ci >> 11), 0);
-  vec3 rgb = col.rgb;
-  if (role > 1.5) {
-    // The harmonic extension of the ring's tone difference (toneAt).
-    int k = si * 7;
-    float r = length(a.xy);
-    float q = clamp(ringNorm(a.xy, uRing.w) / max(uRing.x, 1e-6), 0.0, 1.0);
-    vec2 e1 = r > 1e-6 ? a.xy / r : vec2(1.0, 0.0);
-    vec2 e2 = vec2(e1.x * e1.x - e1.y * e1.y, 2.0 * e1.x * e1.y);
-    vec2 e3 = vec2(e2.x * e1.x - e2.y * e1.y, e2.x * e1.y + e2.y * e1.x);
-    vec3 off = uSlotTone[k]
-             + q * (uSlotTone[k + 1] * e1.x + uSlotTone[k + 2] * e1.y)
-             + q * q * (uSlotTone[k + 3] * e2.x + uSlotTone[k + 4] * e2.y)
-             + q * q * q * (uSlotTone[k + 5] * e3.x + uSlotTone[k + 6] * e3.y);
-    rgb = clamp(rgb + clamp(off, -0.12, 0.12), 0.0, 1.0);
-  }
-
-  if (uEdgeMark > 0.0 && uTileSize > 0.0) {
-    // Edge bands in their code colour, interior washed out, as in the GSWT
-    // figures: a correct join is one colour across the shared border.
-    vec2 uv = local.xy / uTileSize;         // tile-local, -0.5 .. 0.5
-    float d;
-    vec3 ec;
-    if (abs(uv.y) >= abs(uv.x)) {
-      d = 0.5 - abs(uv.y);
-      ec = uv.y > 0.0 ? uEdgeN : uEdgeS;
-    } else {
-      d = 0.5 - abs(uv.x);
-      ec = uv.x > 0.0 ? uEdgeE : uEdgeW;
-    }
-    // Splats past the tile's square (d < 0) stay uncoloured, or the band
-    // looks too wide and neighbours paint the same strip twice.
-    float w = d < 0.0 ? 0.0 : 1.0 - smoothstep(0.0, uEdgeMark, d);
-    float grey = dot(rgb, vec3(0.299, 0.587, 0.114));
-    rgb = mix(vec3(0.55 + 0.45 * grey), ec, w);
-  }
-  // Ground shading: only darkens where the terrain would (a hollow sees
-  // less sky). Nothing directional - the capture's light is baked in.
-  if (uHasOpen > 0.5 && uShade > 0.0) {
-    rgb *= mix(1.0, 0.45 + 0.55 * openAt(anchorWorld), uShade);
-  }
-  // .splat keeps only the constant colour term, so it reads flat and a bit
-  // washed; exposure and saturation compensate by eye.
-  if (uMacro > 0.0 && uTileSize > 0.0) rgb *= macroAt(anchorWorld);
-  rgb = clamp(rgb * uExposure, 0.0, 1.0);
-  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
-  rgb = clamp(mix(vec3(lum), rgb, uSaturation), 0.0, 1.0);
-
-  // Haze towards the horizon colour so far ground has no hard edge.
-  float fog = 1.0 - exp(-uFogDensity * max(cam.z, 0.0));
-  rgb = mix(rgb, uFogColour, fog);
-  vColour = vec4(mix(rgb, uTint, uTintAmount), col.a * uFade);
-}
-`;
-
-const SPLAT_FRAG = `#version 300 es
-precision highp float;
-in vec2 vCorner;
-in vec4 vColour;
-in float vFar;
-out vec4 oColour;
-// Screen-door threshold per pixel, shared with the far field: in the
-// hand-over band each pixel shows one or the other, never a mix.
-float doorway(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
-void main() {
-  if (vFar > 0.0 && vFar >= doorway(gl_FragCoord.xy)) discard;
-  float p = -dot(vCorner, vCorner);
-  if (p < -4.0) discard;
-  float alpha = exp(p) * vColour.a;
-  if (alpha < 0.004) discard;
-  oColour = vec4(vColour.rgb * alpha, alpha);   // premultiplied
-}
-`;
-
-// The far field: distant ground as one mesh instead of thousands of cells.
-// Past a few dozen tiles a splat is under a pixel, so beyond uFarStart the
-// ground is a height-field mesh (same terrainHeight) coloured per cell from
-// an atlas of the tiles seen from above (scripts/bake_atlas.py), with the
-// same layout and rule. Standard game terrain practice; hierarchical splat
-// LOD (Kerbl et al. 2024) solves splat count, and the limit here is draw
-// calls. Writes depth and uses a real perspective w so the atlas does not swim.
-const FAR_VERT = `#version 300 es
-precision highp float;
-uniform mat3 uView;
-uniform vec3 uEye;
-uniform vec2 uFocal;
-uniform vec2 uViewport;
-uniform float uRelief;
-uniform float uWave;
-uniform float uHasField;
-uniform sampler2D uField;
-uniform vec2 uFieldSize;
-uniform float uFieldExtent;
-in vec2 aXY;
-out vec2 vXY;
-out float vDepth;
-out float vOpen;
-uniform sampler2D uOpen;
-uniform float uHasOpen;
-${TERRAIN_GLSL}
-
-void main() {
-  vec3 world = vec3(aXY, terrainHeight(aXY));
-  vec3 cam = uView * (world - uEye);
-  vXY = aXY;
-  vDepth = cam.z;
-  // Openness read the same way as the splats, so shading matches.
-  vOpen = 1.0;
-  if (uHasOpen > 0.5) {
-    float longEdge = max(uFieldSize.x, uFieldSize.y) - 1.0;
-    float scale = longEdge / max(uFieldExtent, 1e-6);
-    float u = mirrorCoord(aXY.x * scale + (uFieldSize.x - 1.0) * 0.5, uFieldSize.x - 1.0);
-    float v = mirrorCoord((uFieldSize.y - 1.0) * 0.5 - aXY.y * scale, uFieldSize.y - 1.0);
-    vOpen = texelFetch(uOpen, ivec2(floor(u + 0.5), floor(v + 0.5)), 0).r;
-  }
-  const float n = 0.05, f = 50000.0;
-  gl_Position = vec4(2.0 * uFocal.x * cam.x / uViewport.x,
-                     -2.0 * uFocal.y * cam.y / uViewport.y,
-                     (f + n) / (f - n) * cam.z - 2.0 * f * n / (f - n),
-                     cam.z);
-}
-`;
-
-const FAR_FRAG = `#version 300 es
-precision highp float;
-uniform sampler2D uAtlas;
-uniform sampler2D uCells;       // per cell: tile index in r + 256 g
-uniform vec2 uAtlasGrid;        // columns, rows
-uniform float uTileSize;
-uniform float uGridN;
-uniform vec2 uRot;              // cos, sin of the grid angle
-uniform float uFarStart;
-uniform float uFarBand;
-uniform vec3 uFogColour;
-uniform float uFogDensity;
-uniform float uExposure;
-uniform float uShade;
-uniform float uSaturation;
-uniform int uDebug;            // 0 none, 1 tile identity, 2 class, 3 level
-uniform sampler2D uTileInfo;   // row 0 gain, row 1 mean colour, per tile
-uniform float uHasTileInfo;
-uniform vec3 uClassRGB[4];
-uniform float uMacro;
-uniform float uBlend;          // 1: dissolve material borders as near tiles do
-// Frames: per cell, its centre's atlas entry (r + 256 g) and turn (b, in
-// 256ths of a turn), a > 0 if it has one; and the ring: radius, wobble.
-uniform sampler2D uCentres;
-uniform sampler2D uCentreTone;  // per cell: the centre's mean tint, rgb 0.5 + 2 x
-uniform float uHasCentres;
-uniform vec3 uRingFar;        // radius, wobble, shape
-float ringNorm(vec2 l, float p) {      // as in the splat shader
-  if (p <= 2.0) return length(l);
-  float m = max(abs(l.x), abs(l.y));
-  if (m <= 0.0) return 0.0;
-  vec2 u = abs(l) / m;
-  return m * pow(pow(u.x, p) + pow(u.y, p), 1.0 / p);
-}
-in vec2 vXY;
-in float vDepth;
-in float vOpen;
-out vec4 oColour;
-// Same screen-door threshold as SPLAT_FRAG.
-float doorway(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
-// Same palette as tileRGB() in the JS, so a tile keeps its colour across
-// the hand-over.
-vec3 tileRGB(float i) {
-  float h = mod(i * 137.508, 360.0) / 360.0;
-  vec3 n = vec3(5.0, 3.0, 1.0);
-  vec3 v = mod(n + h * 6.0, 6.0);
-  vec3 k = clamp(min(min(v, 4.0 - v), vec3(1.0)), 0.0, 1.0);
-  return 0.30 + 0.70 * k;
-}
-// Value noise for the macro variation, on the same kind of integer hash as
-// the detail relief (a separate copy: TERRAIN_GLSL is vertex-only here).
-float mHash(ivec2 c) {
-  uint h = uint(c.x) * 0x27D4EB2Du ^ uint(c.y) * 0x165667B1u;
-  h = (h ^ (h >> 15u)) * 0x85EBCA6Bu;
-  h ^= h >> 13u;
-  return float(h & 0xFFFFFFu) / 16777215.0;
-}
-float mValue(vec2 q) {
-  vec2 i = floor(q), f = q - i;
-  vec2 s = f * f * (3.0 - 2.0 * f);
-  ivec2 c = ivec2(i);
-  return mix(mix(mHash(c), mHash(c + ivec2(1, 0)), s.x),
-             mix(mHash(c + ivec2(0, 1)), mHash(c + ivec2(1, 1)), s.x), s.y);
-}
-void main() {
-  vec2 l = vec2(uRot.x * vXY.x + uRot.y * vXY.y,
-                -uRot.y * vXY.x + uRot.x * vXY.y);
-  vec2 g = l / uTileSize + uGridN * 0.5;
-  vec2 ij = floor(g);
-  if (ij.x < 0.0 || ij.y < 0.0 || ij.x >= uGridN || ij.y >= uGridN) discard;
-  float a = smoothstep(uFarStart - uFarBand, uFarStart, vDepth);
-  if (a < doorway(gl_FragCoord.xy)) discard;
-  vec2 fr = clamp(g - ij, 0.01, 0.99);   // east, north fraction in the cell
-  vec4 t = texelFetch(uCells, ivec2(ij), 0);
-  ivec2 from = ivec2(ij);         // the cell whose tile this pixel shows
-  if (uBlend > 0.5) {
-    // The near tiles' border blend, here too: this cell's material weight at
-    // each corner is its share of the four cells there, bilinear inside,
-    // with value noise where it is undecided. Below one half the pixel is
-    // drawn from the nearest neighbour of the other material. Without it
-    // the far ground stepped by whole tiles at every border.
-    ivec2 c0 = ivec2(ij);
-    int mine = (int(floor(t.b * 255.0 + 0.5)) >> 2) & 3;
-    float same[9];
-    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
-      ivec2 q = c0 + ivec2(dx, dy);
-      bool inside = q.x >= 0 && q.y >= 0 && q.x < int(uGridN) && q.y < int(uGridN);
-      int k = inside ? (int(floor(texelFetch(uCells, q, 0).b * 255.0 + 0.5)) >> 2) & 3 : mine;
-      same[(dy + 1) * 3 + dx + 1] = k == mine ? 1.0 : 0.0;
-    }
-    float sw = 0.25 * (same[0] + same[1] + same[3] + same[4]);
-    float se = 0.25 * (same[1] + same[2] + same[4] + same[5]);
-    float nw = 0.25 * (same[3] + same[4] + same[6] + same[7]);
-    float ne = 0.25 * (same[4] + same[5] + same[7] + same[8]);
-    float w = mix(mix(sw, se, fr.x), mix(nw, ne, fr.x), fr.y);
-    if (w < 0.999) {
-      float n = 0.65 * mValue(g * 1.3) + 0.35 * mValue(g * 3.1 + 17.0) - 0.5;
-      if (w + n * 4.0 * w * (1.0 - w) < 0.5) {
-        ivec2 sx = ivec2(fr.x < 0.5 ? -1 : 1, 0), sy = ivec2(0, fr.y < 0.5 ? -1 : 1);
-        bool xFirst = min(fr.x, 1.0 - fr.x) < min(fr.y, 1.0 - fr.y);
-        ivec2 tries[3] = ivec2[3](xFirst ? sx : sy, xFirst ? sy : sx, sx + sy);
-        for (int i = 0; i < 3; i++) {
-          ivec2 q = c0 + tries[i];
-          if (q.x < 0 || q.y < 0 || q.x >= int(uGridN) || q.y >= int(uGridN)) continue;
-          vec4 o = texelFetch(uCells, q, 0);
-          if (((int(floor(o.b * 255.0 + 0.5)) >> 2) & 3) != mine) { t = o; from = q; break; }
-        }
-      }
-    }
-  }
-  float idx = floor(t.r * 255.0 + 0.5) + 256.0 * floor(t.g * 255.0 + 0.5);
-  // Derivatives from the continuous cell coordinate: uv jumps at cell
-  // borders, which the GPU reads as extreme minification (a blurry line
-  // along every border).
-  vec2 gx = dFdx(g), gy = dFdy(g);
-  vec3 tint = vec3(0.0);
-  float cellIdx = idx;              // the cell's tile, before a centre takes over
-  if (uHasCentres > 0.5) {
-    // Inside the ring the cell's centre, turned as the splats turn it.
-    vec4 cc = texelFetch(uCentres, from, 0);
-    vec2 l = (fr - 0.5) * uTileSize;
-    float r = ringNorm(l, uRingFar.z);
-    if (cc.a > 0.5 && r < uRingFar.x + uRingFar.y) {
-      vec2 dir = l / max(length(l), 1e-6);
-      vec2 mid = (ij + 0.5 - uGridN * 0.5) * uTileSize;
-      vec2 ring = mid + uRingFar.x * dir;
-      vec2 w = vec2(uRot.x * ring.x - uRot.y * ring.y, uRot.y * ring.x + uRot.x * ring.y);
-      float n = 0.65 * mValue(w / (0.23 * uTileSize))
-              + 0.35 * mValue(w / (0.09 * uTileSize) + 17.0) - 0.5;
-      if (r < uRingFar.x + 2.0 * uRingFar.y * n) {
-        float a = floor(cc.b * 255.0 + 0.5) * 6.28318530718 / 256.0;
-        vec2 cs = vec2(cos(a), sin(a));
-        vec2 p = vec2(cs.x * l.x + cs.y * l.y, -cs.y * l.x + cs.x * l.y);
-        fr = clamp(p / uTileSize + 0.5, 0.01, 0.99);
-        gx = vec2(cs.x * gx.x + cs.y * gx.y, -cs.y * gx.x + cs.x * gx.y);
-        gy = vec2(cs.x * gy.x + cs.y * gy.y, -cs.y * gy.x + cs.x * gy.y);
-        idx = floor(cc.r * 255.0 + 0.5) + 256.0 * floor(cc.g * 255.0 + 0.5);
-        tint = (texelFetch(uCentreTone, from, 0).rgb - 0.5) * 0.5;
-      }
-    }
-  }
-  float col = mod(idx, uAtlasGrid.x);
-  float row = floor(idx / uAtlasGrid.x);
-  // Atlas tiles are rendered north up.
-  vec2 uv = vec2((col + fr.x) / uAtlasGrid.x,
-                 (row + 1.0 - fr.y) / uAtlasGrid.y);
-  vec2 k = vec2(1.0 / uAtlasGrid.x, -1.0 / uAtlasGrid.y);
-  vec4 tex = textureGrad(uAtlas, uv, gx * k, gy * k);
-  vec3 rgb = tex.rgb;
-  // b holds the rule class in its low two bits.
-  int packed = int(floor(t.b * 255.0 + 0.5));
-  if (uHasTileInfo > 0.5) {
-    int ti = int(idx);
-    rgb *= texelFetch(uTileInfo, ivec2(ti, 0), 0).rgb * 2.0;
-    // Fade part-way to the tile mean with distance, as terrain renderers do.
-    // Fading fully to the material mean (tried 2026-09-28) made distant
-    // ground a flat third look next to the splats and the near atlas.
-    // The cell's tile's, centre or not: a centre fading to its own mean
-    // showed as a dark square in every bush cell far off (desert13).
-    vec3 mean = texelFetch(uTileInfo, ivec2(int(cellIdx), 1), 0).rgb;
-    float far = smoothstep(uFarStart * 1.5, uFarStart * 5.0, vDepth);
-    rgb = mix(rgb, mean, 0.75 * far);
-  }
-  rgb = clamp(rgb + clamp(tint, -0.12, 0.12), 0.0, 1.0);    // a centre's, as near
-  // Same macro variation as the splats (macroAt there).
-  if (uMacro > 0.0) {
-    vec2 w = vXY / uTileSize;
-    float m = 0.6 * mValue(w / 11.0 + 3.7) + 0.4 * mValue(w / 4.3 + 17.1);
-    rgb *= 1.0 + uMacro * 0.36 * (m - 0.5);
-  }
-  // Opaque on purpose: drawing with atlas coverage washed the sky into all
-  // distant ground.
-  rgb *= mix(1.0, 0.45 + 0.55 * vOpen, uShade);
-  rgb = clamp(rgb * uExposure, 0.0, 1.0);
-  float lum = dot(rgb, vec3(0.299, 0.587, 0.114));
-  rgb = clamp(mix(vec3(lum), rgb, uSaturation), 0.0, 1.0);
-  // Debug views reach the far field too.
-  if (uDebug == 1) {
-    rgb = mix(rgb, tileRGB(idx), 0.75);
-  } else if (uDebug == 2) {
-    int cls = packed & 3;
-    float sure = t.a;
-    vec3 c = uClassRGB[min(cls, 3)] * sure + vec3(0.62) * (1.0 - sure);
-    rgb = mix(rgb, c, 0.8);
-  } else if (uDebug == 3) {
-    rgb = mix(rgb, vec3(0.92, 0.92, 0.95), 0.6);   // the far field's own level
-  }
-  float fog = 1.0 - exp(-uFogDensity * max(vDepth, 0.0));
-  rgb = mix(rgb, uFogColour, fog);
-  oColour = vec4(rgb, 1.0);
-}
-`;
-
-// Overlay lines, same projection as the splats.
-const LINE_VERT = `#version 300 es
-precision highp float;
-uniform mat3 uView;
-uniform vec3 uEye;
-uniform vec2 uFocal;
-uniform vec2 uViewport;
-uniform float uNear;
-in vec3 aPos;
-in vec3 aRGB;
-out vec3 vRGB;
-void main() {
-  vec3 cam = uView * (aPos - uEye);
-  if (cam.z < uNear) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
-  float invz = 1.0 / cam.z;
-  vec2 px = vec2(uFocal.x * cam.x * invz, uFocal.y * cam.y * invz);
-  gl_Position = vec4(2.0 * px.x / uViewport.x,
-                     -2.0 * px.y / uViewport.y, 0.0, 1.0);
-  vRGB = aRGB;
-}
-`;
-
-const LINE_FRAG = `#version 300 es
-precision highp float;
-uniform float uAlpha;
-in vec3 vRGB;
-out vec4 oColour;
-void main() { oColour = vec4(vRGB * uAlpha, uAlpha); }
-`;
-
-// Gradient sky: ground against a horizon reads with depth, against black it doesn't.
-const SKY_VERT = `#version 300 es
-precision highp float;
-in vec2 aNDC;
-out vec2 vNDC;
-void main() { vNDC = aNDC; gl_Position = vec4(aNDC, 0.0, 1.0); }
-`;
-
-const SKY_FRAG = `#version 300 es
-precision highp float;
-uniform mat3 uView;          // world -> camera; its transpose undoes that
-uniform vec2 uFocal;
-uniform vec2 uViewport;
-uniform vec3 uSkyTop;
-uniform vec3 uSkyHorizon;
-uniform vec3 uGround;
-in vec2 vNDC;
-out vec4 oColour;
-void main() {
-  // World direction of this pixel.
-  vec2 px = vec2(vNDC.x * uViewport.x * 0.5, -vNDC.y * uViewport.y * 0.5);
-  vec3 dir = transpose(uView) * normalize(vec3(px.x / uFocal.x,
-                                               px.y / uFocal.y, 1.0));
-  float t = dir.z;
-  // Below the horizon it stays the haze colour for a while: darkening right
-  // under the horizon drew a grey band wherever the ground ended.
-  vec3 c = t > 0.0
-    ? mix(uSkyHorizon, uSkyTop, pow(clamp(t, 0.0, 1.0), 0.55))
-    : mix(uSkyHorizon, uGround, smoothstep(0.08, 0.7, -t));
-  oColour = vec4(c, 1.0);
-}
-`;
 
 // =============================================================== helpers
 
-const canvas = document.getElementById('gl');
+const $ = (id) => document.getElementById(id);
+const canvas = $('gl');
+// Controls with a fixed id; ids made at run time go through $().
 const ui = {};
 for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
@@ -873,13 +60,14 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'capframesn', 'capcentre', 'caparc', 'caparcn',
                   'capstepn', 'fieldnote', 'bench', 'benchout',
                   'classrule', 'classsharp', 'classsharpn',
-                  'classnote', 'classblend', 'blendspots', 'tonegrade', 'blendwidth',
-                  'blendwidthn', 'classbalance', 'classbalancen',
+                  'classnote', 'classblend', 'tonegrade',
+                  'classbalance', 'classbalancen',
                   'decals', 'decalspacing', 'decalspacingn', 'decalnote',
                   'decalterrain',
                   'classcoherence', 'classcoherencen',
-                  'classaltitude', 'classaltituden', 'classwander', 'classwandern']) {
-  ui[id] = document.getElementById(id);
+                  'classaltitude', 'classaltituden', 'classwander', 'classwandern',
+                  'classshares', 'classbalancelbl', 'grip', 'overlay']) {
+  ui[id] = $(id);
 }
 
 // --- panel size ---------------------------------------------------------
@@ -902,13 +90,13 @@ function setFontSize(px) {
 {
   // Text size is remembered, since it is set for the reader's screen.
   let fs = 12;
-  try { fs = +localStorage.getItem('bozkir.fs') || 12; } catch (e) { /**/ }
+  fs = +store.get('bozkir.fs') || 12;
   fs = setFontSize(fs);
-  const keep = () => { try { localStorage.setItem('bozkir.fs', String(fs)); } catch (e) { /**/ } };
+  const keep = () => store.set('bozkir.fs', String(fs));
   on('fsup', 'click', () => { fs = setFontSize(fs + 1); keep(); });
   on('fsdown', 'click', () => { fs = setFontSize(fs - 1); keep(); });
 
-  const grip = document.getElementById('grip');
+  const grip = ui.grip;
   if (grip) {
     grip.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -929,7 +117,7 @@ function setFontSize(px) {
     grip.addEventListener('pointerup', stop);
     grip.addEventListener('pointercancel', stop);
     // Double-click resets the width.
-    grip.addEventListener('dblclick', () => setPanelWidth(256));
+    grip.addEventListener('dblclick', () => setPanelWidth(288));
   }
 }
 
@@ -949,7 +137,7 @@ document.addEventListener('input', (e) => {
 /** Attach a handler, or warn and carry on: a control missing from
  *  index.html should cost that control, not the whole viewer. */
 function on(id, event, fn) {
-  const el = document.getElementById(id);
+  const el = $(id);
   if (!el) {
     console.warn(`no #${id} in the page; that control is inactive`);
     return null;
@@ -974,6 +162,8 @@ if (!gl) {
   throw new Error('webgl2 unavailable');
 }
 
+const { program, uniforms, makeTexture } = glTools(gl);
+
 // Which GPU is drawing, shown in the console and the scene section.
 let gpuName = 'unknown';
 if (gl) {
@@ -983,161 +173,12 @@ if (gl) {
   console.log(`GPU: ${gpuName}`);
 }
 
-function compile(src, type) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(s) || 'unknown error';
-    const m = log.match(/ERROR:\s*\d+:(\d+)/);
-    const lines = src.split('\n');
-    const ctx = m ? lines.slice(Math.max(0, m[1] - 3), +m[1] + 1)
-                         .map((l, i) => `${Math.max(1, m[1] - 2) + i}: ${l}`)
-                         .join('\n') : '';
-    throw new Error(`${type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'} ` +
-                    `shader failed\n${log}\n${ctx}`);
-  }
-  return s;
-}
 
-function program(vs, fs) {
-  const p = gl.createProgram();
-  gl.attachShader(p, compile(vs, gl.VERTEX_SHADER));
-  gl.attachShader(p, compile(fs, gl.FRAGMENT_SHADER));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(p));
-  }
-  return p;
-}
 
-function uniforms(p, names) {
-  const out = {};
-  for (const n of names) {
-    const u = 'u' + n[0].toUpperCase() + n.slice(1);
-    // Array uniforms: some drivers only answer to 'name[0]'.
-    out[n] = gl.getUniformLocation(p, u) || gl.getUniformLocation(p, u + '[0]');
-  }
-  return out;
-}
-
-/** Mean colour of each class's splats, weighted by opacity. */
-function meanClassColours(colour, tiles, count) {
-  const acc = Array.from({ length: count }, () => [0, 0, 0, 0]);
-  for (const t of tiles) {
-    const a = acc[Math.min(count - 1, t.class || 0)];
-    for (let i = t.start; i < t.start + t.count; i++) {
-      const w = colour[4 * i + 3] / 255;
-      a[0] += colour[4 * i] * w; a[1] += colour[4 * i + 1] * w;
-      a[2] += colour[4 * i + 2] * w; a[3] += w;
-    }
-  }
-  return acc.map(([r, g, b, w]) => (w > 0
-    ? [r / w / 255, g / w / 255, b / w / 255] : [0.6, 0.6, 0.6]));
-}
-
-/** Unpack a .splat buffer. Mirrors scripts/export_splat.py. */
-function unpack(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const n = Math.floor(bytes.length / STRIDE);
-  const f32 = new Float32Array(buffer);
-  const positions = new Float32Array(n * 3);
-  const data = new Float32Array(n * 3 * 4);
-  const colour = new Uint8Array(n * 4);
-
-  for (let i = 0; i < n; i++) {
-    const f = i * 8, b = i * STRIDE, d = i * 12;
-    const px = f32[f], py = f32[f + 1], pz = f32[f + 2];
-    positions[3 * i] = px; positions[3 * i + 1] = py; positions[3 * i + 2] = pz;
-    data[d] = px; data[d + 1] = py; data[d + 2] = pz;
-    data[d + 3] = bytes[b + 27] / 255;
-    data[d + 4] = f32[f + 3]; data[d + 5] = f32[f + 4]; data[d + 6] = f32[f + 5];
-    data[d + 7] = 0;
-    let qw = (bytes[b + 28] - 128) / 128, qx = (bytes[b + 29] - 128) / 128;
-    let qy = (bytes[b + 30] - 128) / 128, qz = (bytes[b + 31] - 128) / 128;
-    const len = Math.hypot(qw, qx, qy, qz) || 1;
-    data[d + 8] = qw / len; data[d + 9] = qx / len;
-    data[d + 10] = qy / len; data[d + 11] = qz / len;
-    colour[4 * i] = bytes[b + 24]; colour[4 * i + 1] = bytes[b + 25];
-    colour[4 * i + 2] = bytes[b + 26]; colour[4 * i + 3] = bytes[b + 27];
-  }
-  return { n, positions, data, colour };
-}
 
 const splatTex = [null, null];
 
-function makeTexture(unit, internal, w, h, format, type, pixels) {
-  const t = gl.createTexture();
-  gl.activeTexture(gl.TEXTURE0 + unit);
-  gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, pixels);
-  return t;
-}
 
-/** The camera, in two modes.
- *
- *  Orbit matches orbit_camera() in bozkir/camera.py: z up, elevation 0
- *  along the ground, 90 straight down, eye on a sphere around a target.
- *  Fly holds the eye and turns the view. Both share azimuth and elevation,
- *  so switching keeps the view. Elevation stops just short of +-90, where
- *  forward and up are parallel and the view would spin. */
-class Orbit {
-  constructor() {
-    this.target = [0, 0, 0];
-    this.distance = 5;
-    this.azimuth = 45;
-    this.elevation = 25;
-    this.fov = 60;
-    this.fly = false;
-    this.walk = false;           // fly, held at eye height on the ground
-    this.pos = [0, 0, 0];        // eye, when flying
-    this.speed = 1;              // world units per second, when flying
-  }
-
-  /** Unit vector the camera looks along. */
-  dir() {
-    const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
-    return [-Math.cos(el) * Math.cos(az), -Math.cos(el) * Math.sin(az),
-            -Math.sin(el)];
-  }
-
-  eye() {
-    if (this.fly) return this.pos.slice();
-    const az = this.azimuth * Math.PI / 180, el = this.elevation * Math.PI / 180;
-    return [this.target[0] + this.distance * Math.cos(el) * Math.cos(az),
-            this.target[1] + this.distance * Math.cos(el) * Math.sin(az),
-            this.target[2] + this.distance * Math.sin(el)];
-  }
-
-  /** Keep the view unchanged when the mode changes. */
-  setFly(on) {
-    if (on === this.fly) return;
-    if (on) this.pos = this.eye();
-    else {
-      const e = this.pos, f = this.dir();
-      this.target = [e[0] + f[0] * this.distance, e[1] + f[1] * this.distance,
-                     e[2] + f[2] * this.distance];
-    }
-    this.fly = on;
-  }
-
-  basis() {
-    const e = this.eye();
-    const f = this.dir();
-    const up = Math.abs(f[2]) > 0.999 ? [1, 0, 0] : [0, 0, 1];
-    let r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2],
-             f[0] * up[1] - f[1] * up[0]];
-    const rl = Math.hypot(...r) || 1;
-    r = r.map(v => v / rl);
-    const d = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2],
-               f[0] * r[1] - f[1] * r[0]];
-    return { right: r, down: d, forward: f, eye: e };
-  }
-}
 
 // ================================================================= setup
 
@@ -1148,7 +189,6 @@ try {
   lineProg = program(LINE_VERT, LINE_FRAG);
   skyProg = program(SKY_VERT, SKY_FRAG);
 } catch (e) { fail(e); }
-console.log('shaders compiled');
 
 const splatU = uniforms(splatProg,
   ['view', 'eye', 'cellXY', 'relief', 'wave', 'subdiv',
@@ -1167,7 +207,7 @@ const farU = uniforms(farProg,
    'gridN', 'rot', 'farStart', 'farBand', 'fogColour', 'fogDensity',
    'exposure', 'shade', 'saturation', 'open', 'hasOpen', 'debug', 'classRGB',
    'tileInfo', 'hasTileInfo', 'detail', 'detailFreq', 'macro', 'blend',
-   'centres', 'centreTone', 'hasCentres', 'ringFar']);
+   'spots', 'mixWarp', 'centres', 'centreTone', 'hasCentres', 'ringFar']);
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -1277,8 +317,11 @@ let classAltitude = 0.4;
 let classWander = 0;
 // Off by default: it doubles draw calls near class boundaries.
 let classBlend = false;
-let blendWidth = 0.35;
-let blendSpots = true;    // each spot one material (uSpots), not splat by splat
+// Blend by spot (uSpots): each spot one material. ?blend=splat brings back
+// the earlier blend, dissolved splat by splat from the corners within
+// blendWidth of a tie; it is kept for comparison and has no control.
+const blendWidth = 0.35;
+const blendSpots = new URLSearchParams(location.search).get('blend') !== 'splat';
 let toneGrade = true;     // near another material, centres of the nearest tones
 let cellMix = null;
 let cellAlt = null;        // the class each cell would take instead
@@ -1295,6 +338,9 @@ let classColours = [[0.62, 0.55, 0.45]];
 let tileSize = 0;
 let gridN = 1;
 let cells = [];
+// The grid `cells` was built for. gridN moves with the slider at once; the
+// cells follow a rebuild later, and frames in between must index by this.
+let cellsN = 1;
 let seed = 1;
 let usedPatches = 0;
 let sortedReady = false, sortPending = false, lastSortKey = '', sortMs = 0;
@@ -1350,10 +396,10 @@ function materialNames() {
 function updateShareLabel() {
   const names = materialNames();
   names.forEach((name, m) => {
-    const lbl = document.getElementById(`classshare${m}lbl`);
+    const lbl = $(`classshare${m}lbl`);
     if (lbl) lbl.textContent = `${name} share`;
   });
-  const el = document.getElementById('classbalancelbl');
+  const el = ui.classbalancelbl;
   if (!el) return;
   el.textContent = classCount > 1 ? `${names[tileClassFor(0)]} share` : 'share';
 }
@@ -1364,8 +410,8 @@ function updateShareLabel() {
 // the shares follow their materials through a swap. Two: as before.
 let shareByMat = null;
 function buildShareSliders() {
-  const box = document.getElementById('classshares');
-  const one = document.getElementById('classbalance');
+  const box = ui.classshares;
+  const one = ui.classbalance;
   const oneRow = one && one.closest('.s');
   shareByMat = null;
   if (box) box.textContent = '';
@@ -1382,7 +428,7 @@ function buildShareSliders() {
       + `<label><span id="classshare${m}lbl"></span><b id="classshare${m}n"></b></label>`;
     box.appendChild(row);
     const input = row.querySelector('input');
-    input.value = String(shareByMat[m]);
+    input.defaultValue = String(shareByMat[m]);     // the capture's own share; links leave it out
     input.addEventListener('input', (e) => setShare(m, +e.target.value));
   }
   showShares();
@@ -1390,9 +436,9 @@ function buildShareSliders() {
 }
 function showShares() {
   shareByMat.forEach((v, m) => {
-    const input = document.getElementById(`classshare${m}`);
+    const input = $(`classshare${m}`);
     if (input && Math.abs(+input.value - v) > 0.005) input.value = String(v);
-    const n = document.getElementById(`classshare${m}n`);
+    const n = $(`classshare${m}n`);
     if (n) n.textContent = `${Math.round(v * 100)}%`;
   });
 }
@@ -1401,6 +447,16 @@ function setShare(m, v) {
   const n = shareByMat.length;
   shareByMat = shareByMat.map((s, i) => (i === m ? v
     : rest > 0 ? s * (1 - v) / rest : (1 - v) / (n - 1)));
+  showShares();
+  scheduleRegenerate();
+}
+/** Several shares at once (a shared link): set them, then scale to 100% once.
+ *  One by one through setShare, each would rescale the ones set before it. */
+function setShares(given) {
+  if (!shareByMat) return;
+  for (const [m, v] of Object.entries(given)) if (m < shareByMat.length) shareByMat[m] = +v;
+  const sum = shareByMat.reduce((a, s) => a + s, 0);
+  if (sum > 0) shareByMat = shareByMat.map((s) => s / sum);
   showShares();
   scheduleRegenerate();
 }
@@ -1416,26 +472,34 @@ let lodBaseUser = 8;            // what the slider says
 // Phones start lower; auto quality raises it if there is room.
 let renderScale = matchMedia('(pointer: coarse)').matches ? 0.6 : 1;
 let frameMs = 16;               // smoothed frame time
-let overRun = 0, qualityTick = 0, lastNote = '';
+let overRun = 0, qualityTick = 0, lastNote = '', lastNoteAt = 0;
 const BUDGET_MS = 33.3;
 const SCALE_MIN = 0.5;
 const QUALITY_MIN_BASE = 3;
 
-function qualityNote(text) {
-  // At most one note every 1.5 s.
-  const now = performance.now();
-  if (!ui.busy || text === lastNote || now - (qualityNote.at || 0) < 1500) return;
-  // A running commentary is for measuring; Explore shows the result only.
-  if (!document.body.classList.contains('expert')) return;
-  qualityNote.at = now;
-  lastNote = text;
+/** The note over the canvas, hidden after `ms` (0: until hidden or
+ *  replaced). A newer note cancels the older one's timer. */
+let busyTimer = 0;
+function showBusy(text, ms = 0) {
+  if (!ui.busy) return;
   ui.busy.textContent = text;
   ui.busy.style.display = 'block';
-  clearTimeout(qualityNote.t);
-  qualityNote.t = setTimeout(() => {
-    lastNote = '';
-    if (!regenPending && ui.busy) ui.busy.style.display = 'none';
-  }, 2000);
+  clearTimeout(busyTimer);
+  if (ms) busyTimer = setTimeout(hideBusy, ms);
+}
+function hideBusy() {
+  if (ui.busy && !regenPending) ui.busy.style.display = 'none';
+}
+
+function qualityNote(text) {
+  // At most one note every 1.5 s, and the same one not within 2 s.
+  const now = performance.now();
+  if (now - lastNoteAt < 1500 || (text === lastNote && now - lastNoteAt < 2000)) return;
+  // A running commentary is for measuring; Explore shows the result only.
+  if (!document.body.classList.contains('expert')) return;
+  lastNoteAt = now;
+  lastNote = text;
+  showBusy(text, 2000);
 }
 
 // Two levers on two time scales. Resolution answers within 250 ms. A LOD
@@ -1675,7 +739,6 @@ const MAX_FPS = Math.max(10, Math.min(240,
 const WAKE_FRAMES = 90;
 let wakeFrames = WAKE_FRAMES, lastFrameKey = '', lastDrawAt = 0;
 
-console.log('starting sort worker');
 const worker = new Worker('./sort-worker.js');
 worker.onmessage = (e) => {
   const m = e.data;
@@ -1798,13 +861,14 @@ function splitOut(g, alone) {
  *  backtracking, and the free choices stop the terrain repeating. */
 function buildGrid() {
   cells = [];
-  if (!tileSize) { cells = [{ x: 0, y: 0, z: 0, warp: FLAT, patch: 0 }]; return; }
+  if (!tileSize) { cells = [{ x: 0, y: 0, z: 0, warp: FLAT, patch: 0 }]; cellsN = 1; return; }
   usedPatches = Math.max(1, Math.min(usedPatches || patches.length,
                                      patches.length));
   let s = seed;
   const rand = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const half = (gridN - 1) / 2;
   const chosen = new Int32Array(gridN * gridN).fill(-1);
+  cellsN = gridN;
 
   // Material per cell from the ground under it, once per layout. Classes
   // share edge codes, so the neighbours pick the code and the terrain picks
@@ -2015,7 +1079,6 @@ function buildOverlay() {
   gl.bindBuffer(gl.ARRAY_BUFFER, lineRGBBuf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(rgb), gl.DYNAMIC_DRAW);
   gl.bindVertexArray(null);
-  console.log(`overlay: ${lineCount / 2} segments`);
 }
 
 /** Where the shader puts a splat (a CPU copy of the vertex shader), so the
@@ -2408,14 +1471,11 @@ function scheduleRegenerate() {
   if (regenPending) return;
   regenPending = true;
   const big = gridN * gridN > 4096;
-  if (big && ui.busy) {
-    ui.busy.textContent = `rebuilding ${(gridN * gridN).toLocaleString()} cells…`;
-    ui.busy.style.display = 'block';
-  }
+  if (big) showBusy(`rebuilding ${(gridN * gridN).toLocaleString()} cells…`);
   requestAnimationFrame(() => requestAnimationFrame(() => {
     regenPending = false;
     regenerate();
-    if (ui.busy) ui.busy.style.display = 'none';
+    hideBusy();
   }));
 }
 
@@ -2446,13 +1506,13 @@ function load(buffer, manifest) {
     classWander = typeof manifest.height_order === 'number'
       ? Math.min(1, Math.max(0, 2 * manifest.height_order)) : 0;
     {
-      const el = document.getElementById('classwander');
+      const el = ui.classwander;
       if (el) el.value = String(classWander);
       if (ui.classwandern) ui.classwandern.textContent = `${Math.round(classWander * 100)}%`;
     }
     if (captureShares && classCount >= 2) {
       classBalance = snapShare(captureShares[tileClassFor(0)]);
-      const el = document.getElementById('classbalance');
+      const el = ui.classbalance;
       if (el) el.value = String(classBalance);
       if (ui.classbalancen) ui.classbalancen.textContent = `${Math.round(classBalance * 100)}%`;
       // Measured materials meet in the capture's own way: dissolved, not
@@ -2642,7 +1702,7 @@ let cycleWarned = false;
 // boundary no draw order is right, so the pair is drawn as one interleaved
 // stream built by the worker. The result arrives a frame late; `mergeKey`
 // is what it must match, and if it doesn't the cells are drawn separately.
-// Panel-driven; window.bozkirTopo / bozkirMerge mirror them for the console.
+// Set from the panel (ordering).
 let topoOrder = true;
 let mergeOn = true;
 let mergeThreshold = 0.5;   // in tiles
@@ -2818,7 +1878,19 @@ function resize() {
   }
 }
 
+/** The render loop. An error in one frame is logged once and the loop goes
+ *  on, so a state that is briefly inconsistent cannot stop the viewer. */
+let frameError = '';
 function frame() {
+  try {
+    drawFrame();
+  } catch (e) {
+    if (String(e) !== frameError) { frameError = String(e); console.error(e); }
+    requestAnimationFrame(frame);
+  }
+}
+
+function drawFrame() {
   // Draw only when something changed, and at most MAX_FPS times a second.
   // Drawn flat out (120 fps, millions of splats), a large world took the
   // whole GPU and a video in another window stuttered and stopped.
@@ -2915,7 +1987,7 @@ function frame() {
     gl.bindTexture(gl.TEXTURE_2D, cellTex);
     gl.uniform2f(farU.atlasGrid, atlas.cols, atlas.rows);
     gl.uniform1f(farU.tileSize, tileSize);
-    gl.uniform1f(farU.gridN, gridN);
+    gl.uniform1f(farU.gridN, cellsN);
     const ga = gridAngle * Math.PI / 180;
     gl.uniform2f(farU.rot, Math.cos(ga), Math.sin(ga));
     gl.uniform1f(farU.farStart, farStart);
@@ -2927,6 +1999,8 @@ function frame() {
     gl.uniform1f(farU.saturation, saturation);
     gl.uniform1f(farU.macro, macro);
     gl.uniform1f(farU.blend, classBlend && classCount > 1 ? 1.0 : 0.0);
+    gl.uniform1f(farU.spots, blendSpots ? 1.0 : 0.0);
+    gl.uniform1f(farU.mixWarp, SPOT_WARP);
     gl.uniform1i(farU.open, 4);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, field && openTex ? openTex : null);
@@ -3048,7 +2122,7 @@ function frame() {
     // which side of each shared boundary plane the eye is on instead, and
     // `near` only breaks ties between cells that cannot overlap. What is
     // left is a boundary the camera really crosses - merging handles that.
-    // window.bozkirTopo = false restores the old ranking for comparison.
+    // 'depth' in the panel's tile order restores the old ranking for comparison.
     if (!topoOrder) {
       visible.sort((p, q) => (q.near - p.near) || (q.side - p.side));
     } else {
@@ -3076,7 +2150,7 @@ function frame() {
       for (const c of cells) {
         const w = c.mix == null || c.mix >= blendWidth ? 1
           : 0.5 + 0.5 * (c.mix / Math.max(blendWidth, 1e-6));
-        blendGrid.set(c.j * gridN + c.i, { cls: c.cls, alt: c.alt, w });
+        blendGrid.set(c.j * cellsN + c.i, { cls: c.cls, alt: c.alt, w });
       }
     }
     const weightOf = (cls, n) => (n.cls === cls ? n.w : (n.alt === cls || n.alt == null ? 1 - n.w : 0));
@@ -3084,8 +2158,8 @@ function frame() {
       let sum = 0, k = 0;
       for (const [ox, oy] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
         const i = c.i + di + ox, j = c.j + dj + oy;
-        if (i < 0 || j < 0 || i >= gridN || j >= gridN) continue;
-        const n = blendGrid.get(j * gridN + i);
+        if (i < 0 || j < 0 || i >= cellsN || j >= cellsN) continue;
+        const n = blendGrid.get(j * cellsN + i);
         if (n) { sum += weightOf(c.cls, n); k++; }
       }
       return k ? sum / k : 1;
@@ -3093,8 +2167,8 @@ function frame() {
     // By spot: a cell next to other materials draws those whose field
     // reaches into it (spotDraws in frames.js), each with its own field; kept
     // on the cell until the grid is rebuilt.
-    const classAt = (i, j) => (i < 0 || j < 0 || i >= gridN || j >= gridN ? -1
-      : tileClass[cells[j * gridN + i].patch]);
+    const classAt = (i, j) => (i < 0 || j < 0 || i >= cellsN || j >= cellsN ? -1
+      : tileClass[cells[j * cellsN + i].patch]);
     const padded = (f) => { const a = new Float32Array(52); a.set(f); return a; };
     const spotOf = (c) => {
       if (c.spot === undefined) {
@@ -3399,7 +2473,7 @@ function frame() {
         const total = classStats.counts.reduce((a, b) => a + b, 0) || 1;
         const names = materialNames();
         const share = classStats.counts
-          .map((c, k) => `${names[tileClassFor(k)]} ${(100 * c / total).toFixed(0)}%`).join(' \u00b7 ');
+          .map((c, k) => `${names[tileClassFor(k)]} ${(100 * c / total).toFixed(0)}%`).join(' · ');
         // A field squeezed into a few tiles repeats across the grid, and the
         // rule then looks like a chequerboard; say so.
         const repeats = field && reliefScale > 0
@@ -3407,12 +2481,12 @@ function frame() {
         // What each cue actually weighs, so the sliders' effect is visible.
         const cues = (classStats.weights || [])
           .filter((c) => c.w > 0.005)
-          .map((c) => `${c.cue} ${(c.w * 100).toFixed(0)}%`).join(' \u00b7 ');
+          .map((c) => `${c.cue} ${(c.w * 100).toFixed(0)}%`).join(' · ');
         const extra = [classBlend ? `${blendedCells} cells blended` : '',
                        classStats.source === 'sediment' ? 'drainage from sediment' : '']
-          .filter(Boolean).join(' \u00b7 ');
+          .filter(Boolean).join(' · ');
         ui.classnote.textContent = share
-          + ` \u00b7 confidence ${(classStats.sure * 100).toFixed(0)}%`
+          + ` · confidence ${(classStats.sure * 100).toFixed(0)}%`
           + (cues ? `\n${cues}` : '')
           + (extra ? `\n${extra}` : '')
           + (repeats > 3 ? `\n${repeats} terrain repeats across the grid `
@@ -3438,14 +2512,14 @@ function frame() {
     }
     if (ui.resn) ui.resn.textContent = `${Math.round((autoQuality ? renderScale : 1) * 100)}%`;
     updateCard(viewerState());
+    reportSortError();
     frames = 0; fpsTime = now;
   }
-  if (ui.azim) ui.azim.textContent = cam.azimuth.toFixed(0) + '\u00b0';
-  if (ui.elev) ui.elev.textContent = cam.elevation.toFixed(0) + '\u00b0';
+  if (ui.azim) ui.azim.textContent = cam.azimuth.toFixed(0) + '°';
+  if (ui.elev) ui.elev.textContent = cam.elevation.toFixed(0) + '°';
   if (ui.dist) ui.dist.textContent = cam.fly
     ? `fly @ ${cam.eye().map(v => v.toFixed(1)).join(', ')}`
     : cam.distance.toFixed(2);
-  if (now - fpsTime > 500) reportSortError();
   if (ui.cmd) ui.cmd.textContent = `--azim ${cam.azimuth.toFixed(0)} ` +
     `--elev ${cam.elevation.toFixed(0)} --dist ${cam.distance.toFixed(2)} ` +
     `--fov ${cam.fov.toFixed(0)}`;
@@ -3625,6 +2699,18 @@ function moveCamera(dt) {
       zoomGoal = 0;
     }
   }
+  if (!cam.fly) {
+    // The orbit point rides on the ground and the eye stays above it, so
+    // relief or a new terrain never leaves the view underground.
+    const g = height(cam.target[0], cam.target[1]);
+    if (Math.abs(g - cam.target[2]) > 1e-4) {
+      cam.target[2] += (g - cam.target[2]) * (1 - Math.exp(-sec / 0.15));
+    }
+    const e = cam.eye();
+    if (e[2] < height(e[0], e[1]) + 0.05 * (tileSize || 1) && cam.elevation < 85) {
+      cam.elevation = Math.min(85, cam.elevation + 60 * sec);
+    }
+  }
   const b = cam.basis();
   const fast = held.has('shift') ? (cam.walk ? 3 : 4) : 1;
   const want = [0, 0, 0];
@@ -3687,14 +2773,7 @@ function moveCamera(dt) {
 async function openTileset(fileList) {
   const list = [...(fileList || [])];
   if (!list.length) return;
-  const say = (t, ms) => {
-    if (!ui.busy) return;
-    ui.busy.textContent = t;
-    ui.busy.style.display = 'block';
-    clearTimeout(openTileset.t);
-    if (ms) openTileset.t = setTimeout(() => { ui.busy.style.display = 'none'; }, ms);
-  };
-  say('opening ' + list[0].name + '…');
+  showBusy('opening ' + list[0].name + '…');
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   try {
     const t = await openDrop(list);
@@ -3704,10 +2783,10 @@ async function openTileset(fileList) {
     loadedScene = t.name.replace(/\.(zip|splat|json)$/i, '');
     load(t.buffer, t.meta);
     adoptAtlas(bakedAtlas);
-    say(`opened ${t.name}` + (d.note ? ` (${d.note})` : ''), 4000);
+    showBusy(`opened ${t.name}` + (d.note ? ` (${d.note})` : ''), 4000);
   } catch (err) {
     console.error(err);
-    say('could not open: ' + err.message, 6000);
+    showBusy('could not open: ' + err.message, 6000);
   }
 }
 
@@ -3734,19 +2813,8 @@ window.addEventListener('drop', (e) => {
   }
 });
 
-// The drop hint is built here, so index.html works without this module.
+// The drop hint (styled in index.html).
 {
-  const style = document.createElement('style');
-  style.textContent = `
-    #drophint { position: fixed; inset: 0; display: none; z-index: 50;
-      align-items: center; justify-content: center; pointer-events: none;
-      background: rgba(10,10,12,0.72);
-      font: 500 15px/1.5 ui-monospace, Menlo, Consolas, monospace;
-      color: #e8e2d8; letter-spacing: 0.02em; text-align: center; }
-    body.dropping #drophint { display: flex; }
-    #drophint span { border: 1px dashed #c8a05a; border-radius: 10px;
-      padding: 28px 40px; }`;
-  document.head.appendChild(style);
   const hint = document.createElement('div');
   hint.id = 'drophint';
   hint.innerHTML = '<span>drop a tileset<br>'
@@ -3757,7 +2825,7 @@ window.addEventListener('drop', (e) => {
 
 on('fov', 'input', (e) => {
   cam.fov = +e.target.value;
-  if (ui.fovn) ui.fovn.textContent = `${cam.fov}\u00b0`;
+  if (ui.fovn) ui.fovn.textContent = `${cam.fov}°`;
 });
 on('gain', 'input', (e) => {
   gain = +e.target.value;
@@ -3858,12 +2926,10 @@ on('expert', 'change', (e) => {
     ui.reliefscale.value = String(Math.min(+ui.reliefscale.max, gridN));
     ui.reliefscale.dispatchEvent(new Event('input'));
   }
-  try { localStorage.setItem('bozkir.expert', e.target.checked ? '1' : ''); }
-  catch (err) { /* private window: the choice just does not persist */ }
+  store.set('bozkir.expert', e.target.checked ? '1' : '');
 });
 if (ui.expert) {
-  let saved = '';
-  try { saved = localStorage.getItem('bozkir.expert') || ''; } catch (e) { /**/ }
+  const saved = store.get('bozkir.expert');
   ui.expert.checked = !!saved;
   document.body.classList.toggle('expert', !!saved);
 }
@@ -3895,12 +2961,8 @@ if (ui.gpuname) {
       + 'Windows Settings > System > Display > Graphics.';
     ui.gpuname.style.color = '#d9a441';
     ui.gpuname.title = tip;
-    setTimeout(() => {
-      if (!ui.busy) return;
-      ui.busy.textContent = 'drawing on an integrated GPU: slower than it could be (research mode shows which)';
-      ui.busy.style.display = 'block';
-      setTimeout(() => { ui.busy.style.display = 'none'; }, 7000);
-    }, 2500);
+    setTimeout(() => showBusy('drawing on an integrated GPU: slower than it could be '
+      + '(research mode shows which)', 7000), 2500);
   }
 }
 on('detailon', 'change', (e) => { detailOn = e.target.checked; scheduleRegenerate(); });
@@ -3948,7 +3010,7 @@ on('autoquality', 'change', (e) => {
 });
 on('gridangle', 'input', (e) => {
   gridAngle = +e.target.value;
-  if (ui.gridanglen) ui.gridanglen.textContent = `${gridAngle}\u00b0`;
+  if (ui.gridanglen) ui.gridanglen.textContent = `${gridAngle}°`;
   scheduleRegenerate();
 });
 on('popmeter', 'change', (e) => {
@@ -4060,7 +3122,6 @@ on('classbalance', 'input', (e) => {
   scheduleRegenerate();
 });
 on('classblend', 'change', (e) => { classBlend = e.target.checked; });
-on('blendspots', 'change', (e) => { blendSpots = e.target.checked; });
 on('tonegrade', 'change', (e) => { toneGrade = e.target.checked; scheduleRegenerate(); });
 on('decals', 'change', (e) => { decalsOn = e.target.checked; scheduleRegenerate(); });
 on('decalterrain', 'change', (e) => { decalTerrain = e.target.checked; scheduleRegenerate(); });
@@ -4068,10 +3129,6 @@ on('decalspacing', 'input', (e) => {
   decalSpacing = +e.target.value;
   ui.decalspacingn.textContent = `${decalSpacing} tiles`;
   scheduleRegenerate();
-});
-on('blendwidth', 'input', (e) => {
-  blendWidth = +e.target.value;
-  ui.blendwidthn.textContent = blendWidth.toFixed(2);
 });
 on('classsharp', 'input', (e) => {
   classSharp = +e.target.value;
@@ -4097,16 +3154,6 @@ function showSweep() {
 on('capframes', 'input', showSweep);
 on('caparc', 'input', showSweep);
 showSweep();
-
-// Console shortcuts, from before the panel had these controls.
-Object.defineProperty(window, 'bozkirTopo', {
-  get: () => topoOrder,
-  set: (v) => { topoOrder = v !== false; if (ui.tileorder) ui.tileorder.value = topoOrder ? 'topological' : 'depth'; },
-});
-Object.defineProperty(window, 'bozkirMerge', {
-  get: () => mergeOn,
-  set: (v) => { mergeOn = v !== false; if (ui.merging) ui.merging.checked = mergeOn; mergeKey = ''; },
-});
 
 // --- scaling sweep -----------------------------------------------------
 // Measures where the renderer stops keeping up, and whether the frame, the
@@ -4196,8 +3243,8 @@ function beginSweep() {
     return false;
   }
   // Everything needed to repeat this run, on one line.
-  console.log(`sweep ${arc}\u00b0 in ${frames} frames `
-    + `(${(arc / frames).toFixed(2)}\u00b0 each) about `
+  console.log(`sweep ${arc}° in ${frames} frames `
+    + `(${(arc / frames).toFixed(2)}° each) about `
     + `[${target.map((v) => v.toFixed(2)).join(', ')}], `
     + `az ${cam.azimuth.toFixed(1)}, el ${cam.elevation.toFixed(1)}, `
     + `dist ${cam.distance.toFixed(2)}`);
@@ -4507,7 +3554,7 @@ async function loadPresets() {
 }
 
 function setControl(id, value) {
-  const el = document.getElementById(id);
+  const el = $(id);
   if (!el) { console.warn(`preset: no control '${id}'`); return; }
   if (el.type === 'checkbox') {
     el.checked = !!value;
@@ -4525,9 +3572,34 @@ function setControl(id, value) {
 const PRESET_META = new Set(['label', 'short', 'view', 'research', 'chapter',
                              'caption', 'camera']);
 
+/** A control back to the page's own value. */
+function resetControl(id) {
+  const el = $(id);
+  if (!el) return;
+  if (el.type === 'checkbox') setControl(id, el.defaultChecked);
+  else if (el.tagName === 'SELECT') {
+    const def = [...el.options].find((o) => o.defaultSelected) || el.options[0];
+    if (def) setControl(id, def.value);
+  } else setControl(id, el.defaultValue);
+}
+
 function applyPreset(name) {
   const p = presets[name];
   if (!p) { console.warn(`no preset '${name}'`); return; }
+  // What another preset set and this one does not name goes back to its
+  // default, or one preset's dusk stays on under the next. The world's size
+  // (grid, relief scale) and the capture's own shares are left as they are;
+  // controls no preset touches keep whatever the viewer set.
+  const named = new Set(Object.keys(p));
+  const touched = new Set();
+  for (const [n, q] of Object.entries(presets)) {
+    if (!n.startsWith('_')) for (const k of Object.keys(q)) touched.add(k);
+  }
+  for (const k of touched) {
+    if (named.has(k) || PRESET_META.has(k) || k === 'grid' || k === 'reliefscale') continue;
+    if ((k === 'classbalance' || k === 'classblend') && captureShares && classCount >= 2) continue;
+    resetControl(k);
+  }
   // Grid first, since 'reliefscale: grid' and the rule both depend on it.
   if ('grid' in p) setControl('grid', p.grid);
   for (const [k, v] of Object.entries(p)) {
@@ -4540,7 +3612,8 @@ function applyPreset(name) {
     if (k === 'classblend' && captureShares && classCount >= 2) continue;
     setControl(k, k === 'reliefscale' && v === 'grid' ? gridN : v);
   }
-  if (p.view) document.getElementById(p.view)?.click();
+  const viewBtn = p.view && $(p.view);
+  if (viewBtn) viewBtn.click();
   // A chapter frames its own shot: angles in degrees, distance in tiles.
   if (p.camera) {
     setWalk(false);
@@ -4558,7 +3631,6 @@ function applyPreset(name) {
   const q = new URLSearchParams(location.search);
   q.set('preset', name);
   history.replaceState(null, '', `${location.pathname}?${q}`);
-  console.log(`preset ${name} applied`);
 }
 
 loadPresets();
@@ -4612,9 +3684,13 @@ async function loadFirst(names) {
     // A plain capture may get no height field, so no adoptField to apply
     // a shared view from; give it one here.
     if (plainScene) setTimeout(() => applyView(takeView()), 800);
-    // With nothing asked for, a tileset opens on the README settings; a
-    // plain capture keeps its 'no rule' preset.
-    if (!wanted && !pendingPreset && !plainScene && !params.has('v')) pendingPreset = 'readme';
+    // A tileset opens on the default settings unless the link carries its
+    // own (a view, a preset, a chapter); a plain capture keeps 'no rule'.
+    // Choosing a tileset reloads with ?scene=, and that used to skip this
+    // and open a 1 x 1 world.
+    if (!pendingPreset && !plainScene && !params.has('v') && !params.has('chapter')) {
+      pendingPreset = 'readme';
+    }
     loadAtlas(name);
     loadCatalogue();
     // The height field arrives after the splats; the scene shows meanwhile.
@@ -4659,8 +3735,11 @@ else loadFirst(wanted ? [wanted] : DEFAULT_SCENES)
 /** Look for a height field beside a tileset and adopt it if there is one. */
 async function useHeightField(name) {
   const f = await loadHeightField('./data', name);
-  if (!f) return;
-  adoptField(f);
+  if (f) { adoptField(f); return; }
+  // No ground of its own: the desert's, else a generated one. Without any,
+  // the settings that wait for ground never came and the world stayed 1 x 1.
+  if (name !== 'desert') useHeightField('desert');
+  else useGeneratedField('rolling', 0, 256);
 }
 
 /** Generate a terrain in the browser (or take it from the browser's cache)
@@ -4770,7 +3849,13 @@ function applyView(v) {
   if (!v) return;
   const c = v.c || {};
   if ('grid' in c) setControl('grid', c.grid);
-  for (const [k, val] of Object.entries(c)) if (k !== 'grid') setControl(k, val);
+  const shares = {};
+  for (const [k, val] of Object.entries(c)) {
+    const share = /^classshare(\d+)$/.exec(k);
+    if (share) shares[share[1]] = val;
+    else if (k !== 'grid') setControl(k, val);
+  }
+  if (Object.keys(shares).length) setShares(shares);
   const m = v.cam;
   if (m) {
     if (m.walk) {
@@ -4786,10 +3871,9 @@ function applyView(v) {
     if (m.el != null) cam.elevation = m.el;
     if (m.fov) setControl('fov', m.fov);
   }
-  console.log('view from the link applied');
 }
 
-const overlayEl = document.getElementById('overlay');
+const overlayEl = ui.overlay;
 function introOpen() { return overlayEl && !overlayEl.classList.contains('hidden'); }
 
 /** What the page around the canvas needs to know (ui.js). */
@@ -4810,6 +3894,10 @@ function viewerState() {
     // How many times the height field repeats across the world (mirrored).
     repeats: field && reliefScale > 0 && reliefScale < gridN ? gridN / reliefScale : 0,
     ground: field ? field.describe() : 'analytic surface',
+    // What the tileset has, so the panel shows only the controls that apply.
+    wang: !!wangCodes, frames: !!(frameInfo && centres && centres.length),
+    decals: !!(decalCopies || centreCopies),
+    centres: centres ? centres.length : 0,
   };
 }
 

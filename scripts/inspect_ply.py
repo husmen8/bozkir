@@ -1,6 +1,6 @@
 """Measure a 3DGS capture: up axis, planarity, splat shape and footprint,
 spacing against size, depth complexity, cost of dropping SH - the numbers
-that say whether it can become tiles (see docs/captures.md).
+that say whether it can become tiles.
 
     python scripts/inspect_ply.py data/raw/desert.ply
 
@@ -32,12 +32,13 @@ def core_mask(s, pct=90.0):
     return r <= np.percentile(r, pct), centre, r
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", type=Path)
     ap.add_argument("--out", type=Path, default=Path("out"))
     ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
     s = load_ply(args.path)
@@ -62,8 +63,8 @@ def main():
     planarity = float(evals[0] / evals[2])
     tilt = float(np.degrees(np.arccos(np.clip(align[up_axis], 0, 1))))
 
-    # Refit using only the lowest band along that axis: Garden has a table
-    # and a plant standing on the ground, and including them tilts the fit.
+    # Refit using only the lowest band along that axis: furniture or plants
+    # standing on the ground tilt the fit.
     h = xyz_core[:, up_axis]
     low = h <= np.percentile(h, 30)
     if low.sum() > 100:

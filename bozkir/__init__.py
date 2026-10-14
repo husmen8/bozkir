@@ -1,7 +1,8 @@
 """bozkır - procedural terrain from captured Gaussian splats."""
 
 # Printed first by scripts/build.py, so a run on old code shows at once.
-BUILD = "2026-10-13 sharp pool"
+# Bumped by hand.
+BUILD = "1.0"
 
 from .ply import Splats, load_ply, save_ply, quat_to_matrix, SH_C0
 from .scene import SceneConfig, prepare, add_scene_args, scene_from_args

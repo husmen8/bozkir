@@ -97,7 +97,7 @@ def shown(res, size, inner, diamonds=False, shape=2.0):
     `inner` of the tips the tile's middle falls on. Which two depends on
     the axis the patch ends up on (decided later), so either: only what
     both would hide is left out (the part both would show was a fifth of
-    the patch, and found no spots in desert13)."""
+    the patch, and held no spots on the desert)."""
     if not diamonds:
         return zone(res, size, inner, shape=shape)
     c = (np.arange(res) + 0.5) / res * size - size / 2.0

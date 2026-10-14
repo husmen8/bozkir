@@ -2,8 +2,8 @@
 
 Run from the repo root:
 
-    python scripts/align.py data/raw/garden.ply
-    python scripts/align.py data/raw/garden.ply --render
+    python scripts/align.py data/raw/scene.ply
+    python scripts/align.py data/raw/scene.ply --render
 
 Writes data/aligned/<name>.ply. Everything downstream should use that file,
 not the raw one.
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bozkir.presets import add_preset_args, apply as apply_preset  # noqa: E402
 from bozkir.ply import load_ply, save_ply  # noqa: E402
 from bozkir.transform import align_to_ground, recentre  # noqa: E402

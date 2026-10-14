@@ -2,12 +2,12 @@
 
 Run from the repo root, on the ALIGNED scene:
 
-    python scripts/experiments/render_view.py data/aligned/garden.ply
-    python scripts/experiments/render_view.py data/aligned/garden.ply --elev 5 --azim 120
-    python scripts/experiments/render_view.py data/aligned/garden.ply --turntable 8
+    python scripts/experiments/render_view.py data/aligned/scene.ply
+    python scripts/experiments/render_view.py data/aligned/scene.ply --elev 5 --azim 120
+    python scripts/experiments/render_view.py data/aligned/scene.ply --turntable 8
 
 Elevation 0 looks along the ground (grazing), 90 looks straight down.
-Assumes z is up, which is what scripts/align.py produces.
+Assumes z is up, which is what scripts/experiments/align.py produces.
 """
 
 import argparse

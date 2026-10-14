@@ -16,8 +16,9 @@ Measured on brightness ("texture") and on a map of what stands out
 out by Wang edge matching (not the viewer's exact sequence), over seeds.
 
 Plus busyness: how different a tile's four triangles are (busyness()).
-Neither repetition number matched my eye on the desert tilesets; busyness
-did, on the two runs left to measure.
+Neither repetition number matched a visual ranking of the desert
+tilesets; busyness did, on the two runs left to measure. Centres from a
+frames tileset's pool are not modelled: only the exported tiles are laid out.
 """
 
 import argparse
