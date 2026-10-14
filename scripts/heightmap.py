@@ -1,6 +1,7 @@
 """Turn a drone DSM (or any PLY) into a height field for the viewer.
 
     python scripts/heightmap.py <odm>/odm_dem/dsm.tif --name desert
+    python scripts/heightmap.py <copernicus tile>.tif --window 37.08,-118.97,6 --name valley
 
 Real ground in metres, a by-product of the same photogrammetry that gives
 the tiles. The survey is a polygon in a rectangular file, so the largest
@@ -18,7 +19,9 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bozkir.terrain import (HEIGHT_ENCODING, height_from_points,  # noqa: E402
-                            largest_rectangle, read_dsm, write_height_png)
+                            largest_rectangle, read_dem_window, read_dsm,
+                            write_height_png)
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
@@ -39,9 +42,16 @@ def main(argv=None):
                          "the survey's own noise, and a tile laid on a bush "
                          "sits on a spike. 1 or 2 takes that off without "
                          "flattening the landforms")
+    ap.add_argument("--window", metavar="LAT,LON,KM",
+                    help="for a DEM in latitude/longitude (Copernicus GLO-30): "
+                         "a square this many km on a side around the point, "
+                         "resampled to square pixels in metres")
     args = ap.parse_args(argv)
 
-    if str(args.path).lower().endswith(".ply"):
+    if args.window:
+        lat, lon, km = (float(v) for v in args.window.split(","))
+        a, good, res = read_dem_window(args.path, lat, lon, km)
+    elif str(args.path).lower().endswith(".ply"):
         # The scene has to be aligned first, or "up" is whatever direction
         # the camera happened to face and the height field is a shear.
         from bozkir.scene import prepare
@@ -66,8 +76,8 @@ def main(argv=None):
     span = hi - lo
     print(f"  height {lo:.2f} to {hi:.2f} m  (range {span:.2f} m)")
     if res:
-        print(f"  ground sample distance {res * 100:.1f} cm, "
-              f"so {w * res:.0f} x {h * res:.0f} m")
+        gsd = f"{res:.1f} m" if res >= 1 else f"{res * 100:.1f} cm"
+        print(f"  ground sample distance {gsd}, so {w * res:.0f} x {h * res:.0f} m")
 
     # Resample before smoothing: a box blur on the output grid is cheaper
     # and the result is the same shape of hill.

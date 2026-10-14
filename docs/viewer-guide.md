@@ -208,6 +208,8 @@ WASD walks, shift runs, click to look with the mouse, Esc releases it, V leaves.
 
 *Sky, haze and exposure. None of it relights the ground.*
 
+Haze is exponential in view depth. Its density is set for a 24-cell world; a larger world keeps the same haze at the same fraction of its width, so the haze slider means the same at any world size.
+
 - See also: [Baked light](#lighting), [Land variation](#macro)
 
 <a id="lighting"></a>

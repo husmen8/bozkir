@@ -1,7 +1,4 @@
 {
-  "desert13": {
-    "base": "ground"
-  },
   "ground": {
     "apart": true,
     "auto": true,

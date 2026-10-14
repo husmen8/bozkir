@@ -109,7 +109,18 @@ server. From Python:
 ```bash
 python scripts/terrain_gen.py --name canyon --profile canyon --seed 3 --size 512
 python scripts/heightmap.py <odm>/odm_dem/dsm.tif --name desert   # from a drone DSM
+python scripts/heightmap.py <tile>.tif --window 37.08,-118.97,6 --name valley
 ```
+
+`--window LAT,LON,KM` reads a DEM in latitude and longitude, such as a
+[Copernicus GLO-30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model)
+tile (free; 1 arc-second posts), cuts a square of that many kilometres and
+resamples it to square pixels in metres. The viewer fits any height field
+to the relief scale, so a real valley appears at the world's size with its
+shape intact. A published Copernicus-derived field carries its credit:
+"produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus
+Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European
+Union and ESA; all rights reserved".
 
 Both write a 16-bit height PNG (two 8-bit channels; browsers decode 16-bit
 greyscale to 8 bits) and a JSON sidecar; the generator also writes its

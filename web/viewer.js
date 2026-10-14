@@ -36,36 +36,22 @@ const canvas = $('gl');
 // Controls with a fixed id; ids made at run time go through $().
 const ui = {};
 for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
-                  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn',
-                  'wangnote', 'edges', 'diagonals', 'tints', 'identity',
-                  'relief', 'reliefn', 'reliefscale', 'reliefscalen',
-                  'band', 'bandn', 'subdiv', 'subdivn', 'seam',
-                  'sortmode', 'views', 'viewsn', 'recache', 'sorterr',
-                  'popmeter', 'popreset', 'pop', 'gridangle', 'gridanglen',
-                  'lod', 'lodbase', 'lodbasen', 'lodinfo', 'lodcolours',
-                  'sky', 'fog', 'fogn', 'orbit', 'freefly', 'flynote',
-                  'shade', 'shaden', 'exposure', 'exposuren',
-                  'figuremode', 'savepng', 'panel', 'gizmo', 'figexit',
-                  'scenepick', 'heightpick', 'expert', 'classview',
-                  'farfield', 'busy', 'smoothframes', 'subdivrow', 'autoquality',
-                  'gpuname',
-                  'detailon', 'detailamt', 'detailamtn',
-                  'genseed', 'gensize', 'genbtn', 'genstatus',
-                  'terrainopen', 'terrainwin', 'terrainclose', 'gencards',
-                  'seeddown', 'seedup', 'seedrand', 'genrecent', 'presetchips',
-                  'saturation', 'saturationn', 'macro', 'macron',
-                  'resn', 'fovn', 'gainn', 'viewWalk',
-                  'speedn', 'tileorder', 'merging', 'mergethr', 'mergethrn',
-                  'mergestat', 'capture', 'captureboth', 'capframes',
-                  'capframesn', 'capcentre', 'caparc', 'caparcn',
-                  'capstepn', 'fieldnote', 'bench', 'benchout',
-                  'classrule', 'classsharp', 'classsharpn',
-                  'classnote', 'classblend', 'tonegrade',
-                  'classbalance', 'classbalancen',
-                  'decals', 'decalspacing', 'decalspacingn', 'decalnote',
-                  'decalterrain',
-                  'classcoherence', 'classcoherencen',
-                  'classaltitude', 'classaltituden', 'classwander', 'classwandern',
+                  'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn', 'wangnote',
+                  'relief', 'reliefn', 'reliefscale', 'reliefscalen', 'bandn',
+                  'subdiv', 'subdivn', 'seam', 'viewsn', 'sorterr', 'pop',
+                  'gridanglen', 'lodbasen', 'lodinfo', 'fogn', 'freefly',
+                  'flynote', 'shaden', 'exposuren', 'figuremode', 'figexit',
+                  'scenepick', 'heightpick', 'expert', 'busy', 'subdivrow',
+                  'gpuname', 'detailamtn', 'genseed', 'gensize', 'genbtn',
+                  'genstatus', 'terrainwin', 'gencards', 'genrecent',
+                  'presetchips', 'saturationn', 'macron', 'resn', 'fovn',
+                  'gainn', 'viewWalk', 'speedn', 'tileorder', 'mergethrn',
+                  'mergestat', 'capture', 'capframes', 'capframesn',
+                  'capcentre', 'caparc', 'caparcn', 'capstepn', 'fieldnote',
+                  'bench', 'benchout', 'classsharpn', 'classnote',
+                  'classblend', 'classbalance', 'classbalancen',
+                  'decalspacingn', 'decalnote', 'classcoherencen',
+                  'classaltituden', 'classwander', 'classwandern',
                   'classshares', 'classbalancelbl', 'grip', 'overlay']) {
   ui[id] = $(id);
 }
@@ -695,6 +681,13 @@ const SKIES = {
 };
 let sky = 'overcast';
 let fogScale = 1.0;
+// Haze per metre is set for a 24-cell world. A larger world keeps the haze
+// it has at the same fraction of its width: at a fixed density per metre,
+// a few hundred metres of ground read as haze alone.
+const FOG_CELLS = 24;
+function fogDensity(sky) {
+  return sky.fog * fogScale * Math.min(1, FOG_CELLS / Math.max(cellsN, 1));
+}
 let orbiting = false;
 
 // Green to red as detail drops, the usual engine LOD debug colours.
@@ -1993,7 +1986,7 @@ function drawFrame() {
     gl.uniform1f(farU.farStart, farStart);
     gl.uniform1f(farU.farBand, farBand);
     gl.uniform3fv(farU.fogColour, new Float32Array(S.horizon));
-    gl.uniform1f(farU.fogDensity, S.fog * fogScale);
+    gl.uniform1f(farU.fogDensity, fogDensity(S));
     gl.uniform1f(farU.exposure, exposure);
     gl.uniform1f(farU.shade, groundShade);
     gl.uniform1f(farU.saturation, saturation);
@@ -2076,7 +2069,7 @@ function drawFrame() {
     gl.uniform2f(splatU.gridRot, Math.cos(gridAngle * Math.PI / 180),
                  Math.sin(gridAngle * Math.PI / 180));
     gl.uniform3fv(splatU.fogColour, new Float32Array(S.horizon));
-    gl.uniform1f(splatU.fogDensity, S.fog * fogScale);
+    gl.uniform1f(splatU.fogDensity, fogDensity(S));
 
     // Cells drawn far to near and composited 'over'. Splats are sorted
     // within a patch, never across cells - the source of boundary artifacts.

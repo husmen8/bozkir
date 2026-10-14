@@ -1396,14 +1396,13 @@ def test_presets_stack():
 
 def test_ground_is_the_published_method():
     """The tracked file holds one method, flat, that any capture can use."""
-    from bozkir.presets import PRESETS, load_all, resolve
+    from bozkir.presets import PRESETS, load_all
     p = load_all(PRESETS)
-    assert set(p) == {"ground", "desert13"}
+    assert set(p) == {"ground"}
     g = p["ground"]
     assert "base" not in g and g["classes"] == "auto" and g["class_scale"] == "auto"
     assert g["frames"] and g["level_tone"] and g["diamonds"] and g["pure_share"] > 0
     assert g["centre_shape"] > 2 and g["centre_size"] == 0 and 0 < g["pool_share"] < 1
-    assert resolve(p, ["desert13"]) == g
 
 
 def test_desert4_is_desert3_plus_todays_flags():
@@ -2661,6 +2660,30 @@ def test_every_script_imports():
             pass                      # argparse in a __main__ guard is fine
         except ImportError as e:
             raise AssertionError(f"{path.name}: {e}") from e
+
+
+def test_dem_window_is_square_in_metres():
+    """A 1 arc-second DEM at 37 deg N has posts about 25 x 31 m; the window
+    comes back square in metres, the size asked for, at the coarser spacing."""
+    try:
+        import rasterio
+        from rasterio.transform import from_origin
+    except ImportError:
+        return
+    import tempfile
+    from bozkir.terrain import read_dem_window
+    step = 1 / 3600
+    z = np.add.outer(np.arange(400.0), np.arange(400.0)).astype(np.float32)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "dem.tif"
+        with rasterio.open(path, "w", driver="GTiff", width=400, height=400, count=1,
+                           dtype="float32", crs="EPSG:4326",
+                           transform=from_origin(-119.0, 37.1, step, step)) as dst:
+            dst.write(z, 1)
+        a, good, res = read_dem_window(path, 37.05, -118.95, 3.0)
+    assert a.shape[0] == a.shape[1] and good.all()
+    assert abs(res * a.shape[0] - 3000.0) < 1e-6
+    assert 30.0 < res < 32.0, res                    # the 31 m north-south posts
 
 
 def main():

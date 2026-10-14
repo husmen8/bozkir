@@ -214,33 +214,7 @@
                 </div>
             </details>
 
-            <details open style="--c:#7fb0a0">
-                <summary data-info="camera">camera</summary>
-                <div class="body">
-                    <div class="seg">
-                        <button id="viewGround" data-tip="Elevation 3°, 8 cells out.">ground</button>
-                        <button id="viewSurvey" data-tip="Elevation 32°, 14 cells out.">survey</button>
-                        <button id="viewTop" data-tip="Elevation 85°, 18 cells out: the layout from above.">top</button>
-                    </div>
-                    <div class="cols">
-                        <button id="viewWalk" class="primary" data-info="walk" data-tip="First person on the ground. WASD walks, shift runs, V leaves.">walk on it</button>
-                        <button id="reset" data-tip="Azimuth 45°, elevation 25°.">reset view</button>
-                    </div>
-                    <div class="note" id="flynote">drag orbits · WASD moves · scroll zooms</div>
-                    <label class="c adv"><input type="checkbox" id="orbit"> slow orbit</label>
-                    <label class="c adv" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
-                    <div class="s adv">
-                        <input type="range" id="fov" min="20" max="100" value="60">
-                        <label>field of view<b id="fovn">60°</b></label>
-                    </div>
-                    <div class="r adv"><span>azimuth</span><span class="v" id="azim">—</span></div>
-                    <div class="r adv"><span>elevation</span><span class="v" id="elev">—</span></div>
-                    <div class="r adv"><span>distance</span><span class="v" id="dist">—</span></div>
-                    <div class="r adv"><span>fly speed</span><span class="v" id="speedn">1.00</span></div>
-                </div>
-            </details>
-
-            <details style="--c:#6fa0b8">
+            <details open style="--c:#6fa0b8">
                 <summary data-info="look">look</summary>
                 <div class="body">
                     <select id="sky" data-tip="Sets the haze colour too.">
@@ -277,6 +251,32 @@
             </details>
 
             <div class="divider">research</div>
+
+            <details open style="--c:#7fb0a0">
+                <summary data-info="camera">camera</summary>
+                <div class="body">
+                    <div class="seg">
+                        <button id="viewGround" data-tip="Elevation 3°, 8 cells out.">ground</button>
+                        <button id="viewSurvey" data-tip="Elevation 32°, 14 cells out.">survey</button>
+                        <button id="viewTop" data-tip="Elevation 85°, 18 cells out: the layout from above.">top</button>
+                    </div>
+                    <div class="cols">
+                        <button id="viewWalk" class="primary" data-info="walk" data-tip="First person on the ground. WASD walks, shift runs, V leaves.">walk on it</button>
+                        <button id="reset" data-tip="Azimuth 45°, elevation 25°.">reset view</button>
+                    </div>
+                    <div class="note" id="flynote">drag orbits · WASD moves · scroll zooms</div>
+                    <label class="c adv"><input type="checkbox" id="orbit"> slow orbit</label>
+                    <label class="c adv" data-tip="WASD flies the camera itself instead of sliding the orbit centre."><input type="checkbox" id="freefly"> free fly</label>
+                    <div class="s adv">
+                        <input type="range" id="fov" min="20" max="100" value="60">
+                        <label>field of view<b id="fovn">60°</b></label>
+                    </div>
+                    <div class="r adv"><span>azimuth</span><span class="v" id="azim">—</span></div>
+                    <div class="r adv"><span>elevation</span><span class="v" id="elev">—</span></div>
+                    <div class="r adv"><span>distance</span><span class="v" id="dist">—</span></div>
+                    <div class="r adv"><span>fly speed</span><span class="v" id="speedn">1.00</span></div>
+                </div>
+            </details>
 
             <details class="adv" style="--c:#d0b26a">
                 <summary data-info="renderer">renderer</summary>

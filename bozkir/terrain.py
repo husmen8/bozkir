@@ -17,7 +17,7 @@ import numpy as np
 
 __all__ = ["gradient", "slope", "tpi", "curvature", "flow_accumulation",
            "landform", "coverage", "LANDFORMS",
-           "read_dsm", "largest_rectangle", "NODATA_BELOW",
+           "read_dsm", "read_dem_window", "largest_rectangle", "NODATA_BELOW",
            "height_from_points", "write_height_png",
            "read_height_png", "HEIGHT_ENCODING"]
 
@@ -230,6 +230,45 @@ def read_dsm(path):
             a = a[..., 0]
         good = np.isfinite(a) & (a > NODATA_BELOW)
         return a, good, None
+
+
+def read_dem_window(path, lat, lon, km, size=None):
+    """A square `km` on a side around (lat, lon) from a DEM in geographic
+    coordinates (Copernicus GLO-30: 1 arc-second posts), resampled to
+    square pixels in metres. Returns height, validity and pixel size in
+    metres, as read_dsm does. Needs rasterio.
+
+    A degree of longitude shrinks with cos(latitude), so posts are not
+    square on the ground (about 25 x 31 m at 37 deg N); the window is cut
+    in metres and resampled to n x n, n set by the coarser post spacing."""
+    import rasterio
+    from rasterio.windows import from_bounds
+    half = 500.0 * km
+    dlat = half / 110540.0
+    dlon = half / (111320.0 * np.cos(np.radians(lat)))
+    with rasterio.open(path) as src:
+        if src.crs is None or not src.crs.is_geographic:
+            raise ValueError(f"{path}: not in geographic coordinates; use read_dsm")
+        win = from_bounds(lon - dlon, lat - dlat, lon + dlon, lat + dlat, src.transform)
+        win = win.round_offsets().round_lengths()
+        a = src.read(1, window=win, boundless=False).astype(np.float64)
+        nodata = src.nodata
+        post_x = abs(src.transform.a) * 111320.0 * np.cos(np.radians(lat))
+        post_y = abs(src.transform.e) * 110540.0
+    if a.size == 0:
+        raise ValueError(f"({lat}, {lon}) is outside {path}")
+    good = np.isfinite(a) & (a > NODATA_BELOW)
+    if nodata is not None:
+        good &= a != nodata
+    n = int(round(1000.0 * km / max(post_x, post_y)))
+    if size:
+        n = min(n, size)
+    from PIL import Image
+    a = np.asarray(Image.fromarray(a.astype(np.float32)).resize((n, n), Image.BILINEAR),
+                   dtype=np.float64)
+    good = np.asarray(Image.fromarray(good.astype(np.uint8) * 255).resize((n, n),
+                                                                           Image.NEAREST)) > 0
+    return a, good, 1000.0 * km / n
 
 
 def largest_rectangle(mask):
