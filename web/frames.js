@@ -105,13 +105,23 @@ export function keepChance(share, prominence) {
   return Math.pow(share, 1 / (1 + 3 * Math.min(1, Math.max(0, prominence))));
 }
 
+/** How sharply the blend by spot turns from one material to the other:
+ *  4, a narrow strip dissolves; lower, a wider one (spotSharpness). */
+export const SPOT_SHARP = 4;
+
+/** The sharpness for a blend width from 0 (the narrow strip) to 1 (the
+ *  widest, about a cell either side). Mirrors uSpotSharp. */
+export function spotSharpness(width) {
+  return SPOT_SHARP - 2.8 * Math.min(1, Math.max(0, width));
+}
+
 /** The class blend by spot: a cell's own-material weight `w` (the mix,
  *  0..1, complementary between the two materials drawn) sharpened about
- *  its middle, so a spot is one material or the other and only a narrow
- *  strip dissolves; a prominent splat (0..1) keeps more of its chance
+ *  its middle by `sharp`, so a spot is one material or the other and only
+ *  a strip dissolves; a prominent splat (0..1) keeps more of its chance
  *  there. Mirrors the splat shader (uSpots). */
-export function spotShare(w, prominence = 0) {
-  const s = Math.min(1, Math.max(0, 0.5 + (w - 0.5) * 4));
+export function spotShare(w, prominence = 0, sharp = SPOT_SHARP) {
+  const s = Math.min(1, Math.max(0, 0.5 + (w - 0.5) * sharp));
   const a = s ** 3, b = (1 - s) ** 3;
   return keepChance(a + b > 0 ? a / (a + b) : 0, prominence);
 }
@@ -190,10 +200,11 @@ export function spotField(classAt, i, j, cls) {
 }
 
 /** What cell (i, j) draws in the blend: its own material's field first,
- *  then each other material within reach whose field rises over 0.375
- *  somewhere its splats can read (spotShare of it above zero), as
- *  [{ cls, field }]; only its own where nothing reaches. */
-export function spotDraws(classAt, i, j, warp = SPOT_WARP) {
+ *  then each other material within reach whose field rises over where
+ *  spotShare of it starts (0.375 at the default sharpness) somewhere its
+ *  splats can read, as [{ cls, field }]; only its own where nothing
+ *  reaches. */
+export function spotDraws(classAt, i, j, warp = SPOT_WARP, sharp = SPOT_SHARP) {
   const own = classAt(i, j), near = new Set();
   for (let dj = -2; dj <= 2; dj++) {
     for (let di = -2; di <= 2; di++) {
@@ -204,7 +215,7 @@ export function spotDraws(classAt, i, j, warp = SPOT_WARP) {
   const out = [{ cls: own, field: spotField(classAt, i, j, own) }];
   for (const k of [...near].sort((a, b) => a - b)) {
     const field = spotField(classAt, i, j, k);
-    if (fieldReaches(field, warp)) out.push({ cls: k, field });
+    if (fieldReaches(field, warp, sharp)) out.push({ cls: k, field });
   }
   return out;
 }
@@ -220,13 +231,14 @@ export function fieldAt(field, x, y) {
     + (f(i, j + 1) * (1 - fx) + f(i + 1, j + 1) * fx) * fy;
 }
 
-/** Whether a material's field rises over 0.375 (where spotShare of it
- *  starts) anywhere a cell's splats can read it: its square, moved by up
- *  to `warp`. A bilinear field is highest at the corners of its pieces,
- *  so those points are all it takes. */
-export function fieldReaches(field, warp = SPOT_WARP) {
+/** Whether a material's field rises over where spotShare of it starts
+ *  (0.5 - 0.5 / sharp: 0.375 at the default) anywhere a cell's splats can
+ *  read it: its square, moved by up to `warp`. A bilinear field is highest
+ *  at the corners of its pieces, so those points are all it takes. */
+export function fieldReaches(field, warp = SPOT_WARP, sharp = SPOT_SHARP) {
   const at = [-warp, -0.5, 0, 0.5, 1, 1.5, 1 + warp].filter((v) => v >= -warp && v <= 1 + warp);
-  for (const y of at) for (const x of at) if (fieldAt(field, x, y) > 0.375) return true;
+  const from = 0.5 - 0.5 / sharp;
+  for (const y of at) for (const x of at) if (fieldAt(field, x, y) > from) return true;
   return false;
 }
 

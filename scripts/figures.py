@@ -202,29 +202,35 @@ def fig_ordering(out):
     plt.close(fig)
 
 
-def _tile_images(res=48):
-    """Every tile of the desert tileset rendered straight down, north up."""
-    import json
+def _tile_images(res=48, name="desert", tiles=None, centres=None):
+    """Tiles and centres of a web/data tileset rendered straight down, north
+    up, on the same square: (manifest, tile images, centre images). All of
+    them, or the indices in `tiles` and `centres`."""
     from bozkir.graphcut import render_patch
-    from bozkir.ply import Splats, SH_C0
-    m = json.loads((ROOT / "web" / "data" / "desert.json").read_text())
-    raw = np.fromfile(ROOT / "web" / "data" / "desert.splat", dtype=np.uint8)
-    n = len(raw) // 32
-    rec = raw[:n * 32].reshape(n, 32)
-    f = rec[:, :24].copy().view(np.float32).reshape(n, 6)
-    rgba = rec[:, 24:28].astype(np.float64) / 255
-    q = (rec[:, 28:32].astype(np.float64) - 128) / 128
-    q /= np.linalg.norm(q, axis=1, keepdims=True) + 1e-9
-    imgs = []
-    for t in m["tiles"]:
-        a, c = t["levels"][0]
-        sp = Splats(xyz=f[a:a + c, :3].astype(np.float64),
-                    opacity=rgba[a:a + c, 3], scale=f[a:a + c, 3:6].astype(np.float64),
-                    rot=q[a:a + c], sh_dc=(rgba[a:a + c, :3] - 0.5) / SH_C0,
-                    sh_rest=np.zeros((c, 0, 3)), sh_degree=0)
-        rgb, _ = render_patch(sp, m["size"], res, m.get("up_axis", 2))
-        imgs.append(np.clip(rgb, 0, 1))
-    return m["tiles"], imgs
+    from bozkir.pack import read_splat
+    data = ROOT / "web" / "data"
+    m, s = read_splat(data / f"{name}.splat", data / f"{name}.json")
+
+    def render(entry):
+        a, c = entry["levels"][0]
+        rgb, _ = render_patch(s.subset(np.arange(a, a + c)), m["size"], res,
+                              m.get("up_axis", 2))
+        return np.clip(rgb, 0, 1)
+
+    tl, cl = m["tiles"], m.get("centres", [])
+    return (m, [render(tl[i]) for i in (range(len(tl)) if tiles is None else tiles)],
+            [render(cl[i]) for i in (range(len(cl)) if centres is None else centres)])
+
+
+def _centre_mask(m, res):
+    """Where a centre covers its cell, as the splat shader blends it: a
+    rounded square (p-norm ball) of the frame radius, faded over the ring."""
+    fr = m.get("frames") or {}
+    size, r = m["size"], fr.get("radius", 0.0)
+    ring, p = max(fr.get("ring", 0.15), 1e-6), fr.get("shape", 2.0)
+    x = (np.arange(res) + 0.5) / res * size - size / 2
+    d = (np.abs(x)[None, :] ** p + np.abs(x)[:, None] ** p) ** (1 / p)
+    return np.clip((r - d) / ring + 0.5, 0, 1)
 
 
 def _wang_layout(tiles, want, seed=0):
@@ -245,37 +251,125 @@ def _wang_layout(tiles, want, seed=0):
 
 
 def fig_map(out):
-    """The rule off and on, rendered from the real tiles straight down with
-    the terrain as shading; only where each class goes differs."""
+    """The rule off and on, rendered from the real tiles and centres straight
+    down with the terrain as shading; only where each material goes differs."""
     plt = _plt()
-    tiles, imgs = _tile_images()
-    res = imgs[0].shape[0]
+    m, imgs, cimgs = _tile_images()
+    tiles, res = m["tiles"], imgs[0].shape[0]
+    k = max(1, m.get("classes", 2))
+    share = np.asarray(m.get("shares") or [1 / k] * k, float)
+    share /= share.sum()
     z, sed = terrain(0)
-    rule = run_rule(z, sed)["cls"]
-    off = random_classes(SHARE)
-    shade = hillshade(resample(z, N * res))
-    shade = 0.62 + 0.38 * shade
+    rule = classify(resample(z, N * OVER).ravel(), N, k,
+                    sediment=resample(sed, N * OVER).ravel(), balance=list(share),
+                    sharpness=3, coherence=2, altitude=0.4)["cls"]
+    rng = np.random.default_rng(0)
+    off = np.repeat(np.arange(k), np.round(share * N * N).astype(int))[:N * N]
+    off = rng.permutation(np.pad(off, (0, N * N - len(off)), mode="edge"))
+    # Decal copies (with a `base`) are placed sparsely by the viewer; left out.
+    pools = [[c for c, e in enumerate(m.get("centres", []))
+              if e["class"] == cls and "base" not in e]
+             for cls in range(k)]
+    mask = _centre_mask(m, res)[..., None] if cimgs else None
+    shade = 0.62 + 0.38 * hillshade(resample(z, N * res))
     panels = []
     for want in (off, rule):
         g = _wang_layout(tiles, want)
+        crng = np.random.default_rng(1)
         mos = np.zeros((N * res, N * res, 3))
         for j in range(N):
             for i in range(N):
+                cell = imgs[g[j, i]]
+                pool = pools[tiles[g[j, i]]["class"]]
+                if mask is not None and pool:
+                    # A centre from the cell's material, quarter-turned.
+                    c = np.rot90(cimgs[pool[int(crng.integers(len(pool)))]],
+                                 int(crng.integers(4)))
+                    cell = cell * (1 - mask) + c * mask
                 r0 = (N - 1 - j) * res                  # north at the top
-                mos[r0:r0 + res, i * res:(i + 1) * res] = imgs[g[j, i]]
+                mos[r0:r0 + res, i * res:(i + 1) * res] = cell
         # The terrain grid has row 0 in the north too (image order).
         panels.append(np.clip(mos * shade[..., None] * 1.15, 0, 1))
+    shares = " / ".join(f"{s:.0%}" for s in share)
     fig, ax = plt.subplots(1, 2, figsize=(14, 7.3))
     for a, img, title in zip(ax, panels,
                              ("rule off: each cell's material at random",
-                              f"rule on: {SHARE:.0%} class 0 (collected ground) by terrain")):
+                              "rule on: placed by terrain")):
         a.imshow(img)
         a.set_title(title)
         a.set_xticks([])
         a.set_yticks([])
-    fig.suptitle(f"The desert tileset on generated desert terrain, {N}x{N} "
-                 "tiles, top-down - same tiles, same share, same layout rules")
+    fig.suptitle(f"The desert tileset on generated desert terrain, {N}x{N} cells, "
+                 f"top-down: {k} materials at {shares}, tiles with their centres, "
+                 "no blending")
     fig.savefig(out / "fig_map.png")
+    plt.close(fig)
+
+
+WORLDS = ("desert", "river")
+
+
+def fig_materials(out, worlds=WORLDS, edges=6, middles=4, res=160):
+    """Each public tileset's materials as the viewer gets them: a row per
+    material, its first edge tiles and centre pieces straight down, with the
+    counts and the share of the ground it was given."""
+    import json
+    plt = _plt()
+    about = json.loads((ROOT / "web" / "tilesets.json").read_text())
+    rows = []
+    for w in worlds:
+        m = json.loads((ROOT / "web" / "data" / f"{w}.json").read_text())
+        for k in range(m["classes"]):
+            ti = [i for i, t in enumerate(m["tiles"]) if t["class"] == k]
+            # Decal copies (with a `base`) are placed sparsely; not the pool.
+            ci = [i for i, c in enumerate(m.get("centres", []))
+                  if c["class"] == k and "base" not in c]
+            _, timg, cimg = _tile_images(res, w, ti[:edges], ci[:max(middles, edges)])
+            if cimg:
+                # As the viewer shows them: each edge tile with a centre in.
+                mask = _centre_mask(m, res)[..., None]
+                timg = [t * (1 - mask) + cimg[i % len(cimg)] * mask
+                        for i, t in enumerate(timg)]
+            cimg = cimg[:middles]
+            rgb = np.mean([im.reshape(-1, 3).mean(0) for im in timg], axis=0)
+            names = about.get(w, {}).get("names")
+            name = names[k] if names else None
+            share = (m.get("shares") or [1 / m["classes"]] * m["classes"])[k]
+            rows.append([w, name, timg, cimg, len(ti), len(ci), share, rgb])
+        # Unnamed materials by what they look like: green, else by brightness.
+        mine = [r for r in rows if r[0] == w and r[1] is None]
+        bare = sorted((r for r in mine if r[7][1] <= max(r[7][0], r[7][2]) + 0.01),
+                      key=lambda r: r[7].mean())
+        for r in mine:
+            r[1] = ("scrub" if not any(r is b for b in bare) else
+                    "sand" if len(bare) == 1 else
+                    "darker sand" if r is bare[0] else
+                    "pale sand" if r is bare[-1] else "sand")
+    cols = edges + 1 + middles
+    fig, ax = plt.subplots(len(rows), cols, figsize=(1.6 * cols, 1.85 * len(rows)),
+                           gridspec_kw={"width_ratios": [1] * edges + [0.25] + [1] * middles})
+    for r, (w, name, timg, cimg, nt, nc, share, _) in enumerate(rows):
+        for c in range(cols):
+            a = ax[r, c]
+            a.set_xticks([])
+            a.set_yticks([])
+            img = (timg[c] if c < edges and c < len(timg) else
+                   cimg[c - edges - 1] if c > edges and c - edges - 1 < len(cimg) else None)
+            if img is None:
+                a.axis("off")
+                continue
+            a.imshow(img)
+        ax[r, 0].set_ylabel(f"{w}\n{name}", fontsize=10)
+        ax[r, 0].set_title(f"{nt} tiles, {share:.0%} of the ground", loc="left",
+                           fontsize=9)
+        ax[r, edges + 1].set_title(f"{nc} centre piece{'s' if nc > 1 else ''}" if nc else
+                                   "no centres: whole tiles", loc="left", fontsize=9)
+    fig.suptitle(f"The materials of both worlds, straight down, each square "
+                 f"{rows and json.loads((ROOT / 'web' / 'data' / f'{worlds[0]}.json').read_text())['size']:g} m: "
+                 "tiles as the viewer joins them (edge tile plus a centre piece), and the centre pieces",
+                 fontsize=10)
+    fig.subplots_adjust(wspace=0.05, hspace=0.35)
+    fig.savefig(out / "fig_materials.png")
     plt.close(fig)
 
 
@@ -313,8 +407,44 @@ def fig_profiles(out):
     plt.close(fig)
 
 
+def fig_water(out):
+    """The river's water as measured from the L2 drone photos
+    (web/data/water.json, scripts/water_texture.py): the shallow and deep
+    tiles at their ground size, and the share of the bed still seen
+    against distance from the waterline with its fitted curve."""
+    import json
+    from PIL import Image
+    plt = _plt()
+    data = ROOT / "web" / "data"
+    meta = json.loads((data / "water.json").read_text())
+    lay = meta["layers"]
+    fig, ax = plt.subplots(1, 3, figsize=(10.5, 3.2), gridspec_kw={"width_ratios": [1, 1, 1.5]})
+    for a, (img, m, title) in zip(ax, [("water.png", meta, "shallow water"),
+                                       ("water_deep.png", meta["deep"], "deep channel")]):
+        a.imshow(Image.open(data / img))
+        a.set_title(title + "\n" + f"{m['source']}, {m['metres']:.2f} m across")
+        a.axis("off")
+    b = lay["bands"]
+    mid = [(x["from_m"] + x["to_m"]) / 2 for x in b]
+    wid = [x["to_m"] - x["from_m"] for x in b]
+    ax[2].bar(mid, [x["t"] for x in b], width=[0.9 * w for w in wid], color="#9fb7b4",
+              label="measured (stone contrast)")
+    d = np.linspace(0, b[-1]["to_m"], 100)
+    ax[2].plot(d, lay["t0"] * np.exp(-d / lay["length_m"]), color="#9a6b1f",
+               label=f"T = {lay['t0']:.2f} exp(-d / {lay['length_m']:.2f} m)")
+    ax[2].set_xlabel("distance from the waterline (m)")
+    ax[2].set_ylabel("share of the bed seen, T")
+    ax[2].set_ylim(0, 1.05)
+    ax[2].set_title(f"bed under the water, {len(lay['photos'])} photos")
+    ax[2].legend(frameon=False, fontsize=9)
+    fig.subplots_adjust(wspace=0.35)
+    fig.savefig(out / "fig_water.png")
+    plt.close(fig)
+
+
 FIGURES = {"rule": fig_rule, "seeds": fig_seeds, "balance": fig_balance,
-           "ordering": fig_ordering, "profiles": fig_profiles, "map": fig_map}
+           "ordering": fig_ordering, "profiles": fig_profiles, "map": fig_map,
+           "water": fig_water, "materials": fig_materials}
 
 
 def main(argv=None):

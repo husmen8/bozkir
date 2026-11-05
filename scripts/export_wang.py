@@ -33,7 +33,7 @@ from bozkir.scene import (add_scene_args, scene_from_args, prepare,  # noqa: E40
 from bozkir.select import cap_height  # noqa: E402
 from bozkir.wang import (build_tile_set, minimal_codes, layout, check_layout,  # noqa: E402
                          edge_gaussians)
-from bozkir.pack import pack, tile_levels, STRIDE  # noqa: E402
+from bozkir.pack import pack, tile_levels, STRIDE, COMPACT_STRIDE  # noqa: E402
 from bozkir.tile import haze_splats, rotate_patch  # noqa: E402
 from bozkir.materials import choose_classes, haze, height_order, weigh_shares  # noqa: E402
 from bozkir.pick import (apart, apart_alike, colour_alike, dense_first,  # noqa: E402
@@ -228,6 +228,18 @@ def _progress_line():
             sys.stdout.flush()
     return progress
 
+LOD_FOCAL, LOD_DENSITY = 935.0, 4.0   # 1080 px high at 60 degrees; splats per pixel
+
+
+def lod_base(meta, size):
+    """Tiles from the eye at which level 1 starts (it does at 2 x this): a
+    tile of N splats is size * focal / d pixels across at d, so N splats per
+    pixel squared reach LOD_DENSITY at d = focal * sqrt(N / LOD_DENSITY) ...
+    in tiles, half of it, since the switch is at twice the base."""
+    n = float(np.median([t["count"] for t in meta])) if meta else 1.0
+    return round(LOD_FOCAL * np.sqrt(LOD_DENSITY / max(n, 1.0)) / 2.0, 2)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -309,6 +321,13 @@ def main(argv=None):
                          "lightest instead of by share. The viewer lays its "
                          "classes from hollow to crest, so tones then meet in "
                          "order and the map shades from one to the next")
+    ap.add_argument("--class-order", default="", metavar="I,J,K",
+                    help="the materials in this order, by their place in the "
+                         "order the export prints without it: 1,2,0 moves the "
+                         "first to the end. For captures put side by side, "
+                         "where tone says nothing about place (a dark lawn "
+                         "next to gravel would take the river rule's water "
+                         "edge)")
     ap.add_argument("--min-share", type=float, default=0.0,
                     help="measure how much of the capture each class covers "
                          "(written to the tileset, where the viewer starts "
@@ -430,6 +449,11 @@ def main(argv=None):
     ap.add_argument("--stride", type=float, default=0.5)
     ap.add_argument("--thickness", type=float, default=None)
     ap.add_argument("--max-tilt", type=float, default=12.0)
+    ap.add_argument("--level-search", action="store_true",
+                    help="level each candidate on its own ground plane before "
+                         "judging it, so ground on a slope (a hollow's walls) "
+                         "is measured as the flat tile it becomes; --max-tilt "
+                         "then limits the slope. Off by default.")
     ap.add_argument("--features", action="store_true",
                     help="look for tiles with something in them - a boulder, "
                          "a bush - instead of the flattest ground. Only the "
@@ -483,7 +507,8 @@ def main(argv=None):
                     help="drop every candidate whose square holds this "
                          "point (a centre from the preview's list). By "
                          "place, not number, so it holds when the export "
-                         "searches wider than the preview did. Repeatable")
+                         "searches wider than the preview did. The centre "
+                         "pool too, with --frames. Repeatable")
     ap.add_argument("--classes", type=lambda v: v if v == "auto" else int(v), default=1,
                     help="build this many tile sets, one per material found "
                          "in the capture, all sharing the same edge codes so "
@@ -529,6 +554,18 @@ def main(argv=None):
     ap.add_argument("--lod", type=int, default=4,
                     help="levels of detail per tile; each holds a quarter of "
                          "the splats of the one before, as in GSWT 3.5")
+    ap.add_argument("--river-rule", action="store_true",
+                    help="the manifest asks the viewer for rule.json's river classes "
+                         "(HAND, channels: water edge, bar, bank)")
+    ap.add_argument("--compact", action="store_true",
+                    help="write the compact .splat layout (20 bytes a splat, 16-bit "
+                         "position and scale; bozkir.pack) instead of the 32-byte one")
+    ap.add_argument("--lod-merge", action="store_true",
+                    help="coarser levels merge neighbouring splats into one "
+                         "Gaussian (bozkir.pack.merge_level) instead of "
+                         "dropping three in four and growing the rest; the "
+                         "manifest then says from how far the first coarser "
+                         "level is used (lod_base, from the splat density)")
     ap.add_argument("-o", "--out", type=Path, default=None)
     add_scene_args(ap)
     add_preset_args(ap)
@@ -756,6 +793,16 @@ def main(argv=None):
             full = (split_materials(chosen, args.classes) if args.min_share > 0
                     else split_classes(chosen, classes=args.classes, per_class=10 ** 9))
             keep = list(range(len(full)))
+
+            def by_hand(order):
+                if not args.class_order:
+                    return order
+                pick = [int(j) for j in args.class_order.split(",")]
+                if sorted(pick) != list(range(len(order))):
+                    raise SystemExit(f"--class-order needs each of 0..{len(order) - 1} "
+                                     f"once, got {args.class_order}")
+                return [order[j] for j in pick]
+
             if args.min_share > 0:
                 sh = class_shares(s, full, args.size, up, seen=extra.get("seen"))
                 keep = sorted(keep, key=lambda i: -sh[i])
@@ -766,6 +813,7 @@ def main(argv=None):
                     # map shades instead of jumping from dark to light.
                     keep = sorted(keep, key=lambda i: float(np.mean(
                         [appearance(c[2])[:3] for c in full[i]])))
+                keep = by_hand(keep)
                 print("\n  share of the capture's ground, by material (mean rgb)"
                       + (", darkest first: hollows to crests" if args.tone_order else "")
                       + ":")
@@ -792,6 +840,8 @@ def main(argv=None):
                     extra["thick"] = thick
                     ground = used
                 extra["shares"] = [round(v, 3) for v in ground]
+            else:
+                keep = by_hand(keep)
             full = [full[i] for i in keep]
             extra["materials"] = full
             if args.height_order and args.tone_order:
@@ -1120,7 +1170,19 @@ def main(argv=None):
             class_sets[ci] = list(edge) + [c for c in class_sets[ci]
                                            if all(c is not e for e in edge)]
             decisions[ci].append(line)
-            pool, mids, shared, why = pick_pool(class_sets[ci][:n_c], material[ci],
+            from_ = material[ci]
+            if args.exclude_at:
+                # The pool comes from the material's whole ground, not from
+                # the patches excluded above.
+                pts = [[float(v) for v in q.split(",")] for q in args.exclude_at]
+                before = len(from_)
+                from_ = [c for c in from_
+                         if not any(abs(c[1][0] - px) <= d / 2 and abs(c[1][1] - py) <= d / 2
+                                    for px, py in pts)]
+                if before > len(from_):
+                    decisions[ci].append(f"centres: {before - len(from_)} pool candidates "
+                                         f"holding an --exclude-at point left out")
+            pool, mids, shared, why = pick_pool(class_sets[ci][:n_c], from_,
                                          args.centre_pool,
                                          args.size, d, geo, up, solid_d, not args.diamonds,
                                          args.pool_share, args.diamonds,
@@ -1431,8 +1493,8 @@ def main(argv=None):
     for t, c, k in zip(tiles, codes, tile_class):
         levels = []
         for part in tile_levels(t, args.lod, args.size, up, args.lod_compensate,
-                                args.level_tone, shift.setdefault(k, [])):
-            parts.append(pack(part))
+                                args.level_tone, shift.setdefault(k, []), merge=args.lod_merge):
+            parts.append(pack(part, stride=COMPACT_STRIDE if args.compact else STRIDE))
             levels.append([cursor, len(part)])
             cursor += len(part)
             total_levels += 1
@@ -1450,8 +1512,8 @@ def main(argv=None):
     for p, k in zip(pool_patches, pool_class):
         levels = []
         for part in tile_levels(p, args.lod, args.size, up, args.lod_compensate,
-                                args.level_tone):
-            parts.append(pack(part))
+                                args.level_tone, merge=args.lod_merge):
+            parts.append(pack(part, stride=COMPACT_STRIDE if args.compact else STRIDE))
             levels.append([cursor, len(part)])
             cursor += len(part)
         centre_meta.append({"start": levels[0][0], "count": levels[0][1],
@@ -1463,9 +1525,13 @@ def main(argv=None):
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(buf.tobytes())
     dest.with_suffix(".json").write_text(json.dumps({
-        "size": args.size, "up_axis": up, "stride": STRIDE,
+        "size": args.size, "up_axis": up, "stride": COMPACT_STRIDE if args.compact else STRIDE,
         "thickness": thickness, "blend": args.blend,
         "colours": args.colours, "wang": True, "lod": max(args.lod, 1),
+        # Merged levels: level 1 from 2 x lod_base tiles, where a full tile
+        # is down to about LOD_DENSITY splats per pixel at the viewer's focal.
+        **({"lod_base": lod_base(meta, args.size)} if args.lod_merge else {}),
+        **({"rule": "river"} if args.river_rule else {}),
         "classes": len(class_sets),
         **({"shares": extra["shares"]} if extra.get("shares") else {}),
         **({"ground_shares": extra["ground_shares"]} if extra.get("ground_shares") else {}),

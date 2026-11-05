@@ -2,10 +2,23 @@
   "_about": "What the viewer says about each public tileset: material names in the tileset's class order (the exporter's order, which is arbitrary), the unit its sizes are in, and one line for the scene card. A manifest's own 'names' wins over these.",
   "desert": {
     "units": "m",
+    "names": [
+      "scrub",
+      "darker sand",
+      "pale sand"
+    ],
     "note": "OpenDroneMap COPR dataset (Tobias and Mandel 2009, CC BY-SA 4.0)"
   },
   "starter": {
     "units": "m",
     "note": "synthetic tiles made in the browser, no capture"
+  },
+  "river": {
+    "units": "m",
+    "names": [
+      "grass",
+      "gravel"
+    ],
+    "note": "gravel and water: Lütschine L2 drone survey (Zenodo 6415047, CC BY 4.0); grass: Uruguayan native grassland UAV images (Zenodo 14771664, CC BY 4.0)"
   }
 }

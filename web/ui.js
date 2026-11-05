@@ -19,8 +19,50 @@ export function initUI(viewerApi) {
   setupIntro();
   setupInfo();
   setupShare();
+  setupTabs();
   const fo = $('fileopen');
   if (fo) fo.addEventListener('click', () => $('file').click());
+}
+
+// --------------------------------------------------------------- sidebar
+
+// Look and debug views beside the canvas, as Blender's sidebar: a tab per
+// page on its edge, a click shows that page and a second click on its tab
+// folds the sidebar to the tabs alone. The pages are the panel sections
+// marked data-side, moved here whole, so their controls stay what they were.
+// A Research-only page's tab is Research-only too.
+const SIDE_NAMES = { 'debug views': 'debug' };
+function setupTabs() {
+  const side = $('side');
+  if (!side) return;
+  const pages = side.querySelector('.pages'), strip = side.querySelector('.tabs');
+  const sections = [...document.querySelectorAll('#panel > details[data-side]')];
+  let shown = null;
+  const show = (d) => {
+    shown = shown === d ? null : d;
+    for (const x of sections) x.classList.toggle('shown', x === shown);
+    for (const b of strip.children) b.classList.toggle('on', b.section === shown);
+    side.classList.toggle('open', !!shown);
+  };
+  for (const d of sections) {
+    const sum = d.querySelector('summary');
+    const name = [...sum.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent).join('').trim().toLowerCase();
+    d.open = true;
+    pages.appendChild(d);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = SIDE_NAMES[name] || name;
+    b.section = d;
+    b.style.setProperty('--c', d.style.getPropertyValue('--c') || 'var(--dim)');
+    if (d.classList.contains('adv')) b.classList.add('adv');
+    b.addEventListener('click', () => show(d));
+    strip.appendChild(b);
+  }
+  // Leaving Research hides a Research-only page that was showing.
+  new MutationObserver(() => {
+    if (shown && shown.classList.contains('adv') && !document.body.classList.contains('expert')) show(shown);
+  }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 }
 
 // ------------------------------------------------------------------ modes
@@ -41,6 +83,7 @@ function setupModes() {
   $('modeResearch').addEventListener('click', () => setMode(true));
   // ?mode=research or ?mode=explore in a link wins over the remembered mode.
   const asked = new URLSearchParams(location.search).get('mode');
+  if (new URLSearchParams(location.search).get('embed') === '1') document.body.classList.add('embed');
   setMode(asked ? asked === 'research' : store.get('bozkir.expert') === '1');
   window.addEventListener('keydown', (e) => {
     if (e.target.matches('input, select, textarea')) return;
@@ -99,7 +142,7 @@ export function loadDone(note) {
   $('overlay').classList.add('ready');
   if (note) $('loadwarn').textContent = note;
   const q = new URLSearchParams(location.search);
-  const direct = q.has('v') || q.has('chapter') || q.has('nointro') || q.has('preset');
+  const direct = q.has('v') || q.has('chapter') || q.has('nointro') || q.has('preset') || q.has('demo');
   if (!note && (direct || store.get('bozkir.seenIntro'))) hideIntro();
 }
 
@@ -130,8 +173,8 @@ function showHint() {
 
 // The index, in reading order.
 const INDEX = [
-  ['pipeline', ['about', 'tileset', 'tiles', 'frames', 'terrain']],
-  ['materials', ['rule', 'share', 'blend', 'decals', 'decision']],
+  ['pipeline', ['about', 'capture', 'tileset', 'tiles', 'frames', 'terrain']],
+  ['materials', ['rule', 'water', 'share', 'blend', 'decals', 'decision']],
   ['viewing', ['world', 'relief', 'detail', 'presets', 'camera', 'walk', 'look', 'lighting', 'macro']],
   ['renderer', ['renderer', 'farfield', 'quality', 'warp', 'lod', 'ordering', 'merging']],
   ['evidence', ['measure', 'repetition']],
@@ -281,12 +324,14 @@ let chapterList = [];
 let chapterAt = -1;
 
 /** Build the story buttons from the presets that carry "chapter". */
-export function setChapters(presets) {
+/** The story buttons: the chapters of `story` (a tileset's own, by the
+ *  chapters' "story" key), or with none the chapters that name no story. */
+export function setChapters(presets, story = null) {
   const row = $('chapters');
   if (!row) return;
   row.textContent = '';
   chapterList = Object.entries(presets)
-    .filter(([, p]) => p && p.chapter)
+    .filter(([, p]) => p && p.chapter && (p.story || null) === story)
     .sort((a, b) => a[1].chapter - b[1].chapter);
   chapterList.forEach(([name, p], k) => {
     const b = document.createElement('button');
@@ -365,6 +410,7 @@ function sectionKeys(s) {
   set('kterrain', ok && !s.plain ? `${fmtLen(s.world)} across` : '');
   set('ktiles', ok && !s.plain ? `${s.tiles} × ${fmtLen(s.tileSize)}` : '');
   set('kmaterials', ok && !s.plain && s.names.length > 1 ? `${s.names.length}` : '');
+  set('kwater', ok && s.river > 0 ? `${fmtLen(s.river)} river` : '');
 }
 
 /** Body classes for what the loaded tileset has, so the panel shows only
@@ -434,7 +480,7 @@ export function updateCard(s) {
 /** Every panel control whose value differs from the page's default. */
 function changedControls() {
   const out = {};
-  for (const el of document.querySelectorAll('#panel input[id], #panel select[id]')) {
+  for (const el of document.querySelectorAll('#panel input[id], #panel select[id], #side input[id], #side select[id]')) {
     if (el.id === 'file' || el.id === 'expert' || el.id === 'scenepick' || el.id === 'heightpick') continue;
     if (el.type === 'checkbox') {
       if (el.checked !== el.defaultChecked) out[el.id] = el.checked;

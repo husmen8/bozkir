@@ -83,6 +83,19 @@ def _matrix_to_quat(R):
     return q / np.linalg.norm(q, axis=1, keepdims=True)
 
 
+def marker_splats(s, sat_min=0.4, value_min=0.2):
+    """Splats coloured like survey markers: strongly saturated red, pink,
+    blue or violet, hues natural ground (soil, stone, moss, grass) does not
+    reach. Stakes and targets left in a capture tile into every copy of their
+    patch, a row of coloured dots across the world."""
+    rgb = s.base_rgb
+    mx, mn = rgb.max(axis=1), rgb.min(axis=1)
+    sat = (mx - mn) / np.maximum(mx, 1e-6)
+    r, g, b = rgb.T
+    hue = np.degrees(np.arctan2(np.sqrt(3.0) * (g - b), 2.0 * r - g - b)) % 360.0
+    return (sat > sat_min) & (mx > value_min) & ((hue >= 300) | (hue < 20) | ((hue >= 160) & (hue < 300)))
+
+
 def cap_height(s, max_std, up_axis=2):
     """Flatten splats taller than `max_std` (metres, one standard deviation)
     instead of deleting them.

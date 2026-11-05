@@ -19,15 +19,20 @@ URL options:
 
 | option | effect |
 |---|---|
-| `?scene=desert` / `?scene=starter` | which tileset |
+| `?scene=desert` / `?scene=river` / `?scene=starter` | which tileset; the river opens on its own valley, view and story |
+| `?demo` | the one-minute demo of both worlds (`web/film.js`), after which the viewer is the visitor's; `&rec` waits on the title card for Space, for starting a screen recording first (F11 for full screen, Esc stops); `&slow=4` plays it four times slower; `&frames=30` waits to be rendered frame by frame by `node scripts/record_demo.mjs`, which writes `web/media/demo.mp4` (ffmpeg and a Chromium browser needed; smooth on any GPU) |
 | `?gen=canyon&seed=3&size=256` | generate this terrain in the browser |
 | `?height=<name>` | a height field from `web/data` under the current tiles |
 | `?preset=readme` | apply a named preset from `web/views.json` |
 
 **Explore** shows the scene, world, materials, camera and look; **Research**
 (the tab, or M) adds the renderer's switches, ordering, measurement, debug
-views and live numbers. **story** steps through capture, tiles, world and
-rule. **walk on it** puts you on the ground in first person (the terrain is
+views and live numbers. Look and debug views sit in the sidebar beside the
+canvas (its tabs on the right edge). **story** steps through capture, tiles,
+world and rule; a tileset can bring its own story (the river's adds its
+river). **standard** puts every control back to the tileset's own settings.
+**water** (section 05) cuts the river into the terrain and draws its water;
+**river width** is the main river's width in metres. **walk on it** puts you on the ground in first person (the terrain is
 the collider). **share** copies a link that reopens the exact view.
 
 **show the decision** paints each cell with the class the rule chose, grey
@@ -37,8 +42,10 @@ some of the other material, and cells in the blend band draw some of their
 runner-up.
 
 **Presets.** `web/views.json` holds named settings: the README's own, the
-matched pair for the rule on/off figure, a low vista, height alone, and the
-story chapters. A preset sets each control as a hand on the slider would,
+river's, the matched pair for the rule on/off figure, a low vista, height
+alone, and the story chapters. A tileset's manifest can name its own view
+(`view`), terrain (`terrain`: `{gen, seed, size}`), story (`story`) and the
+material a river's bars are made of (`bar`). A preset sets each control as a hand on the slider would,
 so it can only do what the panel can; a test checks every preset names real
 controls with values in range.
 
@@ -139,7 +146,7 @@ public demo has the desert tileset and the starter only.
 python scripts/validate_rule.py dtm.tif odm_orthophoto.tif --dsm dsm.tif
 python scripts/repetition.py desert
 python scripts/figures.py              # every README figure, from code
-python tests/run_all.py                # ~300 tests
+python tests/run_all.py                # ~375 tests
 ```
 
 The viewer's **Research** mode also has a scaling sweep (where the renderer

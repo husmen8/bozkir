@@ -59,7 +59,11 @@ function unturn(dir, c, s) {
 function sortPatch(p, dir, eye, out) {
     const [fx, fy, fz] = dir;
     const [ex, ey, ez] = eye;
-    const a = p.start, b = p.start + p.count;
+    // A helper holds only its own patches: `local` is where this one starts
+    // in its positions. Scratch and `out` go by that local place, the order
+    // holds global indices.
+    const o = p.local === undefined ? 0 : p.local - p.start;
+    const a = p.start + o, b = p.start + o + p.count;
     if (b <= a) return 0;
 
     let min = Infinity, max = -Infinity, behind = 0;
@@ -83,7 +87,7 @@ function sortPatch(p, dir, eye, out) {
     }
     starts[65535] = a;
     for (let q = 65535; q > 0; q--) starts[q - 1] = starts[q] + counts[q];
-    for (let i = a; i < b; i++) out[starts[depths[i]]++] = i;
+    for (let i = a; i < b; i++) out[starts[depths[i]]++] = i - o;
     return behind;
 }
 
@@ -212,6 +216,13 @@ self.onmessage = (e) => {
         const behind = new Uint32Array(patches.length);
         patches.forEach((p, j) => { behind[j] = sortPatch(p, msg.forward, msg.eye, order); });
         const out = order.slice();
+        if (msg.part != null) {
+            // A helper's share: its order and its patches' behind counts.
+            self.postMessage({ type: 'sortedPart', part: msg.part, seq: msg.seq, ring: msg.ring, order: out.buffer,
+                               behind: behind.buffer, ms: performance.now() - t0 },
+                             [out.buffer, behind.buffer]);
+            return;
+        }
         // Turned centres, one order each, end to end (offsets in order).
         const spins = msg.spins || [];
         let total = 0;

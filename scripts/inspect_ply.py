@@ -193,20 +193,24 @@ def main(argv=None):
     # ---- 8. Cost of dropping SH degree -----------------------------------
     # Measured over several view directions, in 0-255 units so the numbers
     # mean something perceptually.
+    # Only degrees below the file's own; a degree-0 file has nothing to drop.
+    lower = [deg for deg in (1, 0) if deg < s.sh_degree]
     sub = rng.choice(n, size=min(50_000, n), replace=False)
     small = Splats_subset(s, sub)
     dirs = _hemisphere_dirs(24, up_axis)
-    err = {1: [], 0: []}
-    for v in dirs:
+    err = {deg: [] for deg in lower}
+    for v in dirs if lower else ():
         ref = small.rgb(v)
-        for deg in (1, 0):
+        for deg in lower:
             err[deg].append(np.abs(small.truncate_sh(deg).rgb(v) - ref))
-    print("\n8. Cost of truncating SH (error vs degree 3, 0-255 scale)")
-    for deg in (1, 0):
+    print(f"\n8. Cost of truncating SH (error vs degree {s.sh_degree}, 0-255 scale)")
+    if not lower:
+        print("   degree 0 already; nothing to truncate")
+    for deg in lower:
         e = np.concatenate(err[deg]) * 255.0
         print(f"   degree {deg}:  mean {e.mean():5.2f}   "
               f"p99 {np.percentile(e, 99):6.2f}   max {e.max():6.2f}")
-    for deg in (3, 1, 0):
+    for deg in sorted({s.sh_degree, *lower}, reverse=True):
         k = (deg + 1) ** 2
         print(f"   degree {deg} storage: {k * 3:2d} floats/splat"
               f"  = {n * k * 3 * 4 / 1e6:6.1f} MB")
@@ -216,8 +220,9 @@ def main(argv=None):
     out_lo = float((raw < 0).mean())
     out_hi = float((raw > 1).mean())
     print("\n9. DC-only colour")
-    print(f"   {out_lo:.1%} below 0, {out_hi:.1%} above 1"
-          f"   -> higher-order terms carry these back in range")
+    note = ("   -> higher-order terms carry these back in range" if s.sh_degree
+            else "   -> clipped at render time (no higher-order terms)")
+    print(f"   {out_lo:.1%} below 0, {out_hi:.1%} above 1{note}")
 
     # ---- figure ----------------------------------------------------------
     fig, ax = plt.subplots(2, 3, figsize=(15, 8.5))

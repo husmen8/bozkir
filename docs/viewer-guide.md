@@ -31,28 +31,32 @@ control). Edit the JSON, not this page.
 - [Selective merging](#merging)
 - [Measurement](#measure)
 - [Repetition and busyness](#repetition)
+- [Capture](#capture)
 - [Frames and centres](#frames)
+- [River and water](#water)
 
 <a id="about"></a>
 ## bozkır
 
-*Gaussian-splat ground cut into Wang tiles and laid over terrain, with each material placed from the terrain's geometry.*
+*A few square metres of real ground, captured as Gaussian splats, made into tiles and laid over terrain, each material where the land puts it.*
 
-Hybrid GSWT chooses a material class per Gaussian from a coverage map that an artist paints. Here that coverage is computed from the height field: drainage or erosion sediment, topographic position, slope and altitude. The tiling, draw ordering and merging reimplement GSWT so the rule can be tested over large terrain.
+The pipeline, end to end: a ground capture is trained as Gaussian splats (scripts/tools/groundsplat.py for drone photos, or any 3DGS trainer); it is levelled and cleaned; its materials are found and the cleanest patches of each chosen, checked for holes and haze; patches become edge-matched tiles with framed centres from a pool of the capture's own ground; in the viewer each cell's material comes from the terrain (drainage, position, slope, height, and a river where one runs), rivers are cut into the ground and drawn with water measured from drone photos, and everything is drawn in the browser with its own ordering, levels of detail and far field.
 
-Limits: lighting is baked into the capture; the rule's one validation against survey data was inconclusive (see the material rule).
+It began from Gaussian Splatting Wang Tiles (Zeng, Ma and Sander), whose idea of tiling splat ground with Wang tiles it keeps. Frames and centre pools, the material rule, the river and its water, and most of the export and renderer are this project's own.
+
+Limits: lighting is baked into a capture; the rule's one test against survey data could not decide (see the material rule); a drone capture holds up to about a metre away and no closer.
 
 - Zeng, Ma, Sander. Gaussian Splatting Wang Tiles. SIGGRAPH Asia 2025.
-- Zeng, Ma, Sander. Hybrid Gaussian Wang Tiles for Class-aware Authoring and Rendering. SIGGRAPH 2026.
 - Desert tiles: OpenDroneMap COPR dataset (Coal Oil Point Reserve; Tobias and Mandel 2009), CC BY-SA 4.0.
-- See also: [The material rule](#rule), [Wang tiles](#tiles)
+- River tiles: Lütschine L2 drone survey (Zenodo 6415047) and Uruguayan native grassland UAV images (Zenodo 14771664), CC BY 4.0.
+- See also: [Capture](#capture), [Wang tiles](#tiles), [The material rule](#rule), [River and water](#water)
 
 <a id="tileset"></a>
 ## Tilesets
 
 *A .splat of packed Gaussians and a .json manifest: tile size, edge codes, materials, levels of detail.*
 
-`scripts/build.py <capture.ply> --preset ground -o web/data/<name>` runs the export, the decals and the far-field atlas. Every decision is measured from the capture and printed with its reason: number of materials, patch choice, hole checks, centre pool, turns, height order.
+`scripts/build.py <capture.ply> --preset ground -o web/data/<name>` runs the export, the decals and the far-field atlas. Every decision is measured from the capture and printed with its reason: number of materials, patch choice, hole checks, centre pool, turns, height order. A manifest can name its own view and terrain (the river opens on its valley and river view) and its story.
 
 A .splat without a manifest loads as one plain scene. The starter tileset is generated in the browser with the same construction and procedural patches.
 
@@ -68,7 +72,7 @@ Each tile is four triangles, one per edge. The triangle on an edge comes from a 
 
 Two tiles per (west, south) colour pair: with 3 colours, 18 tiles per material instead of 81. Materials share the edge codes, so a cell can take any material without consulting its neighbours.
 
-A feature in a patch appears at the same place in every tile built from that patch; frames and centres address this.
+A feature in a patch would appear at the same place in every tile built from it; the frames and centre pools below are how this project keeps it from repeating.
 
 - Cohen, Shade, Hiller, Deussen. Wang Tiles for Image and Texture Generation. SIGGRAPH 2003.
 - Kwatra, Schödl, Essa, Turk, Bobick. Graphcut Textures. SIGGRAPH 2003.
@@ -119,11 +123,13 @@ A large world has about two height samples per cell, so close ground is smooth w
 <a id="rule"></a>
 ## The material rule
 
-*The material that collects goes to hollows and channels, the exposed one to steep, convex ground.*
+*Each material placed from the terrain: the one that collects in hollows and channels, the exposed one on steep, convex ground; along a river, gravel where the river leaves it.*
 
 Inputs, sampled at 4× the cell grid: drainage, max-pooled so a channel narrower than a cell survives (or the erosion's sediment), topographic position index, slope, altitude. Weights are in `web/rule.json`, shared by the viewer and `bozkir/landform.py`. A median filter makes regions without moving their boundaries; a rank threshold gives each material exactly its share.
 
 With three or more materials the height at which one gives way to the next wanders across the world by fractal noise. The capture sets the amount: how often the materials are out of height order over its ground (Mann-Whitney U over local relative height).
+
+With a river drawn as water (the river rule), the gravel bar is where a river leaves one: low beside the channel (within about a channel depth above the water) and within reach of it (about half the river's width, wider on flat floors and inner bends, thin under steep banks), broken up along the river by noise. Its share then follows the river and the valley, not the capture's.
 
 Validation against an ODM survey (15.6 m plot, DTM and orthophoto): Cohen's kappa between −0.13 and +0.02 on grids 16 to 32, never above a torus-shift null. The plot is one slope (a plane explains 86% of its height), so it cannot separate the rule from chance; a survey across several landforms is needed.
 
@@ -179,9 +185,9 @@ Separates a wrong decision from a tile that does not look like its material.
 <a id="presets"></a>
 ## Views
 
-*Named settings from `web/views.json`; every control stays adjustable.*
+*Standard puts every control back to the tileset's own settings; Research adds the comparisons used in the write-up.*
 
-A view sets the controls it names; controls another view set and this one does not go back to their defaults. Research adds the figure views (rule on and off, land variation off). The story steps are views with a camera and a caption.
+A view sets the controls it names; controls another view set and this one does not go back to their defaults. Other views in web/views.json open by link (?preset=name). The story steps are views with a camera and a caption, and a tileset can have its own story.
 
 - In the code: `web/views.json`
 
@@ -264,7 +270,7 @@ Adjusting both at once made the frame rate oscillate between 20 and 45 fps.
 
 *Each splat is placed through the ground's tangent frame and shaped by the true Jacobian of the height map.*
 
-A normalised Jacobian thins material on slopes by √(1 + |∇h|²). One frame per tile, as in GSWT, leaves gaps on slopes; off, the slider sets frames per tile.
+A normalised Jacobian thins material on slopes by √(1 + |∇h|²). One frame per tile leaves gaps on slopes; off, the slider sets frames per tile.
 
 <a id="lod"></a>
 ## Level of detail
@@ -280,7 +286,7 @@ A normalised Jacobian thins material on slopes by √(1 + |∇h|²). One frame p
 
 Within a tile: a counting sort along the view direction in the tile's own frame. A single world-space order per tile left 47% of adjacent pairs wrong on warped terrain; this leaves none.
 
-Between tiles: nearest-depth keys tie along whole rows at axis-aligned views (81 cells, 9 keys) and reverse a row in one frame. A topological order over shared-edge constraints, as in GSWT, removes this.
+Between tiles: nearest-depth keys tie along whole rows at axis-aligned views (81 cells, 9 keys) and reverse a row in one frame. A topological order over shared-edge constraints removes this.
 
 - In the code: `web/order.js`, `web/sort-worker.js`, `scripts/probe_order.py`
 - See also: [Selective merging](#merging)
@@ -292,15 +298,19 @@ Between tiles: nearest-depth keys tie along whole rows at axis-aligned views (81
 
 Counting sort over the union: 3.8 ms against 9.5 ms for a k-way merge at 300k splats, 25.6 against 76.8 ms at 1.2M.
 
+Off by default on ground tilesets: a merged group is drawn where its first tile falls in the order, so the cells around it can land in front of or behind it wrongly, and while the camera moves its merged stream arrives late. With frames and blended borders the popping it removes is small, so it costs more than it fixes there.
+
 - In the code: `web/merge.js`
 - See also: [Draw order](#ordering)
 
 <a id="measure"></a>
 ## Measurement
 
-*Pop meter, camera sweeps for `scripts/pop_metric.py`, and a scaling sweep.*
+*Popping while the camera turns, the seam gap between tiles, recordings for scripts/pop_metric.py, and a scaling sweep.*
 
-The popping metric registers frames by phase correlation and block matching; integer-accurate matching does not yet resolve the ordering difference. GTX 1650 Ti: 60 fps to grid 40 (5.5M splats); with far field and auto quality, grid 256 above 30 fps.
+Popping: the colour change in the middle of the picture per degree turned; a smooth turn changes it steadily, a spike is splats or tiles switching order. Seam gap: every shared edge placed from both of its tiles, in splat widths; 0 means they meet.
+
+A recording saves frames along an orbit; scripts/pop_metric.py registers them (phase correlation, block matching) and compares two draw orders on the same path. GTX 1650 Ti: 60 fps to a world of 40 cells (5.5M splats); with far field and auto quality, 256 cells above 30 fps.
 
 - In the code: `scripts/pop_metric.py`, `bozkir/popping.py`
 
@@ -313,6 +323,18 @@ Repetition: excess brightness correlation at whole-tile shifts over half-tile sh
 
 - In the code: `scripts/repetition.py`
 - See also: [Wang tiles](#tiles), [Land variation](#macro)
+
+<a id="capture"></a>
+## Capture
+
+*Real ground trained as Gaussian splats: straight-down drone photos or a walk around, a few square metres per material.*
+
+Drone photos go through scripts/tools/groundsplat.py: COLMAP poses, a block of ground cut out where enough photos see it, and gsplat training. The block's ground is found from below, levelled and set in metres.
+
+What a capture can show is set when it is taken: ground seen at 3-4 mm per pixel holds up from about a metre away, and grass that moves in the wind between photos stays soft however long it trains. More splats only add slivers that read as needles up close.
+
+- In the code: `scripts/tools/groundsplat.py`, `bozkir/scene.py`
+- See also: [Tilesets](#tileset), [bozkır](#about)
 
 <a id="frames"></a>
 ## Frames and centres
@@ -329,3 +351,20 @@ Pool candidates are judged where they show: no larger splat footprint, no thicke
 - Mikkelsen. Practical Real-Time Hex-Tiling. JCGT 2022.
 - In the code: `bozkir/frames.py`, `bozkir/pick.py`, `web/frames.js`
 - See also: [Wang tiles](#tiles), [Blending](#blend)
+
+<a id="water"></a>
+## River and water
+
+*A river cut into the terrain in metres where it drains, with water drawn from layers measured in drone photos.*
+
+Course: the terrain's largest drainage systems, smoothed and meandered. Width in metres, narrower up the branches (width grows with the square root of the area drained; Leopold and Maddock 1953). Section: a bed a twentieth as deep as wide (at most 0.6 m), its deepest line towards the outside of bends, a cut bank there and a gentle point bar inside; pools and riffles about six widths apart; banks rising gently until they meet the ground.
+
+Water: a level surface that never rises downstream. Each point under it is drawn on that surface and coloured by its own depth: the bed shows through by a share measured from the fading stone contrast in 29 L2 photos (T = 0.93 exp(-d / 0.53 m) from the waterline), under the milky shallow water near the banks and the dark channel water further out, both photographed. Stones above the level stay dry, so the waterline follows them. No sky reflection: the photos show none.
+
+Flow: the water's ripples move along the river, faster where it is deeper (Manning); its broad pattern stays where it lies.
+
+- Leopold, Maddock. The Hydraulic Geometry of Stream Channels. USGS 1953.
+- Leopold, Wolman. River Meanders. GSA Bulletin 1960.
+- Vlachos. Water Flow in Portal 2. SIGGRAPH 2010 course.
+- In the code: `web/landform.js`, `web/shaders.js`, `scripts/water_texture.py`
+- See also: [The material rule](#rule), [Terrain](#terrain)

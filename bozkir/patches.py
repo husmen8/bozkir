@@ -260,12 +260,45 @@ def score_patch(p, up_axis, size, features=False, edge_margin=0.22):
     return float(cover * filled * flatness * np.log1p(density)
                  / (1.0 + 20.0 * planarity) / landmark), info
 
+def level_cut(p, up_axis):
+    """A cut turned so its ground is level, about the ground point under its
+    centre (the origin of a recentred cut), with that point dropped to zero.
+    The ground's plane, not the canopy's: fitted to all splats, then again
+    to the lowest third, as prepare_patches does for a slope. Returns
+    (levelled, tilt in degrees). A level height band then keeps a slope's
+    uphill and downhill sides, which a band on the raw cut cuts away."""
+    if len(p) < 50:
+        return p, 0.0
+    plane = [j for j in range(3) if j != up_axis]
+    ref = p.xyz.astype(np.float64)
+    A = np.c_[ref[:, plane], np.ones(len(ref))]
+    coef = np.linalg.lstsq(A, ref[:, up_axis], rcond=None)[0]
+    res = ref[:, up_axis] - A @ coef
+    low = res <= np.percentile(res, 33)
+    if low.sum() >= 50:
+        coef = np.linalg.lstsq(A[low], ref[low, up_axis], rcond=None)[0]
+    n = np.zeros(3)
+    n[plane] = -coef[:2]
+    n[up_axis] = 1.0
+    n /= np.linalg.norm(n)
+    tilt = float(np.degrees(np.arccos(np.clip(n[up_axis], 0, 1))))
+    out = p.subset(np.arange(len(p)))
+    xyz = out.xyz.astype(np.float64)
+    xyz[:, up_axis] -= coef[2]
+    out.xyz = xyz.astype(np.float32)
+    if tilt > 0.5:
+        target = np.zeros(3)
+        target[up_axis] = 1.0
+        out = rotate(out, quat_between(n.astype(np.float32), target.astype(np.float32)))
+    return out, tilt
+
+
 def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                  max_tilt=12.0, max_below=0.5, features=False,
                  edge_flat=0.20, edge_margin=0.22, min_separation=1.0,
                  min_cover=0.80, extract_margin=0.35, cover_margin=0.10,
                  verbose=True, stats=None, progress=None, screen_cap=4_000,
-                 faint_fill=0.0):
+                 faint_fill=0.0, level_search=False):
     """Search the ground plane for the k best non-overlapping patches.
 
     Candidates are cut larger by `extract_margin`, since levelling a square
@@ -293,6 +326,11 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
     layer then passes; real gaps, with no splat to raise, still fail. Holes
     are recorded as "faint" (the export's full fill, 6x, would cover them)
     or "gaps" (it would not).
+
+    `level_search`: level each cut on its own ground plane (level_cut)
+    before it is judged, so a patch on a slope is measured as the flat tile
+    it becomes; `max_tilt` then limits the ground's slope at the spot.
+    Off, a slope reads as relief and its sides fall out of the height band.
     """
     full_fill = 6.0
     plane = [i for i in range(3) if i != up_axis]
@@ -322,6 +360,9 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
             # Cut wide, judge narrow.
             wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
                                  up_axis=up_axis, index=index)
+            slope = None
+            if level_search:
+                wide, slope = level_cut(wide, up_axis)
             p = extract_patch(wide, [0.0, 0.0], size, up_axis=up_axis,
                               recentre=False)
             if len(p) < 2000:
@@ -340,7 +381,8 @@ def pick_patches(s, size, k, up_axis, stride=0.5, thickness=0.3,
                 rejected["buried"] += 1
                 where.append((float(x), float(y), "buried"))
                 continue
-            tilt = (band_stats(p, up_axis, size, edge_margin)[1] if features
+            tilt = (slope if slope is not None
+                    else band_stats(p, up_axis, size, edge_margin)[1] if features
                     else patch_tilt(p, up_axis))
             if tilt > max_tilt:
                 rejected["tilt"] += 1
@@ -527,7 +569,7 @@ def save_search(key, cands, stats, cache_dir="data/cache"):
 # `--patches 0,1,2,4` indexes a list only those settings produce.
 SEARCH_KEYS = ("stride", "thickness", "max_tilt", "max_below", "features",
                "edge_flat", "edge_margin", "min_separation", "min_cover",
-               "cover_margin", "extract_margin", "faint_fill")
+               "cover_margin", "extract_margin", "faint_fill", "level_search")
 
 
 def search_kwargs(args, thickness=None):
@@ -535,6 +577,8 @@ def search_kwargs(args, thickness=None):
     kw = {k: getattr(args, k) for k in SEARCH_KEYS if hasattr(args, k)}
     if not kw.get("faint_fill"):
         kw.pop("faint_fill", None)       # off: same key as before it existed
+    if not kw.get("level_search"):
+        kw.pop("level_search", None)     # off: same key as before it existed
     if thickness is not None:
         kw["thickness"] = thickness
     return kw
@@ -550,15 +594,17 @@ def apply_settings(args, settings):
 
 
 def rebuild_candidates(s, records, size, up_axis, thickness,
-                       extract_margin=0.35):
+                       extract_margin=0.35, level_search=False):
     """Cut the scene again at stored centres, in stored order (the cheap
-    half of a search)."""
+    half of a search), levelled as the search was."""
     out = []
     index = PlaneIndex(s, up_axis, cell=size / 2.0) if len(records) > 4 else None
     for rec in records:
         x, y = rec["x"], rec["y"]
         wide = extract_patch(s, [x, y], size * (1.0 + extract_margin),
                              up_axis=up_axis, index=index)
+        if level_search:
+            wide, _ = level_cut(wide, up_axis)
         p = extract_patch(wide, [0.0, 0.0], size, up_axis=up_axis,
                           recentre=False)
         g_level = ground_level(p.xyz[:, up_axis], thickness)
@@ -615,7 +661,8 @@ def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
             thickness = settings.get("thickness", size * 0.25)
             cands = rebuild_candidates(
                 s, blob["cands"], size, up_axis, thickness,
-                settings.get("extract_margin", 0.35))
+                settings.get("extract_margin", 0.35),
+                settings.get("level_search", False))
             stats = dict(blob["stats"])
             stats["records"] = blob["cands"]
             _RECALLED[key] = (cands, stats)
@@ -629,7 +676,8 @@ def cached_search(s, size, up_axis, settings, cache_dir="data/cache",
     cands = rebuild_candidates(
         s, stats.get("records", []), size, up_axis,
         settings.get("thickness", size * 0.25),
-        settings.get("extract_margin", 0.35))
+        settings.get("extract_margin", 0.35),
+        settings.get("level_search", False))
     if cache:
         storable = {k: v for k, v in stats.items() if k != "records"}
         save_search(key, stats.get("records", []), storable, cache_dir)

@@ -3,8 +3,12 @@
 
 export const STRIDE = 32;        // bytes per splat in the .splat format
 
-/** Unpack a .splat buffer. */
-export function unpack(buffer) {
+export const COMPACT_STRIDE = 20; // bozkir/pack.py's compact layout
+const POS_RANGE = 4.0, LOG2_LO = -30.0, LOG2_HI = 4.0;
+
+/** Unpack a .splat buffer; `stride` from the manifest (32, or 20 compact). */
+export function unpack(buffer, stride = STRIDE) {
+  if (stride === COMPACT_STRIDE) return unpackCompact(buffer);
   const bytes = new Uint8Array(buffer);
   const n = Math.floor(bytes.length / STRIDE);
   const f32 = new Float32Array(buffer);
@@ -27,6 +31,37 @@ export function unpack(buffer) {
     data[d + 10] = qy / len; data[d + 11] = qz / len;
     colour[4 * i] = bytes[b + 24]; colour[4 * i + 1] = bytes[b + 25];
     colour[4 * i + 2] = bytes[b + 26]; colour[4 * i + 3] = bytes[b + 27];
+  }
+  return { n, positions, data, colour };
+}
+
+function unpackCompact(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const n = Math.floor(bytes.length / COMPACT_STRIDE);
+  const view = new DataView(buffer);
+  const positions = new Float32Array(n * 3);
+  const data = new Float32Array(n * 3 * 4);
+  const colour = new Uint8Array(n * 4);
+  const pk = 2 * POS_RANGE / 65535, sk = (LOG2_HI - LOG2_LO) / 65535;
+  for (let i = 0; i < n; i++) {
+    const b = i * COMPACT_STRIDE, d = i * 12;
+    const px = view.getUint16(b, true) * pk - POS_RANGE;
+    const py = view.getUint16(b + 2, true) * pk - POS_RANGE;
+    const pz = view.getUint16(b + 4, true) * pk - POS_RANGE;
+    positions[3 * i] = px; positions[3 * i + 1] = py; positions[3 * i + 2] = pz;
+    data[d] = px; data[d + 1] = py; data[d + 2] = pz;
+    data[d + 3] = bytes[b + 15] / 255;
+    data[d + 4] = 2 ** (LOG2_LO + view.getUint16(b + 6, true) * sk);
+    data[d + 5] = 2 ** (LOG2_LO + view.getUint16(b + 8, true) * sk);
+    data[d + 6] = 2 ** (LOG2_LO + view.getUint16(b + 10, true) * sk);
+    data[d + 7] = 0;
+    let qw = (bytes[b + 16] - 128) / 128, qx = (bytes[b + 17] - 128) / 128;
+    let qy = (bytes[b + 18] - 128) / 128, qz = (bytes[b + 19] - 128) / 128;
+    const len = Math.hypot(qw, qx, qy, qz) || 1;
+    data[d + 8] = qw / len; data[d + 9] = qx / len;
+    data[d + 10] = qy / len; data[d + 11] = qz / len;
+    colour[4 * i] = bytes[b + 12]; colour[4 * i + 1] = bytes[b + 13];
+    colour[4 * i + 2] = bytes[b + 14]; colour[4 * i + 3] = bytes[b + 15];
   }
   return { n, positions, data, colour };
 }

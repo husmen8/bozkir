@@ -186,6 +186,9 @@ def add_scene_args(parser):
     g.add_argument("--min-splat", type=float, default=0.0,
                    help="cm; widen every splat to at least this, the blur "
                         "training gave it (0 = off)")
+    g.add_argument("--drop-markers", action="store_true",
+                   help="remove splats coloured like survey stakes and targets "
+                        "(saturated red, pink, blue, violet; select.marker_splats)")
     g.add_argument("--no-cache", action="store_true")
     return parser
 
@@ -209,6 +212,12 @@ def scene_from_args(args, verbose=True):
     s = prepare(args.path, config_from_args(args),
                 cache=not args.no_cache, verbose=verbose)
     # After the cache, so the cached scene stays the plain one.
+    if getattr(args, "drop_markers", False):
+        from .select import marker_splats
+        bad = marker_splats(s)
+        s = s.subset(np.flatnonzero(~bad))
+        if verbose:
+            print(f"  {int(bad.sum()):,} marker-coloured splats removed")
     if getattr(args, "max_height", 0) > 0:
         s = cap_height(s, args.max_height / 100.0, args.up_axis)
         if verbose:

@@ -1,14 +1,109 @@
 {
-  "_about": "The material rule's weights: the one place they are written. web/landform.js imports this file and bozkir/landform.py reads it, so the viewer, the figures and the validation all use the same numbers. Each class is a position on a hillside. Its score is (1 - altitude) x (the weighted terms below) + altitude x (its height term), where altitude is the viewer's 'follows height'. Terms: drive = drainage (or the erosion's sediment record where there is one), hollow = 1 - topographic position, ridge = topographic position, slope, flat = 1 - slope, midpos = how near the middle of the topographic range. Height: low = 1 - elevation, high = elevation, middle = nearness to mid elevation. Change a number here and both languages follow; tests/test_pipeline.py checks they still agree cell for cell.",
+  "_about": "The material rule's weights: the one place they are written. web/landform.js imports this file and bozkir/landform.py reads it, so the viewer, the figures and the validation all use the same numbers. Each class is a position on a hillside. Its score is (1 - altitude) x (the weighted terms below) + altitude x (its height term), where altitude is the viewer's 'follows height'. Terms: drive = drainage (or the erosion's sediment record where there is one), hollow = 1 - topographic position, ridge = topographic position, slope, flat = 1 - slope, midpos = how near the middle of the topographic range. Height: low = 1 - elevation, high = elevation, middle = nearness to mid elevation. Change a number here and both languages follow; tests/test_pipeline.py checks they still agree cell for cell. River rule (classify's river option, off by default): the terms near = 1 - HAND (height above the nearest channel, Renno et al. 2008, along the same D8 receivers as drainage) and channel (cells draining more than river.channel_share of the grid), measured on the height field with its depressions filled (Priority-Flood, as erosion fills); a cell filling raised by more than river.lake_depth of the height range is lake and counts as channel; with the positions edge, bar and bank, from river_classes.",
   "positions": {
-    "collected": { "terms": { "drive": 0.6, "hollow": 0.4 }, "height": "low" },
-    "exposed":   { "terms": { "slope": 0.5, "ridge": 0.5 },  "height": "high" },
-    "bench":     { "terms": { "flat": 0.6, "midpos": 0.4 },  "height": "middle" },
-    "face":      { "terms": { "slope": 0.75, "midpos": 0.25 }, "height": "middle" }
+    "collected": {
+      "terms": {
+        "drive": 0.6,
+        "hollow": 0.4
+      },
+      "height": "low"
+    },
+    "exposed": {
+      "terms": {
+        "slope": 0.5,
+        "ridge": 0.5
+      },
+      "height": "high"
+    },
+    "bench": {
+      "terms": {
+        "flat": 0.6,
+        "midpos": 0.4
+      },
+      "height": "middle"
+    },
+    "face": {
+      "terms": {
+        "slope": 0.75,
+        "midpos": 0.25
+      },
+      "height": "middle"
+    },
+    "edge": {
+      "terms": {
+        "channel": 0.8,
+        "near": 0.2
+      },
+      "height": "low"
+    },
+    "bar": {
+      "terms": {
+        "near": 0.6,
+        "flat": 0.4
+      },
+      "height": "low"
+    },
+    "bank": {
+      "terms": {
+        "near": 0.3,
+        "slope": 0.7
+      },
+      "height": "middle"
+    }
   },
   "classes": {
-    "2": ["collected", "exposed"],
-    "3": ["collected", "bench", "exposed"],
-    "4": ["collected", "bench", "face", "exposed"]
+    "2": [
+      "collected",
+      "exposed"
+    ],
+    "3": [
+      "collected",
+      "bench",
+      "exposed"
+    ],
+    "4": [
+      "collected",
+      "bench",
+      "face",
+      "exposed"
+    ]
+  },
+  "river": {
+    "channel_share": 0.01,
+    "lake_depth": 0.002,
+    "water_share": 0.04,
+    "water_rivers": 2,
+    "water_smooth": 4,
+    "water_meander": 0.6,
+    "width_depth": 20,
+    "freeboard": 0.5,
+    "bank_slope": 0.3,
+    "bank_reach": 5.0,
+    "stem_floor": 0.6,
+    "min_width": 0.4,
+    "bend_shift": 0.6,
+    "pool_depth": 0.3,
+    "pool_spacing": 6,
+    "max_depth": 0.6,
+    "soften": 1.0,
+    "bar_reach": 0.4,
+    "bar_height": 1.0
+  },
+  "river_classes": {
+    "2": [
+      "bar",
+      "bank"
+    ],
+    "3": [
+      "edge",
+      "bar",
+      "bank"
+    ],
+    "4": [
+      "edge",
+      "bar",
+      "bank",
+      "exposed"
+    ]
   }
 }

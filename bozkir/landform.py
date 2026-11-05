@@ -21,7 +21,7 @@ import numpy as np
 RULE_PATH = Path(__file__).resolve().parents[1] / "web" / "rule.json"
 RULE = json.loads(RULE_PATH.read_text())
 
-__all__ = ["downsample", "slope", "tpi", "flow", "median", "smooth",
+__all__ = ["downsample", "slope", "tpi", "flow", "drainage", "hand", "median", "smooth",
            "quantile", "rank_unit", "unit", "classify", "cue_weights", "sample_grid"]
 
 
@@ -99,6 +99,28 @@ def flow(z, n):
     highest cell down. Ties in height are broken by index, as the stable
     JavaScript sort does.
     """
+    return drainage(z, n)[0]
+
+
+def hand(z, n, to, acc, channel_cells):
+    """Height above the nearest drainage (HAND, Renno et al. 2008) and the
+    channel mask: a cell draining `channel_cells` or more is channel, every
+    other cell is measured against the channel cell its receivers reach
+    first (or the end of its path). Cells taken lowest first, so a
+    receiver, strictly lower, is always done. Mirrors `hand`."""
+    z = np.asarray(z, dtype=np.float64)
+    chan = acc >= channel_cells
+    base = np.arange(n * n)
+    order = np.argsort(z, kind="stable")
+    for k in order.tolist():
+        j = to[k]
+        if not chan[k] and j >= 0:
+            base[k] = base[j]
+    return z - z[base], chan.astype(np.float64)
+
+
+def drainage(z, n):
+    """flow() and each cell's receiver (-1 where nothing is lower)."""
     z = np.asarray(z, dtype=np.float64)
     g = z.reshape(n, n)
     best = np.zeros((n, n))
@@ -125,7 +147,7 @@ def flow(z, n):
         j = to[k]
         if j >= 0:
             acc[j] += acc[k]
-    return acc
+    return acc, to
 
 
 def unit(a):
@@ -241,7 +263,7 @@ def cue_weights(altitude=0.4):
 
 def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
              sharpness=2.0, altitude=0.4, coherence=2, balance=None,
-             rules=None, height_shift=None):
+             rules=None, height_shift=None, river=False):
     """A class per cell, from the shape of the ground. Mirrors `classify`.
 
     `z` is the height sampled on an (n*over)^2 grid, flat, row-major -
@@ -251,14 +273,30 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     `lead`, the signed field the threshold is applied to (Python only).
 
     `rules`, if given, is a list of functions `f(maps) -> weights` over the
-    normalised maps; the default is the viewer's two-class rule.
+    normalised maps; the default is the viewer's two-class rule. With
+    `river` the classes come from rule.json's river_classes, which read
+    HAND and channels as well.
     """
     z = np.asarray(z, dtype=np.float64).ravel()
     m = int(round(np.sqrt(z.size)))
     sp = (spacing or 1) * n / m
     s = unit(downsample(slope(z, m, sp), m, n))
     t = unit(downsample(tpi(z, m, radius or max(2, m >> 4)), m, n))
-    f = unit(downsample(np.log1p(flow(z, m)), m, n, "max"))
+    acc, to = drainage(z, m)
+    f = unit(downsample(np.log1p(acc), m, n, "max"))
+    near = chan = None
+    if river:
+        # On the filled field: a pit would end its paths and count its whole
+        # basin as next to a channel. What filling raises is lake.
+        from .erosion import fill_depressions
+        zf = fill_depressions(z.reshape(m, m)).ravel()
+        lake = (zf - z) > RULE["river"]["lake_depth"] * max(float(z.max() - z.min()), 1e-12)
+        racc, rto = drainage(zf, m)
+        cells = max(8, int(round(m * m * RULE["river"]["channel_share"])))
+        racc = np.where(lake, np.inf, racc)
+        hv, cv = hand(zf, m, rto, racc, cells)
+        near = 1 - unit(downsample(hv, m, n))
+        chan = downsample(cv, m, n, "max")
     e = unit(downsample(z, m, n))
     if height_shift is not None:          # the viewer's wanderField, per cell
         e = e + np.asarray(height_shift, np.float64).ravel()
@@ -269,7 +307,7 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
     sharp = 2.0 if sharpness is None else sharpness
     alt = 0.4 if altitude is None else altitude
     maps = {"slope": s, "tpi": t, "flow": f, "elevation": e,
-            "sediment": sed, "drive": drive}
+            "sediment": sed, "drive": drive, "near": near, "channel": chan}
     if rules is None:
         # From web/rule.json, the same file the viewer loads.
         def midband(v):
@@ -280,7 +318,9 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
                  "ridge": lambda M: M["tpi"],
                  "slope": lambda M: M["slope"],
                  "flat": lambda M: 1 - M["slope"],
-                 "midpos": lambda M: midband(M["tpi"])}
+                 "midpos": lambda M: midband(M["tpi"]),
+                 "near": lambda M: M["near"],
+                 "channel": lambda M: M["channel"]}
         heights = {"low": lambda M: 1 - M["elevation"],
                    "high": lambda M: M["elevation"],
                    "middle": lambda M: midband(M["elevation"])}
@@ -298,8 +338,8 @@ def classify(z, n, classes, spacing=1.0, radius=None, sediment=None,
                 return (1 - alt) * shape + alt * h(M)
             return score
 
-        named = RULE["classes"].get(str(classes)) or \
-            RULE["classes"]["4"][:max(2, classes)]
+        table = RULE["river_classes"] if river else RULE["classes"]
+        named = table.get(str(classes)) or table["4"][:max(2, classes)]
         rules = [position(nm) for nm in named]
 
     w = []

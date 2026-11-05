@@ -203,6 +203,24 @@ export class HeightField {
     return this.mask ? this._bilinear(this.mask, x, y) : 1;
   }
 
+  /** How far a river channel lowers the ground here, metres (0 or less);
+   *  0 without one (riverChannel sets `carve`). */
+  sampleCarve(x, y) {
+    return this.carve ? this._bilinear(this.carve, x, y) : 0;
+  }
+
+  /** A river's water level here, metres; very low outside the river
+   *  (riverChannel's NO_WATER, blended at its edge). */
+  sampleLevel(x, y) {
+    return this.level ? this._bilinear(this.level, x, y) : -1e4;
+  }
+
+  /** Where the river leaves gravel, 0..1 (barZone in viewer.js); 0
+   *  without a river. */
+  sampleBar(x, y) {
+    return this.barZone ? this._bilinear(this.barZone, x, y) : 0;
+  }
+
   /** Bilinear read from any grid the size of this field, mirrored past its
    *  edge. Shared so height and sediment line up exactly. */
   _bilinear(grid, x, y) {

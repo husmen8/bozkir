@@ -10,15 +10,18 @@ import {
   TURN_STEPS, cellHash, poolsByClass, pickCentre, pickTurn, turnCosSin, groundLevel,
   centreShare, keepChance, spotShare, ringNorm, ringProfile, toneTerms, toneAt,
   partnerClass, spotField, spotDraws, fieldAt, fieldReaches, SPOT_WARP, gradedPool,
+  SPOT_SHARP, spotSharpness,
 } from '../web/frames.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { monotone, smooth, SHOTS, EVENTS, CARDS, PHOTOS, END } from '../web/film.js';
 import {
   boundarySign, constraints, drawOrder, violations,
 } from '../web/order.js';
 import { readZip, pickTileset, describe, writeZip } from '../web/tileset.js';
+import { unpack, COMPACT_STRIDE } from '../web/splat.js';
 import { HeightField, openness } from '../web/heightfield.js';
 import { report } from '../web/benchmark.js';
-import { classify, cueWeights, flow, sampleGrid, slope, tpi, wanderField } from '../web/landform.js';
+import { classify, cueWeights, flow, sampleGrid, slope, tpi, wanderField, waterMap, riverChannel, NO_WATER, RIVER } from '../web/landform.js';
 import { generate as generateTerrain, GROUPS as TERRAIN_GROUPS, PROFILES as TERRAIN_PROFILES } from '../web/terrain.js';
 import {
   SLOT_BITS, MAX_GROUP, INDEX_BITS, INDEX_MASK,
@@ -79,6 +82,81 @@ function camera(azDeg, elDeg, dist) {
 }
 
 // ---------------------------------------------------------------- order.js
+
+test('a river channel only lowers the ground, is about as wide as asked, and as deep as its pools', () => {
+  const n = 128, extent = 60, mz = 4, W = 6;
+  const z = generateTerrain({ size: n, seed: 3, profile: 'valley' }).z;
+  const r = riverChannel(z, n, { cellM: extent / (n - 1), metresPerZ: mz, width: W });
+  let deepest = 0, wet = 0, raised = 0, flowing = 0;
+  for (let c = 0; c < n * n; c++) {
+    if (r[4 * c] > 1e-9) raised++;
+    if (r[4 * c + 1] <= NO_WATER / 2) continue;
+    const d = r[4 * c + 1] - (mz * (z[c] - 0.5) + r[4 * c]);
+    if (d > 0) { wet++; deepest = Math.max(deepest, d); if (Math.hypot(r[4 * c + 2], r[4 * c + 3]) > 0) flowing++; }
+  }
+  eq(raised, 0, 'cells raised');
+  // Softening the cut deepens it a little where the ground beside was higher.
+  const D = Math.min(W / RIVER.width_depth, RIVER.max_depth) * (1 + RIVER.pool_depth);
+  ok(deepest > 0.6 * D && deepest < 1.25 * D, `deepest water ${deepest.toFixed(2)} m for ${D.toFixed(2)} m pools`);
+  ok(wet > 0 && flowing / wet > 0.99, `${flowing} of ${wet} wet cells have a current`);
+  // Wet cells across the map's rows: about the width asked, in metres.
+  const runs = [];
+  for (let j = 0; j < n; j++) {
+    let run = 0, longest = 0;
+    for (let i = 0; i < n; i++) {
+      const c = j * n + i, L = r[4 * c + 1];
+      run = L > NO_WATER / 2 && L - (mz * (z[c] - 0.5) + r[4 * c]) > 0 ? run + 1 : 0;
+      longest = Math.max(longest, run);
+    }
+    if (longest) runs.push(longest * extent / (n - 1));
+  }
+  runs.sort((a, b) => a - b);
+  const mid = runs[runs.length >> 1];
+  ok(mid > 0.5 * W && mid < 1.6 * W, `median wet run ${mid.toFixed(1)} m for a ${W} m river`);
+});
+
+test('the water map draws only the largest river systems, each in one piece', () => {
+  const n = 96;
+  const z = generateTerrain({ size: n, seed: 1, profile: 'valley' }).z;
+  const w = waterMap(z, n);
+  // Connected water areas (8-neighbour): one per river system, no lakes apart.
+  const seen = new Uint8Array(n * n);
+  let pieces = 0, wet = 0;
+  for (let k = 0; k < n * n; k++) {
+    if (w[k] <= 0 || seen[k]) continue;
+    pieces++;
+    const stack = [k];
+    seen[k] = 1;
+    while (stack.length) {
+      const c = stack.pop();
+      wet++;
+      const i = c % n, j = (c / n) | 0;
+      for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) {
+        const ii = i + a, jj = j + b, q = jj * n + ii;
+        if (ii < 0 || jj < 0 || ii >= n || jj >= n || seen[q] || w[q] <= 0) continue;
+        seen[q] = 1;
+        stack.push(q);
+      }
+    }
+  }
+  ok(pieces >= 1 && pieces <= 2, `${pieces} pieces of water`);
+  ok(wet / (n * n) < 0.25, `water on ${(100 * wet / (n * n)).toFixed(1)}% of the map`);
+});
+
+test('the compact layout decodes as bozkir/pack.py writes it', () => {
+  // One record: position (1, -2, 0.5) m, scale 2^-10 on every axis, rgba, rotation (1, 0, 0, 0).
+  const buf = new ArrayBuffer(COMPACT_STRIDE), v = new DataView(buf), b = new Uint8Array(buf);
+  const pq = (p) => Math.round((p + 4) / 8 * 65535), sq = (l) => Math.round((l + 30) / 34 * 65535);
+  [1, -2, 0.5].forEach((p, k) => v.setUint16(2 * k, pq(p), true));
+  for (let k = 0; k < 3; k++) v.setUint16(6 + 2 * k, sq(-10), true);
+  b.set([200, 100, 50, 255, 255, 128, 128, 128], 12);
+  const { n, positions, data, colour } = unpack(buf, COMPACT_STRIDE);
+  eq(n, 1);
+  ok(Math.abs(positions[0] - 1) < 1e-4 && Math.abs(positions[1] + 2) < 1e-4 && Math.abs(positions[2] - 0.5) < 1e-4);
+  ok(Math.abs(data[4] / 2 ** -10 - 1) < 5e-4, `scale ${data[4]}`);
+  eq([...colour], [200, 100, 50, 255]);
+  ok(Math.abs(data[8] - 1) < 1e-6 && data[3] === 1);
+});
 
 test('the sign is positive when the eye is on the second cell\'s side', () => {
   const a = { x: 0, y: 0, z: 0 }, b = { x: 1, y: 0, z: 0 };
@@ -203,6 +281,34 @@ test('the cells a weak boundary drops are the ones merging picks up', () => {
   for (const [a, b] of weak) {
     eq(groupOf[a], groupOf[b], `pair ${a},${b} left unmerged and unordered`);
   }
+});
+
+test('merged groups ordered as one are contiguous and keep every other constraint', () => {
+  // GSWT's criterion merges the pairs across the grid lines under the eye
+  // all the way to the horizon, and cell-by-cell order splits most groups
+  // (91% of 3,800 random views with a merge on this grid; this eye is one).
+  const cells = grid(8);
+  const eye = [-1.91, 3.14, 1.82];
+  const { groupOf, groups } = mergeGroups(cells, eye, { threshold: 0.5 });
+  ok(groups.some((g) => g.length > 1), 'the case must merge something');
+  const key = cells.map((c) => Math.hypot(c.x - eye[0], c.y - eye[1]));
+  const plain = drawOrder(cells, eye, { key }).order;
+  const r = drawOrder(cells, eye, { key, groupOf });
+  eq(r.order.length, cells.length, 'no cell lost');
+  eq([...new Set(r.order)].length, cells.length, 'or duplicated');
+  const pos = new Int32Array(cells.length);
+  r.order.forEach((k, p) => { pos[k] = p; });
+  const ppos = new Int32Array(cells.length);
+  plain.forEach((k, p) => { ppos[k] = p; });
+  const split = (at) => groups.filter((g) => {
+    const p = g.map((k) => at[k]);
+    return Math.max(...p) - Math.min(...p) + 1 !== g.length;
+  }).length;
+  ok(split(ppos) > 0, 'cell-by-cell order splits a group (the stripe)');
+  eq(split(pos), 0, 'grouped order keeps every group together');
+  const { edges } = constraints(cells, eye, {});
+  const broken = edges.filter(([u, v]) => groupOf[u] !== groupOf[v] && pos[u] > pos[v]).length;
+  eq(broken, 0, 'no constraint between different groups broken');
 });
 
 test('a cycle is survived rather than thrown', () => {
@@ -1273,7 +1379,7 @@ test('every preset names real controls, with values they accept', () => {
     if (name.startsWith('_')) continue;
     for (const [k, v] of Object.entries(p)) {
       // Keys about the preset itself (viewer.js PRESET_META), not controls.
-      if (['label', 'short', 'research', 'chapter', 'caption', 'camera'].includes(k)) continue;
+      if (['label', 'short', 'research', 'chapter', 'story', 'caption', 'camera'].includes(k)) continue;
       if (k === 'view') {
         ok(html.includes(`id="${v}"`), `${name}: no camera button '${v}'`);
         continue;
@@ -1286,6 +1392,75 @@ test('every preset names real controls, with values they accept', () => {
       if (hi) ok(v <= +hi[1], `${name}: ${k} ${v} above ${hi[1]}`);
     }
   }
+});
+
+test('the demo camera passes its keys, holds on repeats, never overshoots', () => {
+  const ts = [0, 1, 2, 3, 4], vs = [0, 10, 10, 30, 31];
+  ts.forEach((t, i) => ok(Math.abs(monotone(ts, vs, t) - vs[i]) < 1e-9, `misses key ${i}`));
+  for (let t = 1; t <= 2; t += 0.05) ok(Math.abs(monotone(ts, vs, t) - 10) < 1e-9, 'a hold drifts');
+  let prev = -Infinity;
+  for (let t = -1; t <= 5; t += 0.01) {
+    const v = monotone(ts, vs, t);
+    ok(v >= prev - 1e-9 && v >= 0 && v <= 31, `not monotone at ${t.toFixed(2)}`);
+    prev = v;
+  }
+  eq(monotone([2], [7], 5), 7);
+});
+
+test('the film camera path smooths without lag or overshoot', () => {
+  // A step: centred, so it neither leads nor lags, and stays within its ends.
+  const v = Array.from({ length: 41 }, (_, i) => (i < 20 ? 0 : 1));
+  const w = smooth(v, 4);
+  ok(Math.abs(w[20] - 0.5) < 0.1 && w[0] === 0 && w[40] === 1, `step ${w[0]} ${w[20]} ${w[40]}`);
+  ok(w.every((x, i) => x >= 0 && x <= 1 && (i === 0 || x >= w[i - 1])), 'not monotone');
+  const c = smooth(new Array(9).fill(2.5), 3);
+  ok(c.every((x) => Math.abs(x - 2.5) < 1e-12), 'a constant changed');
+});
+
+test('the demo plan names real presets, controls, tabs and photos', () => {
+  // film.js is edited by hand, like views.json; a wrong id would only show
+  // as a step that does nothing in the middle of a recording.
+  const here = new URL('.', import.meta.url);
+  const html = readFileSync(new URL('../web/index.html', here), 'utf8');
+  const presets = JSON.parse(readFileSync(new URL('../web/views.json', here), 'utf8'));
+  // The share sliders are made per material when a tileset loads (classshareN).
+  const control = (k) => ok(/^classshare\d$/.test(k) || new RegExp(`<(input|select)[^>]*id="${k}"`).test(html),
+    `no control '${k}'`);
+  let at = 0;
+  for (const s of SHOTS) {
+    ok(presets[s.preset], `no preset '${s.preset}'`);
+    ok(existsSync(new URL(`../web/data/${s.world}.json`, here)), `no tileset '${s.world}'`);
+    Object.keys(s.set || {}).forEach(control);
+    eq(s.from, at, 'shots leave a gap');
+    at = s.to;
+    let t = -Infinity;
+    for (const k of s.cam) {
+      ok(k.t > t && k.t >= s.from && k.t <= s.to, `camera key at ${k.t} out of order or outside its shot`);
+      ok(['tile', 'water', 'water2', 'mid', 'centre'].includes(k.at)
+         || (Array.isArray(k.at) && k.at.length === 2 && k.at.every(Number.isFinite)), `unknown anchor '${k.at}'`);
+      ok(k.d > 0 && k.el > 0 && k.el < 90, `camera key at ${k.t}: distance or elevation`);
+      t = k.t;
+    }
+  }
+  ok(at >= END, 'the last shot ends before the film');
+  let t = -Infinity;
+  const tabs = [...html.matchAll(/<details[^>]*data-side[^>]*>\s*<summary[^>]*>([^<]+)</g)]
+    .map((m) => m[1].trim().replace('debug views', 'debug'));
+  for (const e of EVENTS) {
+    ok(e.t >= t && e.t <= END, `event at ${e.t} out of order`);
+    t = e.t;
+    Object.keys(e.set || {}).forEach(control);
+    for (const w of e.tween ? [].concat(e.tween) : []) control(w.id);
+    if (e.scrollTo) control(e.scrollTo.id);
+    if (e.hl) control(e.hl);
+    if (e.tab) ok(tabs.includes(e.tab), `no sidebar page '${e.tab}' (have ${tabs})`);
+    if (e.card) ok(CARDS[e.card], `no card '${e.card}'`);
+    if (e.photos) ok(PHOTOS[e.photos], `no photo set '${e.photos}'`);
+    if (e.table) ok(['tiles', 'rule', 'water'].includes(e.table), `no table '${e.table}'`);
+  }
+  const names = [...Object.values(PHOTOS).flatMap((p) => [...p.left.photos, ...p.right.photos]),
+                 ...Object.values(CARDS).flatMap((c) => c.photos || [])];
+  for (const n of names) ok(existsSync(new URL(`../web/media/demo/${n}.jpg`, here)), `no photo ${n}`);
 });
 
 test('the terrain window shows every profile exactly once', () => {
@@ -1473,6 +1648,18 @@ test('blend by spot: each spot one material, the two sides complementary', () =>
   eq(spotShare(0.3), 0); eq(spotShare(0.7), 1);       // outside the strip: one material
   close(spotShare(0.5), 0.5, 1e-12);
   ok(spotShare(0.45, 1) > spotShare(0.45, 0) + 0.2, 'a tall splat keeps no more of its chance');
+});
+
+test('blend width: 0 is the narrow strip, wider dissolves further and still complements', () => {
+  eq(spotSharpness(0), SPOT_SHARP);
+  const sharp = spotSharpness(1);
+  ok(sharp < SPOT_SHARP && sharp > 1, `sharpness ${sharp}`);
+  eq(spotShare(0.3), 0);
+  ok(spotShare(0.3, 0, sharp) > 0.02, 'a wide blend keeps none of a material past the narrow strip');
+  for (const w of [0, 0.2, 0.4, 0.5, 0.8, 1]) close(spotShare(w, 0, sharp) + spotShare(1 - w, 0, sharp), 1, 1e-12);
+  // A field that reaches only into a wide strip: drawn with it, not without.
+  const field = new Float32Array(49).fill(0.3);
+  ok(!fieldReaches(field) && fieldReaches(field, SPOT_WARP, sharp), 'the wider strip draws further cells');
 });
 
 test('the height line wanders: none at 0, bounded, seeded, and it moves the line', () => {

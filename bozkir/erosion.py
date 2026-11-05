@@ -76,6 +76,11 @@ PROFILES = {
     "alpine":    dict(octaves=7, freq=2, ridge=0.75, relief=0.4,
                       iterations=180, incision=0.55, diffusion=0.04,
                       uplift=0.03),
+    # A river valley: broad floors along one trunk river (strong incision,
+    # enough creep to widen them), tilted so it drains one way.
+    "valley":    dict(dome=0.3, octaves=6, freq=2, ridge=0.5, relief=0.6,
+                      iterations=120, incision=0.9, diffusion=0.12,
+                      tilt=0.4),
     # Rugged ground: almost no creep (diffusion is what rounds a landscape),
     # so cut ridges and steps stay sharp.
     "crags":     dict(dome=0.3, octaves=7, freq=5, ridge=0.95, relief=1.1,

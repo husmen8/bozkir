@@ -10,7 +10,7 @@
 //
 // No WebGL, so it runs under node and is tested there.
 
-import { boundary, boundarySign, neighbourPairs } from './grid.js';
+import { boundary, boundarySign, neighbourPairs, pairGeometry } from './grid.js';
 export { boundary, boundarySign, neighbourPairs } from './grid.js';
 
 // A merged draw packs the cell's slot in the group into the top bits of the
@@ -50,10 +50,16 @@ export function mergeGroups(cells, eye, { threshold = 1.0, cap = MAX_GROUP } = {
     return k;
   };
 
+  // mergeScore over every pair, from boundaries worked out once per grid.
+  const pg = pairGeometry(cells);
+  const { mid, normal } = pg;
   const scored = [];
-  for (const [a, b] of neighbourPairs(cells)) {
-    const s = mergeScore(cells[a], cells[b], eye);
-    if (s < threshold) scored.push([s, a, b]);
+  for (let k = 0; k < pg.n; k++) {
+    const q = 3 * k;
+    const s = Math.abs(normal[q] * (eye[0] - mid[q])
+                     + normal[q + 1] * (eye[1] - mid[q + 1])
+                     + normal[q + 2] * (eye[2] - mid[q + 2]));
+    if (s < threshold) scored.push([s, pg.a[k], pg.b[k]]);
   }
   scored.sort((p, q) => p[0] - q[0]);
 

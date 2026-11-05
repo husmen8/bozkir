@@ -27,20 +27,54 @@ export function boundarySign(a, b, eye) {
        + normal[2] * (eye[2] - mid[2]);
 }
 
+// The pairs of the last arrays asked about: the whole grid is asked several
+// times a frame (merging at the eye and at turned headings), 16k cells at a
+// 128-cell world, and building the lookup took a third of the frame.
+const pairCache = new WeakMap();
+
 /** Adjacent pairs of cells (by integer `i`, `j`), each pair once. A missing
- *  cell (culled, or a hole) simply has no pairs. */
+ *  cell (culled, or a hole) simply has no pairs. Kept per array: the same
+ *  array of the same length gives the same pairs. */
 export function neighbourPairs(cells) {
+  const hit = pairCache.get(cells);
+  if (hit && hit.n === cells.length) return hit.pairs;
+  // Integer keys; i and j stay well inside +-2^20.
+  const key = (i, j) => (i + 1048576) * 2097152 + (j + 1048576);
   const byIJ = new Map();
   for (let k = 0; k < cells.length; k++) {
-    byIJ.set(`${cells[k].i},${cells[k].j}`, k);
+    byIJ.set(key(cells[k].i, cells[k].j), k);
   }
   const pairs = [];
   for (let k = 0; k < cells.length; k++) {
     const c = cells[k];
-    for (const [di, dj] of [[1, 0], [0, 1]]) {
-      const n = byIJ.get(`${c.i + di},${c.j + dj}`);
-      if (n !== undefined) pairs.push([k, n]);
-    }
+    const e = byIJ.get(key(c.i + 1, c.j));
+    if (e !== undefined) pairs.push([k, e]);
+    const n = byIJ.get(key(c.i, c.j + 1));
+    if (n !== undefined) pairs.push([k, n]);
   }
+  pairCache.set(cells, { n: cells.length, pairs });
   return pairs;
+}
+
+const geomCache = new WeakMap();
+
+/** neighbourPairs with each pair's boundary (boundary()) in flat arrays:
+ *  a, b (cell indices), mid and normal per pair. Kept per array as the
+ *  pairs are, so scoring every pair at a new eye allocates nothing. */
+export function pairGeometry(cells) {
+  const hit = geomCache.get(cells);
+  if (hit && hit.cellCount === cells.length) return hit;
+  const pairs = neighbourPairs(cells);
+  const n = pairs.length;
+  const out = { cellCount: cells.length, n, a: new Int32Array(n), b: new Int32Array(n),
+                mid: new Float64Array(3 * n), normal: new Float64Array(3 * n) };
+  for (let k = 0; k < n; k++) {
+    const [ia, ib] = pairs[k];
+    const { mid, normal } = boundary(cells[ia], cells[ib]);
+    out.a[k] = ia; out.b[k] = ib;
+    out.mid.set(mid, 3 * k);
+    out.normal.set(normal, 3 * k);
+  }
+  geomCache.set(cells, out);
+  return out;
 }

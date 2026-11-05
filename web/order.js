@@ -38,7 +38,8 @@ export function constraints(cells, eye, { epsilon = 0 } = {}) {
  *  On flat ground there are no cycles. Relief can tilt boundary planes so
  *  three cells disagree; the stalled cells are then released by depth key
  *  (the old behaviour) and counted in `cycles`. */
-export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
+export function drawOrder(cells, eye, { key = null, epsilon = 0, groupOf = null } = {}) {
+  if (groupOf) return groupedOrder(cells, eye, { key, epsilon, groupOf });
   const n = cells.length;
   const { edges, weak } = constraints(cells, eye, { epsilon });
 
@@ -79,6 +80,65 @@ export function drawOrder(cells, eye, { key = null, epsilon = 0 } = {}) {
   }
 
   return { order: out, weak, cycles, constrained: edges.length };
+}
+
+/** drawOrder with merged groups (merge.js) as single nodes. A group is
+ *  drawn as one stream at its first cell, so its cells must be adjacent in
+ *  the order: ordered cell by cell, a cell that belongs between two members
+ *  is drawn after the whole group and covers the nearer member. Groups are
+ *  ordered by the constraints between cells of different groups (furthest
+ *  member as their depth key); each group's cells follow in their own
+ *  cell-by-cell order. */
+function groupedOrder(cells, eye, { key, epsilon, groupOf }) {
+  const n = cells.length;
+  const plain = drawOrder(cells, eye, { key, epsilon });
+  const rank = new Int32Array(n);
+  plain.order.forEach((k, r) => { rank[k] = r; });
+
+  const depth = key || cells.map((c) => Math.hypot(
+    c.x - eye[0], c.y - eye[1], (c.z || 0) - eye[2]));
+  let m = 0;
+  for (let k = 0; k < n; k++) m = Math.max(m, groupOf[k] + 1);
+  const members = Array.from({ length: m }, () => []);
+  const gDepth = new Float64Array(m).fill(-Infinity);
+  for (let k = 0; k < n; k++) {
+    members[groupOf[k]].push(k);
+    gDepth[groupOf[k]] = Math.max(gDepth[groupOf[k]], depth[k]);
+  }
+
+  const { edges } = constraints(cells, eye, { epsilon });
+  const after = Array.from({ length: m }, () => new Set());
+  for (const [u, v] of edges) {
+    const gu = groupOf[u], gv = groupOf[v];
+    if (gu !== gv) after[gu].add(gv);
+  }
+  const indeg = new Int32Array(m);
+  for (const s of after) for (const v of s) indeg[v]++;
+
+  const done = new Uint8Array(m);
+  const out = [];
+  let placed = 0, cycles = 0;
+  while (placed < m) {
+    let best = -1;
+    for (let g = 0; g < m; g++) {
+      if (done[g] || indeg[g] > 0 || !members[g].length) continue;
+      if (best < 0 || gDepth[g] > gDepth[best]) best = g;
+    }
+    if (best < 0) {
+      cycles++;
+      for (let g = 0; g < m; g++) {
+        if (done[g] || !members[g].length) continue;
+        if (best < 0 || gDepth[g] > gDepth[best]) best = g;
+      }
+      if (best < 0) break;                       // only empty groups left
+      indeg[best] = 0;
+    }
+    done[best] = 1;
+    placed++;
+    for (const k of members[best].sort((a, b) => rank[a] - rank[b])) out.push(k);
+    for (const v of after[best]) if (--indeg[v] < 0) indeg[v] = 0;
+  }
+  return { order: out, weak: plain.weak, cycles: plain.cycles + cycles, constrained: plain.constrained };
 }
 
 /** Number of constraints `order` breaks (0 = all satisfied). For tests. */

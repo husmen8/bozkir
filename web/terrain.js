@@ -37,6 +37,8 @@ export const PROFILES = {
                iterations: 150, incision: 0.45, diffusion: 0.06, uplift: 0.02 },
   alpine:    { octaves: 7, freq: 2, ridge: 0.75, relief: 0.4,
                iterations: 180, incision: 0.55, diffusion: 0.04, uplift: 0.03 },
+  valley:    { dome: 0.3, octaves: 6, freq: 2, ridge: 0.5, relief: 0.6,
+               iterations: 120, incision: 0.9, diffusion: 0.12, tilt: 0.4 },
   crags:     { dome: 0.3, octaves: 7, freq: 5, ridge: 0.95, relief: 1.1,
                iterations: 60, incision: 0.6, diffusion: 0.01 },
   buttes:    { dome: 0.35, octaves: 6, freq: 4, ridge: 0.6, relief: 1.0,
@@ -62,6 +64,7 @@ export const GROUPS = [
   { name: 'desert', profiles: ['desert', 'dunes', 'badlands', 'buttes'] },
   { name: 'highlands', profiles: ['mesa', 'plateau', 'canyon', 'gorge', 'piedmont'] },
   { name: 'mountains', profiles: ['ridges', 'alpine', 'crags', 'scree'] },
+  { name: 'rivers', profiles: ['valley'] },
 ];
 
 /** Fraction of each side simulated but not returned; see generate(). */

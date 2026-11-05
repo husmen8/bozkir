@@ -1512,6 +1512,12 @@ def test_every_script_declares_the_flags_it_reads():
                 for kw in node.keywords:
                     if kw.arg == "dest" and isinstance(kw.value, _ast.Constant):
                         declared.add(kw.value.value)
+            if (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and node.func.attr == "add_subparsers"):
+                for kw in node.keywords:     # the sub-command name lands in args.<dest>
+                    if kw.arg == "dest" and isinstance(kw.value, _ast.Constant):
+                        declared.add(kw.value.value)
         # Flags the shared helpers attach.
         declared |= {"raw", "clean", "radius_pct", "floater_std",
                      "max_extent_pct", "sh", "up_axis", "flip", "no_cache",
@@ -2232,6 +2238,38 @@ def test_the_search_says_where_it_rejected_and_why():
     assert got == [(0.0, 0.0), (1.4, 0.0)], got               # least overlap, not a twin
 
 
+def test_a_levelled_search_takes_ground_on_a_slope():
+    """NZOW28: the green grew on a kettle hole's walls. A level height band cut
+    the uphill and downhill sides of each spot there, so the search read
+    holes and took the flat rim instead."""
+    from bozkir.patches import level_cut, pick_patches
+    from bozkir.ply import SH_C0
+    r = np.random.default_rng(6)
+    n = 85000
+    xy = r.random((n, 2)) * 4.5 - 2.25
+    slope = 28.0
+    z = xy[:, 0] * np.tan(np.radians(slope)) + r.normal(0, 0.003, n)
+    rgb = np.clip([0.4, 0.42, 0.3] + r.normal(0, 0.05, (n, 3)), 0, 1)
+    s = Splats(xyz=np.c_[xy, z].astype(np.float32),
+               opacity=np.full(n, 0.8, np.float32), scale=np.full((n, 3), 0.02, np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=((rgb - 0.5) / SH_C0).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    flat, tilt = level_cut(s, 2)
+    assert abs(tilt - slope) < 1.0, tilt
+    assert np.std(flat.xyz[:, 2]) < 0.01 and abs(np.median(flat.xyz[:, 2])) < 0.01
+    found = {}
+    for level in (False, True):
+        stats = {}
+        try:
+            pick_patches(s, 1.5, 10 ** 9, 2, verbose=False, stats=stats, max_tilt=35.0,
+                         min_separation=0.5, level_search=level)
+        except SystemExit:                    # nothing passed
+            pass
+        found[level] = stats.get("viable", 0)
+    assert found[True] >= 4 and found[True] > found[False], found
+
+
 def test_faint_ground_is_told_from_ground_with_gaps():
     """desert10: 719 positions failed the hole test; the sharp middle is a
     faint but whole layer that the export's fill makes solid."""
@@ -2582,6 +2620,90 @@ def test_levels_of_detail_keep_the_tiles_colour():
     assert drift > 0.03 and left < 0.01, (drift, left)
 
 
+def test_merged_levels_keep_their_members_weight_and_budget():
+    """--lod-merge: a level holds at most its budget of splats, opacities
+    stay in [0, 1), and a merged pair sits at the weighted centre of its
+    members with their weighted colour, its spread covering both."""
+    from bozkir.pack import merge_level, tile_levels
+    r = np.random.default_rng(7)
+    n = 8000
+    t = Splats(xyz=np.c_[r.random((n, 2)) * 1.5 - 0.75, 0.01 * r.random(n)].astype(np.float32),
+               opacity=(0.2 + 0.7 * r.random(n)).astype(np.float32),
+               scale=np.full((n, 3), [0.01, 0.006, 0.0005], np.float32),
+               rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+               sh_dc=r.normal(size=(n, 3)).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    levels = tile_levels(t, 4, 1.5, merge=True)
+    for k, p in enumerate(levels[1:], 1):
+        assert len(p) <= max(n // 4 ** k, 64), (k, len(p))
+        assert p.opacity.min() >= 0 and p.opacity.max() < 1
+    two = Splats(xyz=np.float32([[0, 0, 0], [0.02, 0, 0]]), opacity=np.float32([0.9, 0.3]),
+                 scale=np.full((2, 3), [0.01, 0.01, 0.001], np.float32),
+                 rot=np.tile(np.float32([1, 0, 0, 0]), (2, 1)),
+                 sh_dc=np.float32([[1, 0, 0], [0, 1, 0]]),
+                 sh_rest=np.zeros((2, 0, 3), np.float32), sh_degree=0)
+    m = merge_level(two, 1)
+    w = np.array([0.9, 0.3])
+    assert len(m) == 1
+    assert np.allclose(m.xyz[0, 0], 0.02 * w[1] / w.sum(), atol=1e-6)
+    assert np.allclose(m.sh_dc[0], [w[0] / w.sum(), w[1] / w.sum(), 0], atol=1e-6)
+    assert m.scale[0].max() > 0.01                        # wider than either member
+    # light through both, over a footprint wider than either: more than the
+    # weaker one alone, less than the two stacked exactly (1 - 0.1 x 0.7)
+    assert 0.3 < m.opacity[0] < 1 - 0.1 * 0.7, m.opacity[0]
+
+
+def test_a_decal_overlay_is_the_baked_copy_split_in_two():
+    """decals.py --overlay: the tile's splats outside the inner radius, then
+    the decal's, so a copy is the plain tile cut there (the viewer does it)
+    plus a piece holding exactly the decal's splats."""
+    from bozkir import decals as dec
+    r = np.random.default_rng(3)
+
+    def flat(n, z):
+        return Splats(xyz=np.c_[r.random((n, 2)) * 1.4 - 0.7, np.full(n, z)].astype(np.float32),
+                      opacity=np.full(n, 0.8, np.float32), scale=np.full((n, 3), 0.01, np.float32),
+                      rot=np.tile(np.float32([1, 0, 0, 0]), (n, 1)),
+                      sh_dc=np.zeros((n, 3), np.float32), sh_rest=np.zeros((n, 0, 3), np.float32),
+                      sh_degree=0)
+    tile, decal = flat(5000, 0.0), flat(3000, 0.1)
+    at, radius = (0.1, -0.05), 0.4
+    v = dec.place(tile, decal, radius, 1.5, at=at)
+    r_in = radius * (1 - dec.FEATHER)
+    kept = int((np.hypot(*(tile.xyz[:, :2] - np.float32(at)).T) >= r_in).sum())
+    assert np.all(v.xyz[:kept, 2] == 0.0) and np.all(v.xyz[kept:, 2] == np.float32(0.1))
+    assert len(v) - kept == int((np.hypot(*decal.xyz[:, :2].T) < radius).sum())
+
+
+def test_the_compact_layout_round_trips_within_its_steps():
+    """--compact: 20 bytes a splat; position to 0.06 mm, scale to 0.02%,
+    colour, opacity and rotation as in the 32-byte layout."""
+    import json
+    import tempfile
+    from bozkir.pack import pack, read_splat, COMPACT_STRIDE, STRIDE
+    r = np.random.default_rng(5)
+    n = 2000
+    q = r.normal(size=(n, 4))
+    t = Splats(xyz=(r.random((n, 3)) * 3 - 1.5).astype(np.float32),
+               opacity=r.random(n).astype(np.float32),
+               scale=(10.0 ** r.uniform(-6, -1, (n, 3))).astype(np.float32),
+               rot=(q / np.linalg.norm(q, axis=1, keepdims=True)).astype(np.float32),
+               sh_dc=r.normal(size=(n, 3)).astype(np.float32),
+               sh_rest=np.zeros((n, 0, 3), np.float32), sh_degree=0)
+    d = Path(tempfile.mkdtemp())
+    out = {}
+    for stride in (STRIDE, COMPACT_STRIDE):
+        buf = pack(t, stride=stride)
+        assert len(buf) == n * stride
+        (d / f"{stride}.splat").write_bytes(buf.tobytes())
+        (d / f"{stride}.json").write_text(json.dumps({"stride": stride}))
+        out[stride] = read_splat(d / f"{stride}.splat", d / f"{stride}.json")[1]
+    c, f = out[COMPACT_STRIDE], out[STRIDE]
+    assert np.abs(c.xyz - t.xyz).max() < 7e-5
+    assert np.abs(c.scale / t.scale - 1).max() < 2e-4
+    assert np.allclose(c.opacity, f.opacity) and np.allclose(c.rot, f.rot) and np.allclose(c.sh_dc, f.sh_dc)
+
+
 def test_the_far_view_sees_what_stands_up_and_never_black():
     """The atlas: a bare spot lies over the entry's own colour, not black;
     the entries are the tiles then the centres; and each says its colour
@@ -2684,6 +2806,22 @@ def test_dem_window_is_square_in_metres():
     assert a.shape[0] == a.shape[1] and good.all()
     assert abs(res * a.shape[0] - 3000.0) < 1e-6
     assert 30.0 < res < 32.0, res                    # the 31 m north-south posts
+
+
+def test_water_texture_splits_and_wraps():
+    """Otsu splits two groups between them; the cross-faded tile has no
+    seam where it wraps, and keeps its middle."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import water_texture as wt
+    rng = np.random.default_rng(0)
+    v = np.r_[rng.normal(0.1, 0.02, 4000), rng.normal(0.6, 0.05, 6000)]
+    assert 0.18 < wt.otsu(v) < 0.48
+    a = rng.random((64, 64, 3))
+    tile = wt.tileable(a)
+    inner = np.abs(np.diff(tile, axis=0)).mean()
+    assert np.abs(tile[0] - tile[-1]).mean() < 1.5 * inner
+    assert np.abs(tile[:, 0] - tile[:, -1]).mean() < 1.5 * inner
+    assert np.allclose(tile[32, 32], a[32, 32])
 
 
 def main():

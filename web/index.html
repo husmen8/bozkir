@@ -84,10 +84,10 @@
                 <div class="intro">
                     <h1 class="brand">bozkır</h1>
                     <div class="tag">captured ground, placed by terrain</div>
-                    <p class="claim">A few square metres of ground, captured as 3D Gaussian splats, laid over kilometres of terrain as Wang tiles.
-                        <b>The contribution:</b> which material goes where is computed from the terrain (drainage, topographic position, slope, altitude)
-                        instead of a coverage map painted by hand, as in Hybrid GSWT. Tiling, ordering and merging reimplement GSWT so this can be tested at scale.
-                        Runs in the browser on a laptop GPU.</p>
+                    <p class="claim">A few square metres of real ground, captured as 3D Gaussian splats, made into edge-matched tiles and laid over kilometres of terrain.
+                        <b>The pipeline:</b> a capture is trained, cleaned and searched for its materials; each becomes Wang tiles whose middles come from a pool of its own ground;
+                        the terrain decides where each material goes (drainage, position, slope, height, and the river where one runs), and rivers are cut into it
+                        with water measured from drone photos. It began from Gaussian Splatting Wang Tiles. Runs in the browser on a laptop GPU.</p>
                     <div class="strip noimg">
                         <figure><div class="ph" data-img="img/intro-1.webp"></div>
                             <figcaption data-n="1"><b>capture</b>a patch of real ground, trained as splats</figcaption></figure>
@@ -104,13 +104,15 @@
                         <div id="bar"><i></i></div>
                         <span id="loadnote">starting…</span>
                         <button type="button" id="introgo" class="primary">explore</button>
-                        <span class="small"><a href="https://github.com/husmen8/bozkir" target="_blank" rel="noopener">code and write-up</a> · the story steps through it in four views</span>
+                        <a href="?demo" class="demolink">1-minute demo</a>
+                        <span class="small"><a href="./project.html">project page</a> · <a href="https://github.com/husmen8/bozkir" target="_blank" rel="noopener">code and write-up</a> · the story steps through it in four views</span>
                     </div>
                 </div>
             </div>
         </div>
 
         <div id="grip"></div>
+        <aside id="side" aria-label="look and debug views"><div class="pages"></div><nav class="tabs"></nav></aside>
 
         <div id="panel">
             <details open style="--c:#d4a93a">
@@ -177,6 +179,7 @@
                 <div class="body">
                     <div class="note" data-needs="single">One material: there is nothing to place.</div>
                     <label class="c" data-needs="multi" data-info="rule" data-tip="Each cell's material from the terrain: drainage or sediment, topographic position, slope, altitude. Off: at random, the baseline."><input type="checkbox" id="classrule" checked> placed by terrain</label>
+                    <label class="c" data-needs="multi" data-tip="Materials by height above the nearest river channel (HAND): water edge, gravel bar, bank. A river tileset turns it on."><input type="checkbox" id="riverrule"> river rule</label>
                     <div class="s" data-needs="two" data-info="share" data-tip="How much of the world this material covers. The rule decides where.">
                         <input type="range" id="classbalance" min="0.05" max="0.95" step="0.05" value="0.5">
                         <label><span id="classbalancelbl">share</span><b id="classbalancen">50%</b></label>
@@ -200,6 +203,10 @@
                     </div>
                     <label class="c" data-needs="multi" data-info="share" data-tip="Which material collects in hollows and channels."><input type="checkbox" id="classswap"> swap materials</label>
                     <label class="c adv" data-needs="multi" data-info="blend" data-tip="Materials reach into each other along a ragged line; each spot is one material, and only a narrow strip dissolves, where taller splats win."><input type="checkbox" id="classblend"> blend at boundaries</label>
+                    <div class="s adv" data-needs="multi" data-info="blend" data-tip="How wide the strip is where two materials dissolve into each other: 0 a narrow line, 1 about a cell either side. Taller splats keep more of their chance in it.">
+                        <input type="range" id="blendwidth" min="0" max="1" step="0.05" value="0">
+                        <label>blend width<b id="blendwidthn">0%</b></label>
+                    </div>
                     <label class="c adv" data-needs="multi frames" data-info="blend" data-tip="Next to another material a cell takes the centres of its own whose tone lies nearest that one's, so the two meet in their closest shades. Nothing is tinted."><input type="checkbox" id="tonegrade" checked> tones meet at boundaries</label>
                     <label class="c" data-needs="multi" data-info="decision" data-tip="Paints the material the rule chose over each cell, grey where it was nearly a tie."><input type="checkbox" id="classview"> show the decision</label>
                     <div class="out adv" data-needs="multi" id="classnote">—</div>
@@ -214,7 +221,20 @@
                 </div>
             </details>
 
-            <details open style="--c:#6fa0b8">
+            <details open style="--c:#7aa6c2">
+                <summary data-info="water"><span class="n">05</span>water<span class="k" id="kwater"></span></summary>
+                <div class="body">
+                    <label class="c" data-tip="Rivers where the terrain drains, cut into it as a channel: a level water surface in metres, the bed under it seen as in the L2 drone photos of the Lütschine (clear at the waterline, milky further out, the dark channel water in the deep middle). Stones above the water stay dry, so the waterline follows them."><input type="checkbox" id="water"> water</label>
+                    <div class="s" data-tip="The main river's width where it leaves the map. Branches are narrower (width grows with the square root of the area drained) and every channel is a twentieth as deep as it is wide.">
+                        <input type="range" id="riverwidth" min="1" max="30" step="0.5" value="8">
+                        <label>river width<b id="riverwidthn">8 m</b></label>
+                    </div>
+                    <label class="c" data-tip="The water's surface moves down the river, faster where it is deeper. Redraws up to 30 times a second while on."><input type="checkbox" id="waterflow"> water flow</label>
+                    <label class="c adv" data-tip="Tint where the river's water lies, with the channel cut, before the water is drawn."><input type="checkbox" id="watermap"> water map</label>
+                </div>
+            </details>
+
+            <details open data-side style="--c:#6fa0b8">
                 <summary data-info="look">look</summary>
                 <div class="body">
                     <select id="sky" data-tip="Sets the haze colour too.">
@@ -227,6 +247,30 @@
                         <input type="range" id="fog" min="0" max="3" step="0.05" value="1">
                         <label>haze<b id="fogn">1.00</b></label>
                     </div>
+                    <div class="s" data-info="horizon" data-tip="Land past the world's edge: the same tiles go on, mirrored, in hills a few times the world's relief, thinning into the haze. A backdrop: no splats, not placed by the rule. 0 is off.">
+                        <input type="range" id="ranges" min="0" max="2" step="0.05" value="0">
+                        <label>distant land<b id="rangesn">0.00</b></label>
+                    </div>
+                    <div class="s" data-info="atmosphere" data-tip="Valley fog: densest over the channel each spot drains to and thinning with height above it (the river rule's HAND), so it lies on the river and in the hollows. 0 is off.">
+                        <input type="range" id="mist" min="0" max="3" step="0.05" value="0">
+                        <label>valley mist<b id="mistn">0.00</b></label>
+                    </div>
+                    <div class="s" data-info="atmosphere" data-tip="A coast's marine layer: even haze under a lid a little above the middle of the relief, so the higher ground stands out of it. 0 is off.">
+                        <input type="range" id="seahaze" min="0" max="3" step="0.05" value="0">
+                        <label>sea haze<b id="seahazen">0.00</b></label>
+                    </div>
+                    <div class="s" data-info="atmosphere" data-tip="The sun's glow in the sky and in the haze towards it. The light in the scans is baked in, so the ground itself is not relit. 0 is off.">
+                        <input type="range" id="sunglow" min="0" max="2" step="0.05" value="0">
+                        <label>sun glow<b id="sunglown">0.00</b></label>
+                    </div>
+                    <div class="s adv" data-info="atmosphere" data-tip="Where the sun's glow sits, compass degrees from east.">
+                        <input type="range" id="sunaz" min="0" max="355" step="5" value="225">
+                        <label>sun direction<b id="sunazn">225°</b></label>
+                    </div>
+                    <div class="s" data-info="atmosphere" data-tip="A final tone curve over the picture: cooler shadows, warmer light, a little more contrast and a little less colour. 0 is off.">
+                        <input type="range" id="grade" min="0" max="1" step="0.05" value="0">
+                        <label>colour grade<b id="graden">0.00</b></label>
+                    </div>
                     <div class="s" data-tip="Brightness. A .splat keeps only base colours (SH degree 0), so it reads flatter than the capture.">
                         <input type="range" id="exposure" min="0.5" max="2" step="0.05" value="1">
                         <label>exposure<b id="exposuren">1.00</b></label>
@@ -238,6 +282,10 @@
                     <div class="s adv" data-info="macro" data-tip="Brightness noise at about 4 and 11 cells. A render-time tint; the figure views turn it off.">
                         <input type="range" id="macro" min="0" max="1" step="0.05" value="0.5">
                         <label>land variation<b id="macron">0.50</b></label>
+                    </div>
+                    <div class="s adv" data-info="macro" data-tip="Each material drifts slowly between the two ends of its own tiles' colour range across the land (a lawn greener here, yellower there). Only colours its tiles have; 0 is off.">
+                        <input type="range" id="drift" min="0" max="1" step="0.05" value="0">
+                        <label>colour drift<b id="driftn">0%</b></label>
                     </div>
                     <div class="s adv" data-tip="Colour strength. Above 1 is stronger than the capture.">
                         <input type="range" id="saturation" min="0" max="2" step="0.05" value="1">
@@ -283,8 +331,8 @@
                 <div class="body">
                     <label class="c" data-info="farfield" data-tip="Distant ground as one mesh coloured from the tile atlas, continued past the grid to the haze."><input type="checkbox" id="farfield" checked> far field</label>
                     <label class="c" data-info="quality" data-tip="Holds about 30 fps: resolution first, then level of detail."><input type="checkbox" id="autoquality" checked> auto quality</label>
-                    <label class="c" data-info="warp" data-tip="On: every splat bends with the ground. Off: a few frames per tile, as GSWT."><input type="checkbox" id="smoothframes" checked> smooth tiles on terrain</label>
-                    <div class="s" id="subdivrow" style="display:none" data-tip="One frame per tile is GSWT.">
+                    <label class="c" data-info="warp" data-tip="On: every splat bends with the ground. Off: a few frames per tile."><input type="checkbox" id="smoothframes" checked> smooth tiles on terrain</label>
+                    <div class="s" id="subdivrow" style="display:none" data-tip="Frames per tile: 1 bends each tile as one piece.">
                         <input type="range" id="subdiv" min="1" max="17" step="1" value="17">
                         <label>frames / tile<b id="subdivn">smooth</b></label>
                     </div>
@@ -302,20 +350,21 @@
                 <summary data-info="ordering">ordering</summary>
                 <div class="body">
                     <select id="tileorder" data-tip="Topological: by which side of each shared boundary the camera is on. Depth key: ties along whole rows at axis-aligned views.">
-                        <option value="topological" selected>tiles: topological (GSWT)</option>
+                        <option value="topological" selected>tiles: topological</option>
                         <option value="depth">tiles: depth key only</option>
                     </select>
                     <label class="c" data-info="merging" data-tip="Near a shared boundary's plane, draw both tiles as one interleaved stream."><input type="checkbox" id="merging" checked> selective merging</label>
+                    <label class="c" data-tip="Order each merged group as one block, so it is drawn where all its tiles belong. Off: a group is drawn where its first tile falls, and tiles ordered between its members can cover the nearer one."><input type="checkbox" id="mergeorder"> order merged groups as one</label>
                     <div class="s" data-tip="How close to a boundary's plane, in tiles, before merging. Crossings measured near 0.25.">
                         <input type="range" id="mergethr" min="0.05" max="1" step="0.05" value="0.5">
                         <label>merge within<b id="mergethrn">0.50</b></label>
                     </div>
                     <div class="r"><span>merged</span><span class="v" id="mergestat">—</span></div>
-                    <select id="sortmode" data-tip="Live: one sort per frame. Cached: an order per view direction, as GSWT does with nine.">
+                    <select id="sortmode" data-tip="Live: one sort per frame. Cached: an order per view direction, nine by default.">
                         <option value="live" selected>within a tile: live</option>
                         <option value="cached">within a tile: cached</option>
                     </select>
-                    <div class="s" data-tip="View directions with their own cached order. GSWT uses nine.">
+                    <div class="s" data-tip="View directions with their own cached order.">
                         <input type="range" id="views" min="1" max="49" step="1" value="9">
                         <label>cached views<b id="viewsn">9</b></label>
                     </div>
@@ -329,31 +378,36 @@
             <details class="adv" style="--c:#c17a54">
                 <summary data-info="measure">measure</summary>
                 <div class="body">
-                    <label class="c" data-tip="Picture change per degree turned. A spike means something switched."><input type="checkbox" id="popmeter"> pop meter</label>
+                    <div class="sub">live</div>
+                    <label class="c" data-tip="How much the middle of the picture changes in colour per degree the camera turns. Turning moves everything smoothly; a spike means splats or tiles switched order and popped."><input type="checkbox" id="popmeter"> popping while turning</label>
                     <div class="out" id="pop">off</div>
-                    <button id="popreset">reset peak</button>
-                    <div class="r"><span>boundary gap</span></div>
+                    <button id="popreset" data-tip="Forget the highest value seen so far.">reset peak</button>
+                    <div class="r" data-tip="The same point on every edge two tiles share, placed from each tile; how far apart the two land, in splat widths. 0: the tiles meet exactly, at any relief."><span>seam gap between tiles</span></div>
                     <div class="out" id="seam">—</div>
-                    <div class="sub">sweep for pop_metric.py</div>
-                    <div class="r"><span>step</span><span class="v"><b id="capstepn">0.42</b>° / frame</span></div>
-                    <div class="s">
+                    <div class="sub">turn recording</div>
+                    <div class="note">Saves frames along an orbit to frames/, so scripts/pop_metric.py can measure popping offline and compare two draw orders on the same path.</div>
+                    <div class="s" data-tip="How far the camera turns over the recording.">
                         <input type="range" id="caparc" min="4" max="360" step="4" value="20">
-                        <label>arc<b><span id="caparcn">20</span>°</b></label>
+                        <label>turn<b><span id="caparcn">20</span>°</b></label>
                     </div>
-                    <div class="s">
+                    <div class="s" data-tip="Frames saved over the turn.">
                         <input type="range" id="capframes" min="12" max="180" step="12" value="48">
                         <label>frames<b id="capframesn">48</b></label>
                     </div>
-                    <label class="c" data-tip="Orbit the terrain centre, so sweeps repeat exactly."><input type="checkbox" id="capcentre" checked> orbit terrain centre</label>
-                    <button id="capture" data-tip="One run with the ordering selected above.">capture sweep</button>
-                    <button id="captureboth" data-tip="Both orderings along the same path. Then: python scripts/pop_metric.py frames/topological --against frames/depth">capture both orderings</button>
+                    <div class="r"><span>per frame</span><span class="v"><b id="capstepn">0.42</b>°</span></div>
+                    <label class="c" data-tip="Orbit the terrain centre, so recordings repeat exactly."><input type="checkbox" id="capcentre" checked> orbit terrain centre</label>
+                    <div class="seg two">
+                        <button id="capture" data-tip="One recording with the draw order set under ordering.">record</button>
+                        <button id="captureboth" data-tip="Both draw orders along the same path. Then: python scripts/pop_metric.py frames/topological --against frames/depth">record both orders</button>
+                    </div>
                     <div class="sub">scaling</div>
-                    <button id="bench" data-tip="Steps the grid from 4 to 48 and reports fps, splats, draw calls and sort time.">scaling sweep</button>
+                    <div class="note">Steps the world from 4 to 48 cells across and reports frame rate, splats drawn, draw calls and sort time at each size.</div>
+                    <button id="bench">run scaling sweep</button>
                     <div class="out mono" id="benchout">—</div>
                 </div>
             </details>
 
-            <details class="adv" style="--c:#c96f6f">
+            <details class="adv" data-side style="--c:#c96f6f">
                 <summary data-info="tiles">debug views</summary>
                 <div class="body">
                     <label class="c" data-tip="One colour per tile. A cell that changes colour while turning is swapping tiles."><input type="checkbox" id="identity"> tile identity</label>

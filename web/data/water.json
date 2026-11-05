@@ -1,0 +1,110 @@
+{
+ "metres": 1.057,
+ "mean": [
+  0.5488,
+  0.5901,
+  0.597
+ ],
+ "source": "DJI_0344.JPG",
+ "mm_per_px": 1.371,
+ "water_share": 0.651,
+ "at": [
+  389,
+  577
+ ],
+ "deep": {
+  "metres": 1.084,
+  "mean": [
+   0.3384,
+   0.3645,
+   0.3852
+  ],
+  "source": "DJI_0367.JPG",
+  "mm_per_px": 1.371,
+  "water_share": 0.813,
+  "at": [
+   571,
+   3073
+  ]
+ },
+ "layers": {
+  "t0": 0.934,
+  "length_m": 0.53,
+  "tile_contrast": 0.286,
+  "bands": [
+   {
+    "from_m": 0.0,
+    "to_m": 0.04,
+    "pixels": 4825886,
+    "contrast": 0.988,
+    "t": 0.988
+   },
+   {
+    "from_m": 0.04,
+    "to_m": 0.08,
+    "pixels": 3706898,
+    "contrast": 0.844,
+    "t": 0.843
+   },
+   {
+    "from_m": 0.08,
+    "to_m": 0.15,
+    "pixels": 3691197,
+    "contrast": 0.728,
+    "t": 0.723
+   },
+   {
+    "from_m": 0.15,
+    "to_m": 0.3,
+    "pixels": 3461503,
+    "contrast": 0.548,
+    "t": 0.531
+   },
+   {
+    "from_m": 0.3,
+    "to_m": 0.6,
+    "pixels": 2238721,
+    "contrast": 0.431,
+    "t": 0.395
+   },
+   {
+    "from_m": 0.6,
+    "to_m": 1.0,
+    "pixels": 341174,
+    "contrast": 0.379,
+    "t": 0.327
+   }
+  ],
+  "photos": [
+   "DJI_0332.JPG",
+   "DJI_0333.JPG",
+   "DJI_0334.JPG",
+   "DJI_0335.JPG",
+   "DJI_0336.JPG",
+   "DJI_0337.JPG",
+   "DJI_0338.JPG",
+   "DJI_0339.JPG",
+   "DJI_0340.JPG",
+   "DJI_0346.JPG",
+   "DJI_0347.JPG",
+   "DJI_0348.JPG",
+   "DJI_0349.JPG",
+   "DJI_0350.JPG",
+   "DJI_0351.JPG",
+   "DJI_0355.JPG",
+   "DJI_0356.JPG",
+   "DJI_0357.JPG",
+   "DJI_0358.JPG",
+   "DJI_0359.JPG",
+   "DJI_0360.JPG",
+   "DJI_0361.JPG",
+   "DJI_0362.JPG",
+   "DJI_0363.JPG",
+   "DJI_0367.JPG",
+   "DJI_0368.JPG",
+   "DJI_0370.JPG",
+   "DJI_0373.JPG",
+   "DJI_0374.JPG"
+  ]
+ }
+}

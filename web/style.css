@@ -63,6 +63,10 @@ code { font-family: var(--mono); color: var(--accent); }
     grid-template-rows: var(--top) minmax(0, 1fr);
 }
 #stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+/* ?embed=1: the view alone, for a page that drives it (explain.html). */
+body.embed #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+body.embed #topbar, body.embed #panel, body.embed #hud, body.embed #overlay, body.embed #side,
+body.embed #caption, body.embed #hint { display: none !important; }
 #gl { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
 
 /* ---------------------------------------------------------- top bar */
@@ -129,6 +133,73 @@ body.expert #hud { display: flex; }
 #scale:empty { display: none; }
 #scale i { display: block; height: 6px; border: 1px solid var(--text); border-top: 0; }
 body.figure #scale, body.figure #hud, body.figure #caption { display: none; }
+.demolink { color: var(--accent); white-space: nowrap; }
+
+/* ---------------------------------------------------- the demo (film.js) */
+/* Fades and moves are set by film.js on the film's clock. Over everything,
+   catching the pointer so nothing moves the camera; the viewer's own notes,
+   numbers and cursor are not in the shot. */
+#film { position: fixed; inset: 0; z-index: 200; pointer-events: auto; }
+body.film, body.film * { cursor: none !important; }
+body.film #hud, body.film #scale, body.film #busy, body.film #hint, body.film #tip,
+body.film #caption, body.film #figexit, body.film #gizmo, body.film #overlay,
+body.film #info { display: none !important; }
+#film .card {
+    position: absolute; inset: 0; background: #08090a;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    text-align: center; pointer-events: none;
+}
+#film .card .big { font: 600 64px/1.1 var(--ui); color: #f1ece2; letter-spacing: .01em; }
+#film .card .line { font-size: 22px; color: #b9b3a8; max-width: 30em; }
+#film .card .small { font-size: 17px; color: #8f897f; letter-spacing: .08em; text-transform: uppercase; }
+#film .card .pics { display: flex; gap: 14px; margin-top: 18px; }
+#film .card .pics img { width: 300px; height: 200px; object-fit: cover; border-radius: 3px; }
+#film .card .credit { font-size: 12px; color: #6c675f; margin-top: 6px; }
+#film .card .hint { font-size: 14px; color: #6c675f; margin-top: 28px; min-height: 1em; }
+#film .photos { position: absolute; inset: 0; pointer-events: none; }
+#film .photos .side {
+    /* Above the caption, which takes the bottom of the screen. */
+    position: absolute; top: 42%; width: 24vw; display: flex; flex-direction: column; gap: 1.2vw;
+    opacity: 0;
+}
+#film .photos .side.l { left: 4vw; }
+#film .photos .side.r { right: 4vw; }
+#film .photos .side img { width: 100%; aspect-ratio: 3 / 2; object-fit: cover; border-radius: 3px;
+                          box-shadow: 0 6px 24px rgba(0, 0, 0, .5); }
+#film .photos .label { font-size: 17px; color: #f1ece2; text-shadow: 0 1px 6px rgba(0, 0, 0, .8); }
+#film .photos .credit { position: absolute; left: 4vw; bottom: 2.5vh; font-size: 12px; color: #c9c3b8;
+                        opacity: 0; text-shadow: 0 1px 4px #000; }
+#film .cap {
+    position: absolute; left: 50%; bottom: 6vh;
+    width: min(860px, 80vw); padding: 14px 22px; border-radius: 4px;
+    background: rgba(8, 9, 10, .72); backdrop-filter: blur(6px);
+    font-size: 21px; line-height: 1.45; color: #d8d2c6; text-align: center;
+    opacity: 0; pointer-events: none;
+}
+#film .cap b { color: #f1ece2; margin-right: .5em; }
+/* A table from the world's own data (film.js), right of the view, above the caption. */
+#film .table {
+    position: absolute; right: 2.5vw; top: 5vh; max-width: 52vw; padding: 14px 18px 16px;
+    border-radius: 6px; background: rgba(8, 9, 10, .8); backdrop-filter: blur(6px);
+    color: #d8d2c6; opacity: 0; visibility: hidden; pointer-events: none;
+}
+#film .table .t { font-size: 15px; line-height: 1.45; margin-bottom: 12px; max-width: 34em; }
+#film .table .t b { color: #f1ece2; margin-right: .5em; }
+#film .table .rows { display: flex; flex-direction: column; gap: 10px; }
+#film .table .maps { display: flex; gap: 10px; align-items: flex-start; }
+#film .table .it { opacity: 0; }
+#film .table .lbl { font-size: 12px; line-height: 1.35; color: #b9b3a8; margin: 4px 0; max-width: 92px;
+                    text-transform: none; letter-spacing: normal; }
+#film .table .rows .lbl { max-width: none; }
+#film .table .c canvas { display: block; border-radius: 2px; }
+#film .table .it img { display: block; width: 120px; height: 120px; object-fit: cover; border-radius: 2px; }
+#film .table .it img + .lbl { max-width: 120px; }
+#film .table .arrow { font-size: 24px; color: #8f897f; margin-top: 26px; }
+#film .table .legend { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+#film .table .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+/* With the panel out the caption sits over the canvas, not the panel. */
+body.film:not(.figure) #film .cap { left: calc(50% - var(--panel-w) / 2); width: min(720px, 60vw); font-size: 18px; }
+
 
 #caption {
     position: absolute; left: 50%; bottom: var(--pad); transform: translateX(-50%);
@@ -279,6 +350,33 @@ body.wang [data-needs~="nowang"] { display: none !important; }
     background: transparent; transition: background .12s;
 }
 #grip:hover::after, body.sizing #grip::after { background: var(--accent); }
+
+/* The sidebar beside the canvas (Blender's N panel): look and debug views,
+   a page at a time, tabs on its right edge; folded, only the tabs show. */
+#side {
+    position: absolute; top: calc(var(--top) + 104px); right: calc(var(--panel-w) + 4px);
+    z-index: 25; display: flex; align-items: flex-start; max-height: calc(100% - var(--top) - 116px);
+}
+#side .pages {
+    display: none; width: 248px; max-height: calc(100vh - var(--top) - 116px); overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--line); border-right: 0;
+    border-radius: var(--r) 0 0 var(--r); box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+}
+#side.open .pages { display: block; }
+#side .pages > details { display: none; box-shadow: none; }
+#side .pages > details.shown { display: block; }
+#side .pages > details > summary { pointer-events: none; }
+#side .pages > details > summary::before { display: none; }
+#side .tabs { display: flex; flex-direction: column; gap: 2px; }
+#side .tabs button {
+    writing-mode: vertical-rl;
+    width: 22px; height: auto; padding: 10px 0; border: 0; border-radius: 0 var(--r) var(--r) 0;
+    background: rgba(10, 12, 13, .78); color: var(--dim);
+    font: 600 10px var(--mono); letter-spacing: .06em; text-transform: uppercase;
+    box-shadow: inset -2px 0 color-mix(in srgb, var(--c) 45%, transparent); cursor: pointer;
+}
+#side .tabs button:hover { color: var(--text); }
+#side .tabs button.on { color: var(--text); background: var(--panel); box-shadow: inset -2px 0 var(--c); }
 body.sizing { cursor: ew-resize; user-select: none; }
 body.sizing #gl { pointer-events: none; }
 
@@ -502,10 +600,14 @@ summary .i:hover { opacity: 1; background: color-mix(in srgb, var(--c) 35%, tran
     background: rgba(10, 12, 13, .78);
 }
 body.figure #app { grid-template-rows: 0 minmax(0, 1fr); grid-template-columns: minmax(0, 1fr) 0; }
+/* With the top bar hidden the stage would move up into the empty first row
+   (0 high) and the canvas went 1 px tall; it keeps its own cell. */
+body.figure #stage { grid-row: 2; grid-column: 1; }
 body.figure #figexit { display: block; }
 body.figure #figexit.faded { opacity: .15; }
 body.figure #figexit:hover { opacity: 1; }
-body.figure #panel, body.figure #grip, body.figure #gizmo, body.figure #topbar { display: none; }
+body.figure #panel, body.figure #grip, body.figure #gizmo, body.figure #topbar,
+body.figure #side { display: none; }
 
 #drophint {
     position: fixed; inset: 0; display: none; z-index: 70;
@@ -532,7 +634,7 @@ body.dropping #drophint { display: flex; }
     .story { order: 5; width: 100%; }
     #chapters { width: 100%; }
     #panel { box-shadow: inset 0 1px var(--line); }
-    #grip { display: none; }
+    #grip, #side { display: none; }
     #gizmo { width: 60px; height: 60px; }
     #caption { top: var(--pad); bottom: auto; font-size: var(--fs); }
     #info { width: 100%; }

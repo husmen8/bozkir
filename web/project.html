@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bozkır: captured ground, placed by terrain</title>
+<meta name="description" content="A few square metres of Gaussian-splat ground made into edge-matched tiles and laid over kilometres of terrain, each material placed by the land and its rivers.">
+<link rel="icon" href="./icon.png">
+<!-- Layout and stylesheet: the Academic Project Page Template (see the footer). -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.1/css/bulma.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="./project.css">
+</head>
+<body>
+<main id="main-content">
+
+<!-- Title -->
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">bozkır: Captured Ground, Placed by Terrain</h1>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">Gaussian-splat ground from drone photos, made into worlds in the browser</span>
+          </div>
+          <div class="publication-links">
+            <span class="link-block">
+              <a href="./index.html?demo" class="button is-normal is-rounded is-dark">
+                <span class="icon"><i class="fas fa-play"></i></span><span>Live demo</span></a>
+            </span>
+            <span class="link-block">
+              <a href="#video" class="button is-normal is-rounded is-dark">
+                <span class="icon"><i class="fas fa-film"></i></span><span>Video</span></a>
+            </span>
+            <span class="link-block">
+              <a href="./index.html?scene=river" class="button is-normal is-rounded is-dark">
+                <span class="icon"><i class="fas fa-sliders"></i></span><span>Full viewer</span></a>
+            </span>
+            <span class="link-block">
+              <a href="https://github.com/husmen8/bozkir" class="external-link button is-normal is-rounded is-dark">
+                <span class="icon"><i class="fab fa-github"></i></span><span>Code</span></a>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Teaser video -->
+<section class="hero teaser" id="video">
+  <div class="container is-max-desktop">
+    <div class="hero-body">
+      <video src="./media/demo.mp4" poster="./media/demo-poster.jpg" controls muted playsinline preload="metadata"></video>
+      <h2 class="subtitle has-text-centered">
+        A few square metres of real ground, captured as Gaussian splats, laid over kilometres of terrain,
+        each material where the land and its rivers put it.
+      </h2>
+      <p class="note">One minute, recorded from the viewer in one take: both worlds, from drone photos to
+      tiles, terrain, the rule and water, then the viewer's own settings and debug views.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Live demo -->
+<section class="section hero is-light">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Live demo</h2>
+        <div class="content has-text-justified">
+          <p>The viewer runs in the browser with no installation. Load it here, or play the same one-minute
+          demo live at full screen.</p>
+        </div>
+      </div>
+    </div>
+    <div class="live" id="live">
+      <img src="./media/river-world.jpg" alt="" aria-hidden="true">
+      <button type="button" id="liveload">Load the live demo here<span>about 30 MB · drag to look, scroll to zoom</span></button>
+    </div>
+    <div class="live-links">
+      <span class="link-block">
+        <a href="./index.html?demo" class="button is-normal is-rounded is-dark">
+          <span class="icon"><i class="fas fa-expand"></i></span><span>Demo full screen</span></a>
+      </span>
+      <span class="link-block">
+        <a href="./index.html?scene=river" class="button is-normal is-rounded is-dark">
+          <span class="icon"><i class="fas fa-water"></i></span><span>River world</span></a>
+      </span>
+      <span class="link-block">
+        <a href="./index.html" class="button is-normal is-rounded is-dark">
+          <span class="icon"><i class="fas fa-mountain-sun"></i></span><span>Desert world</span></a>
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- Abstract -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>Open worlds need kilometres of ground; a scan of real ground covers a few square metres. bozkır
+          turns such a scan, trained as 3D Gaussian splats, into edge-matched tiles whose middles come
+          from a pool of the capture's own ground, and lays them over procedural terrain. Which material
+          goes where is computed from the land itself (drainage, position, slope, height) rather than
+          painted. Where the land drains, a river is cut into it in metres, and its water is drawn from
+          layers measured in the drone photos the gravel came from. Everything runs in a browser on a
+          laptop GPU.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Pipeline -->
+<section class="section hero is-light">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column">
+        <h2 class="title is-3">Pipeline</h2>
+        <figure class="figure-card">
+          <img src="./media/river-steps.jpg" alt="Four panels: captured tiles outlined, Wang tiles with edge colours, a valley with its river and random materials, the same valley with materials placed by the rule." loading="lazy">
+          <figcaption>From a capture to a world, in four steps.</figcaption>
+        </figure>
+        <div class="stages">
+          <div><b>(a)</b> Ground is captured from drone photos and trained as Gaussian splats in metres; the
+          export finds its materials and the cleanest patches of each.</div>
+          <div><b>(b)</b> The patches become Wang tiles with matching edges; each cell's middle is drawn from
+          a pool of the capture's own ground.</div>
+          <div><b>(c)</b> The tiles are laid over terrain generated in the browser, and a river is cut into it
+          where the land drains.</div>
+          <div><b>(d)</b> Each material is placed by the land and the river, and the water is drawn from
+          layers measured in the drone photos.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Method -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Method</h2>
+        <div class="content has-text-justified">
+          <h3 class="title is-4">Capture to tiles</h3>
+          <p>Drone photos are posed with COLMAP and a block of ground is trained with gsplat, then levelled and
+          set in metres. The export finds the capture's materials and its cleanest patches of each, checks
+          every candidate for see-through holes and haze, and builds Wang tiles from them with min-cut seams.
+          A tile keeps only a frame along its edges; each cell's middle is a centre drawn and turned in the
+          viewer from a pool of the material's own ground, so the same tile is never repeated whole. Every
+          decision is measured from the capture and printed with its reason.</p>
+
+          <h3 class="title is-4">Materials placed by the land</h3>
+          <p>Terrain is generated and eroded in the browser (stream power, solved implicitly). Each material
+          goes where the land says: the one that collects in hollows and channels, the exposed one on steep,
+          convex ground, from the same rule file the Python pipeline reads. A share slider sets how much of a
+          material there is; the terrain sets where.</p>
+        </div>
+      </div>
+    </div>
+    <figure class="figure-card">
+      <img src="./media/fig_map.jpg" alt="The same desert terrain seen from above with materials at random and placed by the rule." loading="lazy">
+      <figcaption>The desert tileset from above, rendered from its real tiles: materials at random and
+      placed by the rule, at the same shares.</figcaption>
+    </figure>
+
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <div class="content has-text-justified">
+          <h3 class="title is-4">Rivers and water</h3>
+          <p>The largest drainage systems become rivers sized in metres: narrower up the branches, a bed a
+          twentieth as deep as it is wide, deeper on the outside of bends with point bars inside, pools and
+          riffles every few widths. The water is a level surface that never rises downstream. Under it, the
+          bed fades by a share measured from 29 drone photos of the Lütschine, into the milky shallow water
+          and then the dark channel water, both photographed. Stones above the level stay dry, so the
+          waterline follows them. Gravel bars go where a river leaves them: low beside the water and within
+          reach of it.</p>
+        </div>
+      </div>
+    </div>
+    <figure class="figure-card">
+      <img src="./media/fig_water.png" alt="Shallow and deep water tiles from the drone photos, and a chart of the bed's visible share against distance from the waterline with an exponential fit." loading="lazy">
+      <figcaption>The water's layers, measured: the shallow and deep tiles at their ground size, and
+      the share of the bed still seen against distance from the waterline.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- Results -->
+<section class="section hero is-light">
+  <div class="container is-max-desktop">
+    <h2 class="title is-3 has-text-centered">Results</h2>
+    <div class="duo">
+      <figure class="figure-card">
+        <img src="./media/river-rule.jpg" alt="The river world from above with materials at random, and with gravel bars placed along the river." loading="lazy">
+        <figcaption>Rule off and on: gravel along the river where it leaves bars.</figcaption>
+      </figure>
+      <figure class="figure-card">
+        <img src="./media/river-hero.jpg" alt="A close view of the river: gravel bars beside a level water surface." loading="lazy">
+        <figcaption>Close to the water: bars of captured gravel beside the river.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- In the browser -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">In the browser</h2>
+        <div class="content has-text-justified">
+          <p>WebGL2 with no third-party code: splats sorted per tile in a worker, tiles ordered by their
+          shared-edge constraints, bent over the terrain through its true Jacobian, levels of detail, and a
+          far field that hands distant ground to one mesh textured from an atlas of the tiles. A world of
+          256 × 256 tiles holds about 30 fps on a laptop GPU.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Limitations -->
+<section class="section hero is-light">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Limitations</h2>
+        <div class="content has-text-justified">
+          <ul>
+            <li>Lighting is baked into a capture: no relighting, no time of day.</li>
+            <li>A drone capture at 3 to 4 mm per pixel holds up to about a metre away; grass that moves in the
+            wind between photos stays soft.</li>
+            <li>The material rule's one test against survey data could not decide: the plot is a single slope.</li>
+            <li>Water is shading on the splats and a level surface, not simulated.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Built on and data -->
+<section class="section">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Built on</h2>
+        <div class="content has-text-justified">
+          <p>The idea of tiling Gaussian-splat ground with Wang tiles comes from <em>Gaussian Splatting Wang
+          Tiles</em> (Zeng, Ma and Sander), where this project began. Frames and centre pools, the material
+          rule, the river and its water, and most of the export and the renderer are its own.</p>
+          <p>Desert: OpenDroneMap COPR dataset (Tobias and Mandel 2009), CC BY-SA 4.0.
+          River gravel and water: Lütschine L2 drone survey, Mair et al. 2022 (Zenodo 6415047), CC BY 4.0.
+          Grass: Uruguayan native grassland UAV images (Zenodo 14771664), CC BY 4.0.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- References -->
+<section class="section hero is-light" id="references">
+  <div class="container is-max-desktop">
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">References</h2>
+        <div class="content has-text-left references">
+          <p>Zeng, Ma, Sander. Gaussian Splatting Wang Tiles. SIGGRAPH Asia 2025.</p>
+          <p>Kerbl, Kopanas, Leimkühler, Drettakis. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. SIGGRAPH 2023.</p>
+          <p>Cohen, Shade, Hiller, Deussen. Wang Tiles for Image and Texture Generation. SIGGRAPH 2003.</p>
+          <p>Kwatra, Schödl, Essa, Turk, Bobick. Graphcut Textures. SIGGRAPH 2003.</p>
+          <p>Heitz, Neyret. High-Performance By-Example Noise using a Histogram-Preserving Blending Operator. HPG 2018.</p>
+          <p>Braun, Willett. A very efficient O(n), implicit and parallel method to solve the stream power equation. Geomorphology 2013.</p>
+          <p>Leopold, Maddock. The Hydraulic Geometry of Stream Channels. USGS 1953. Leopold, Wolman. River Meanders. GSA Bulletin 1960.</p>
+          <p>Mair et al. Grain size of fluvial gravel bars from close-range UAV imagery. Earth Surface Dynamics 2022.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            This page was built using the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template" target="_blank">Academic Project Page Template</a>
+            which was adopted from the <a href="https://nerfies.github.io" target="_blank">Nerfies</a> project page.
+            You are free to borrow the source code of this website, we just ask that you link back to this page in the footer.
+            <br> This website is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">Creative
+            Commons Attribution-ShareAlike 4.0 International License</a>.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+// The live demo loads only when asked: the scene is about 30 MB.
+document.getElementById('liveload').addEventListener('click', () => {
+  const box = document.getElementById('live');
+  const f = document.createElement('iframe');
+  f.src = './index.html?scene=river&nointro';
+  f.title = 'bozkır, the river world';
+  f.allow = 'fullscreen';
+  box.replaceChildren(f);
+});
+</script>
+</body>
+</html>

@@ -1555,6 +1555,11 @@ def _rule_cases():
     add(fbm((60, 60), seed=4), 20, {}, classes=3)
     for k, shares in ((3, [0.2, 0.5, 0.3]), (4, [0.25] * 4)):
         add(fbm((64, 64), seed=11), 16, {"balance": shares}, classes=k)
+    # The river rule: HAND and channels from the same receivers.
+    for k in (2, 3, 4):
+        add(fbm((64, 64), seed=12 + k), 16, {"river": True}, classes=k)
+    add(fbm((64, 64), seed=20), 16, {"river": True, "balance": [0.2, 0.5, 0.3]}, classes=3)
+    add(np.zeros((32, 32)), 8, {"river": True}, classes=3)
     return cases
 
 

@@ -171,7 +171,10 @@ def room(radius, size):
     return size / 2.0 - EDGE_CLEAR - radius
 
 
-def place(tile, decal, radius, size, up_axis=2, feather=0.25, at=(0.0, 0.0)):
+FEATHER = 0.25          # share of the radius over which tile and decal cross-fade
+
+
+def place(tile, decal, radius, size, up_axis=2, feather=FEATHER, at=(0.0, 0.0)):
     """A copy of `tile` with `decal` set into a disc at `at` (tile frame):
     inside, the tile gives way to the decal over the outer `feather` of the
     radius; outside the disc nothing changes, so the copy's edges are the

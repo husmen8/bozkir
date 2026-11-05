@@ -102,7 +102,7 @@ def draw(s, found, labels, radius, up, title, dest):
                                fill=False, color="w", lw=0.8, ls="--"))
         a.set_title(f"{labels[k]}  ({x:.1f}, {y:.1f})", fontsize=8)
     fig.suptitle(title, fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout(rect=(0, 0, 1, 0.97), h_pad=1.6)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(dest, dpi=110)
     plt.close(fig)
@@ -154,8 +154,8 @@ def into_centres(args, m, all_splats, pieces, parts, cursor, fill, lod, compensa
                 v.opacity = np.where(inside, full.opacity, v.opacity).astype(np.float32)
             levels = []
             for part in tile_levels(v, lod, size, up, compensate,
-                                    bool(st.get("level_tone"))):
-                parts.append(pack(part).reshape(-1))
+                                    bool(st.get("level_tone")), merge=bool(st.get("lod_merge"))):
+                parts.append(pack(part, stride=int(m.get("stride", 32))).reshape(-1))
                 levels.append([cursor, len(part)])
                 cursor += len(part)
             centres.append({"start": levels[0][0], "count": levels[0][1], "levels": levels,
@@ -240,17 +240,30 @@ def bake(args, m, raw):
             v = dec.place(base, pieces[j], args.decal_radius, size, up, at=at)
             if fill > 0:
                 v = filled(v, size, up, fill, bool(st.get("fill_spare_haze")))
+            entry = {"n": t["n"], "e": t["e"], "s": t["s"], "w": t["w"],
+                     "class": t.get("class", 0), "base": i, "decal": j,
+                     "at": [round(float(at[0]), 3), round(float(at[1]), 3)]}
+            if args.decal_overlay:
+                # Only the decal's splats (place() puts them after the tile's
+                # it keeps); the copy draws the plain tile's ranges, cut and
+                # feathered in the viewer as place() does here.
+                plane = [q for q in range(3) if q != up]
+                r_in = args.decal_radius * (1.0 - dec.FEATHER)
+                kept = int((np.hypot(*(base.xyz[:, plane] - np.float32(at)).T) >= r_in).sum())
+                v = v.subset(np.arange(kept, len(v)))
             levels = []
             for part in tile_levels(v, lod, size, up, compensate,
-                                    bool(st.get("level_tone"))):
-                parts.append(pack(part).reshape(-1))
+                                    bool(st.get("level_tone")), merge=bool(st.get("lod_merge"))):
+                parts.append(pack(part, stride=int(m.get("stride", 32))).reshape(-1))
                 levels.append([cursor, len(part)])
                 cursor += len(part)
-            tiles.append({"start": levels[0][0], "count": levels[0][1],
-                          "levels": levels, "n": t["n"], "e": t["e"],
-                          "s": t["s"], "w": t["w"], "class": t.get("class", 0),
-                          "base": i, "decal": j,
-                          "at": [round(float(at[0]), 3), round(float(at[1]), 3)]})
+            if args.decal_overlay:
+                entry.update(start=t["start"], count=t["count"], levels=t["levels"],
+                             overlay={"piece": levels, "r_in": round(r_in, 4),
+                                      "radius": args.decal_radius})
+            else:
+                entry.update(start=levels[0][0], count=levels[0][1], levels=levels)
+            tiles.append(entry)
             made += 1
     if plain:
         print(f"  {made} copies of {len(plain)} class {args.decal_class} tiles, "
@@ -268,7 +281,7 @@ def bake(args, m, raw):
     man["total"] = cursor
     man["decals"] = {"radius": args.decal_radius, "class": args.decal_class,
                      "copies": args.decal_copies, "seed": args.decal_seed,
-                     "from": args.tileset.name,
+                     "from": args.tileset.name, "overlay": bool(args.decal_overlay and plain),
                      "centres": [list(found[k][:2]) for k in picks],
                      "picks": picks}
     out.with_suffix(".json").write_text(json.dumps(man, indent=2))
@@ -295,6 +308,9 @@ def main(argv=None):
                     help="metres; a decal must fit inside a tile with 10 cm "
                          "of edge left; what is left over is where it can "
                          "sit (0.45 on 1.5 m tiles: up to 0.2 m off centre)")
+    ap.add_argument("--overlay", "--decal-overlay", dest="decal_overlay", action="store_true",
+                    help="bake: store only each decal's splats; a copy draws its plain tile "
+                         "with the disc cut in the viewer (whole tiles only, not centres)")
     ap.add_argument("--copies", "--decal-copies", dest="decal_copies",
                     type=int, default=2,
                     help="bake: copies per tile, each a different decal")

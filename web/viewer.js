@@ -10,12 +10,12 @@ import { openDrop, describe } from './tileset.js';
 import { Capture } from './capture.js';
 import { generatedField, listCached, loadHeightField, openness, roughnessMask } from './heightfield.js';
 import { Benchmark, report } from './benchmark.js';
-import { classify, sampleGrid, wanderField } from './landform.js';
+import { classify, sampleGrid, wanderField, riverChannel, drainBase, NO_WATER, RIVER } from './landform.js';
 import { GROUPS as TERRAIN_GROUPS } from './terrain.js';
 import { starterTileset } from './starter.js';
 import { decalVariants, placeDecals } from './decals.js';
 import { groundLevel, pickCentre, pickTurn, poolsByClass, turnCosSin, cellHash,
-         ringProfile, toneTerms, partnerClass, spotDraws, SPOT_WARP,
+         ringProfile, toneTerms, partnerClass, spotDraws, SPOT_WARP, spotSharpness,
          gradedPool } from './frames.js';
 import { initUI, store, loadProgress, loadDone, loadFailed, updateCard, setChapters,
          endChapters, takeView } from './ui.js';
@@ -24,6 +24,7 @@ import { SPLAT_VERT, SPLAT_FRAG, FAR_VERT, FAR_FRAG, LINE_VERT, LINE_FRAG,
 import { glTools } from './gl.js';
 import { unpack, meanClassColours } from './splat.js';
 import { Orbit } from './camera.js';
+import { createFilm } from './film.js';
 
 const BUILD = 'bozkir viewer 1.0';
 console.log('%c' + BUILD, 'color:#c8a05a');
@@ -35,7 +36,7 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('gl');
 // Controls with a fixed id; ids made at run time go through $().
 const ui = {};
-for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
+for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist', 'riverrule',
                   'cmd', 'gz', 'grid', 'gridn', 'used', 'usedn', 'wangnote',
                   'relief', 'reliefn', 'reliefscale', 'reliefscalen', 'bandn',
                   'subdiv', 'subdivn', 'seam', 'viewsn', 'sorterr', 'pop',
@@ -44,15 +45,15 @@ for (const id of ['n', 'drawn', 'fps', 'sortms', 'azim', 'elev', 'dist',
                   'scenepick', 'heightpick', 'expert', 'busy', 'subdivrow',
                   'gpuname', 'detailamtn', 'genseed', 'gensize', 'genbtn',
                   'genstatus', 'terrainwin', 'gencards', 'genrecent',
-                  'presetchips', 'saturationn', 'macron', 'resn', 'fovn',
+                  'presetchips', 'saturationn', 'macron', 'sunglown', 'sunazn', 'mistn', 'graden', 'rangesn', 'seahazen', 'resn', 'fovn',
                   'gainn', 'viewWalk', 'speedn', 'tileorder', 'mergethrn',
                   'mergestat', 'capture', 'capframes', 'capframesn',
                   'capcentre', 'caparc', 'caparcn', 'capstepn', 'fieldnote',
                   'bench', 'benchout', 'classsharpn', 'classnote',
-                  'classblend', 'classbalance', 'classbalancen',
+                  'classblend', 'blendwidthn', 'driftn', 'classbalance', 'classbalancen',
                   'decalspacingn', 'decalnote', 'classcoherencen',
                   'classaltituden', 'classwander', 'classwandern',
-                  'classshares', 'classbalancelbl', 'grip', 'overlay']) {
+                  'classshares', 'classbalancelbl', 'grip', 'overlay', 'riverwidthn']) {
   ui[id] = $(id);
 }
 
@@ -179,21 +180,39 @@ try {
 const splatU = uniforms(splatProg,
   ['view', 'eye', 'cellXY', 'relief', 'wave', 'subdiv',
    'focal', 'viewport', 'gain', 'near',
-   'data', 'colour', 'tileSize', 'edgeMark', 'fade',
+   'data', 'colour', 'tileSize', 'edgeMark', 'fade', 'decal',
    'tint', 'tintAmount', 'fogColour', 'fogDensity', 'gridRot', 'mix',
-   'mixCorners', 'mixNoise', 'spots', 'mixField', 'mixWarp',
+   'mixCorners', 'mixNoise', 'spots', 'mixField', 'mixWarp', 'spotSharp',
    'field', 'fieldSize', 'fieldExtent', 'hasField',
-   'open', 'hasOpen', 'shade', 'exposure', 'saturation',
+   'open', 'hasOpen', 'shade', 'exposure', 'saturation', 'waterView',
    'farOn', 'farStart', 'farBand', 'detail', 'detailFreq', 'macro',
    'edgeN', 'edgeE', 'edgeS', 'edgeW',
-   'slotTurn', 'slotRole', 'slotZ0', 'slotTone', 'ring', 'prom']);
+   'slotTurn', 'slotRole', 'slotZ0', 'slotTone', 'ring', 'prom',
+   'slotDrift', 'drift', 'water', 'waterTex', 'waterMetres', 'waterMean', 'flow', 'time',
+   'waterDeep', 'deepMetres', 'deepMean', 'layers', 'river', 'hasRiver',
+   'rise', 'riseDrop', 'riseSquare', 'sun', 'sunRGB', 'mist', 'marine', 'grade']);
 const farU = uniforms(farProg,
   ['view', 'eye', 'focal', 'viewport', 'relief', 'wave', 'hasField', 'field',
    'fieldSize', 'fieldExtent', 'atlas', 'cells', 'atlasGrid', 'tileSize',
    'gridN', 'rot', 'farStart', 'farBand', 'fogColour', 'fogDensity',
    'exposure', 'shade', 'saturation', 'open', 'hasOpen', 'debug', 'classRGB',
    'tileInfo', 'hasTileInfo', 'detail', 'detailFreq', 'macro', 'blend',
-   'spots', 'mixWarp', 'centres', 'centreTone', 'hasCentres', 'ringFar']);
+   'spots', 'mixWarp', 'centres', 'centreTone', 'hasCentres', 'ringFar',
+   'water', 'waterTex', 'waterMetres', 'waterMean', 'flow', 'time',
+   'waterDeep', 'deepMetres', 'deepMean', 'layers', 'river', 'hasRiver', 'rise',
+   'sun', 'sunRGB', 'mist', 'marine', 'grade', 'horizon', 'riseSquare']);
+// The demo's growing world (film.js): centre x, y, radius, band in world
+// units; band 0 is off. riseDrop is the height a cell falls from.
+let riseCircle = new Float32Array(4), riseDrop = 0, riseSquare = false;
+/** How far a cell is from the rise's centre: round, or square on the grid. */
+function riseDist(x, y) {
+  const dx = x - riseCircle[0], dy = y - riseCircle[1];
+  if (!riseSquare) return Math.hypot(dx, dy);
+  const a = gridAngle * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return Math.max(Math.abs(c * dx + s * dy), Math.abs(-s * dx + c * dy));
+}
+let flowClock = null;     // seconds; null: the water flows on the page's clock
+let drawCount = 0;        // frames drawn since the page opened
 const lineU = uniforms(lineProg,
   ['view', 'eye', 'focal', 'viewport', 'near', 'alpha']);
 
@@ -205,6 +224,17 @@ const skyVAO = gl.createVertexArray();
 
 const quadBuf = gl.createBuffer();
 const indexBuf = gl.createBuffer();
+// Whole-scene orders for RING headings around the vertical (one per 45
+// degrees, at the view's elevation), sorted when idle. A fast turn ends before
+// any sort can arrive, and an order more than 90 degrees off draws the ground's
+// underside on top; the nearest of these is at most 22.5 degrees off, which
+// does not show (an order 24 degrees off changed 0.1% of pixels).
+const RING = 8;
+const ringBufs = Array.from({ length: RING }, () => gl.createBuffer());
+const ringFwd = new Array(RING).fill(null), ringParts = new Array(RING).fill(0);
+let ringSize = 0, ringJob = -1, ringJobFwd = null, ringSeq = 0;
+let liveFwd = null, liveFwdPending = null;      // the heading the live order was sorted for
+let orderBuf = null;                             // the live-path order bound this frame
 const cacheIndexBuf = gl.createBuffer();
 gl.bindVertexArray(splatVAO);
 gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
@@ -231,7 +261,8 @@ gl.bindBuffer(gl.ARRAY_BUFFER, lineRGBBuf);
 gl.enableVertexAttribArray(aRGB);
 gl.vertexAttribPointer(aRGB, 3, gl.FLOAT, false, 0, 0);
 const skyU = uniforms(skyProg,
-  ['view', 'focal', 'viewport', 'skyTop', 'skyHorizon', 'ground']);
+  ['view', 'focal', 'viewport', 'skyTop', 'skyHorizon', 'ground',
+   'eye', 'sun', 'sunRGB', 'mist', 'marine', 'grade']);
 const skyBuf = gl.createBuffer();
 gl.bindVertexArray(skyVAO);
 gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
@@ -258,7 +289,170 @@ let wangCodes = null;
 // Decal copies (scripts/decals.py): the plain tile each copy was made from,
 // -1 for plain tiles. Copies are never laid directly, only swapped in.
 let variantOf = null;
+let waterView = false;     // tint where the river's water lies, a preview before water is drawn
+// Rivers drawn as water (waterShade): two tiles of real river surface from
+// the L2 drone photos (scripts/water_texture.py), the milky shallow water
+// near the banks in data/water.png on unit 10 and the dark channel water in
+// data/water_deep.png on unit 12; water.json holds their sizes and how the
+// bed fades under the water (its "layers").
+let waterOn = false;
+let waterTex = null, waterDeepTex = null, waterMeta = null;
+const WATER_UNIT = 10, WATER_DEEP_UNIT = 12;
+// Flowing water: the surface moves down the river at up to FLOW_SPEED
+// (metres per second) and the view redraws at most FLOW_FPS times a second
+// for it while nothing else moves. The shader's cycle is 2 s, so time wraps
+// at a whole number of cycles.
+let flowOn = false;
+const FLOW_SPEED = 0.6, FLOW_FPS = 30, FLOW_WRAP_S = 3600;
+function flowing() {
+  return flowOn && waterOn && waterTex && field && field.carve && field.riverAny;
+}
+function waterTexture(unit, img) {
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  return tex;
+}
+async function loadWater() {
+  try {
+    const meta = await (await fetch('./data/water.json', { cache: 'no-cache' })).json();
+    const load = async (src) => { const img = new Image(); img.src = src; await img.decode(); return img; };
+    const shallow = await load('./data/water.png');
+    const deep = meta.deep ? await load('./data/water_deep.png') : shallow;
+    waterTex = waterTexture(WATER_UNIT, shallow);
+    waterDeepTex = waterTexture(WATER_DEEP_UNIT, deep);
+    waterMeta = meta;
+  } catch (e) { /* no water texture: the option stays off */ }
+}
+// The river (riverChannel): its channel cut into the ground (field.carve,
+// which height() and the shaders add) and its water level, built while
+// water or the water map is on and redone when width, relief or the
+// field's size in the world moves. RGBA32F on unit 11: carve and level in
+// metres, the direction the water runs.
+let riverWidth = 8;
+let riverTex = null, riverKey = '', riverOf = null;
+const RIVER_UNIT = 11;
+// The channel's waterline slope (depth over distance from the edge): its
+// parabola is width_depth times wider than deep, so 4 / width_depth.
+const EDGE_SLOPE = 4 / RIVER.width_depth;
+function riverOn() {
+  return !!(field && field.carve && riverTex);
+}
+function buildRiver() {
+  const want = (waterOn || waterView) && field && field.w === field.h;
+  if (!want) {
+    if (field) { field.carve = null; field.barZone = null; field.level = null; }
+    riverKey = '';
+    return;
+  }
+  const n = field.w;
+  const key = [n, field.extent, amplitude(), riverWidth].join();
+  if (key === riverKey && riverOf === field && field.carve) return;
+  riverKey = key; riverOf = field;
+  const r = riverChannel(field.z, n, { cellM: field.extent / (n - 1), metresPerZ: 2 * amplitude(),
+                                       width: riverWidth });
+  const carve = new Float32Array(n * n);
+  let any = false;
+  for (let c = 0; c < n * n; c++) {
+    carve[c] = r[4 * c];
+    if (r[4 * c + 1] > NO_WATER / 2) any = true;
+  }
+  field.carve = carve;
+  field.riverAny = any;
+  field.level = new Float32Array(n * n);
+  for (let c = 0; c < n * n; c++) field.level[c] = r[4 * c + 1];
+  field.barZone = barZone(r, carve, n, field.extent / (n - 1));
+  if (!riverTex) riverTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + RIVER_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, riverTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, n, n, 0, gl.RGBA, gl.FLOAT, r);
+}
+/** Where the river leaves gravel, 0..1 per field cell (over 0.5: bar).
+ *  A bar is low beside the channel: within about a channel depth above the
+ *  water (RIVER.bar_height depths) and a few widths from it
+ *  (RIVER.bar_reach widths), so a flat valley floor gets a wide one and a
+ *  steep wall almost none; noise over 1.5 widths widens and breaks it up
+ *  along the river. Distance and the nearest water's level by chamfer. */
+function barZone(r, carve, n, cellM) {
+  const amp = amplitude(), INF = 1e9;
+  const d = new Float32Array(n * n), lev = new Float32Array(n * n);
+  const ground = (c) => 2 * amp * (field.z[c] - 0.5) + carve[c];
+  for (let c = 0; c < n * n; c++) {
+    const wet = r[4 * c + 1] > NO_WATER / 2 && r[4 * c + 1] > ground(c);
+    d[c] = wet ? 0 : INF;
+    lev[c] = wet ? r[4 * c + 1] : 0;
+  }
+  const D1 = cellM, D2 = cellM * Math.SQRT2;
+  const take = (c, q, step) => { if (d[q] + step < d[c]) { d[c] = d[q] + step; lev[c] = lev[q]; } };
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const c = j * n + i;
+    if (i > 0) take(c, c - 1, D1);
+    if (j > 0) {
+      take(c, c - n, D1);
+      if (i > 0) take(c, c - n - 1, D2);
+      if (i < n - 1) take(c, c - n + 1, D2);
+    }
+  }
+  for (let j = n - 1; j >= 0; j--) for (let i = n - 1; i >= 0; i--) {
+    const c = j * n + i;
+    if (i < n - 1) take(c, c + 1, D1);
+    if (j < n - 1) {
+      take(c, c + n, D1);
+      if (i < n - 1) take(c, c + n + 1, D2);
+      if (i > 0) take(c, c + n - 1, D2);
+    }
+  }
+  const depth = Math.min(riverWidth / RIVER.width_depth, RIVER.max_depth);
+  const hB = Math.max(0.1, RIVER.bar_height * depth), reach = RIVER.bar_reach * riverWidth;
+  const out = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const c = j * n + i;
+    if (d[c] >= INF) continue;
+    const above = Math.max(0, ground(c) - lev[c]);
+    const vary = 0.6 + 0.8 * dValue(i * cellM / (1.5 * riverWidth) + 3.1, j * cellM / (1.5 * riverWidth) + 7.7);
+    out[c] = Math.min(1, Math.exp(-above / hB) * Math.exp(-d[c] / reach) * vary);
+  }
+  return out;
+}
+/** River and water uniforms for a program's uniform table `u`. */
+function setWater(u) {
+  const river = riverOn();
+  gl.uniform1i(u.river, RIVER_UNIT);
+  gl.uniform1f(u.hasRiver, river ? 1.0 : 0.0);
+  const on = waterOn && waterTex && river;
+  gl.uniform1f(u.water, on ? 1.0 : 0.0);
+  gl.uniform1i(u.waterTex, WATER_UNIT);
+  gl.uniform1i(u.waterDeep, WATER_DEEP_UNIT);
+  gl.uniform1f(u.flow, on && flowing() ? FLOW_SPEED : 0.0);
+  // The demo's frame-by-frame render gives the water its own clock.
+  const now = flowClock != null ? flowClock : performance.now() * TIME_SCALE / 1000;
+  gl.uniform1f(u.time, now % FLOW_WRAP_S);
+  if (!on) return;
+  const deep = waterMeta.deep || waterMeta;
+  const layers = waterMeta.layers || { t0: 0.93, length_m: 0.53 };
+  gl.uniform1f(u.waterMetres, waterMeta.metres || 1);
+  gl.uniform1f(u.deepMetres, deep.metres || 1);
+  gl.uniform3fv(u.waterMean, new Float32Array(waterMeta.mean || [0.5, 0.55, 0.55]));
+  gl.uniform3fv(u.deepMean, new Float32Array(deep.mean || [0.35, 0.37, 0.39]));
+  // The photos measure the bed's share against distance from the waterline;
+  // on this channel that distance is depth / EDGE_SLOPE.
+  gl.uniform2f(u.layers, layers.t0, layers.length_m * EDGE_SLOPE);
+}
+let riverRule = false;     // rule.json's river classes (HAND, channels); a tileset can ask for it
+let barClass = null;       // the tile class a river's bars are made of (manifest bar)
 let decalCopies = null;
+let patchOverlay = null;   // per tile: a decal overlay ({ piece, at, rIn, r }) or null
 let decalsOn = false;
 let decalSpacing = 5;
 let decalTerrain = false;
@@ -307,6 +501,8 @@ let classBlend = false;
 // the earlier blend, dissolved splat by splat from the corners within
 // blendWidth of a tie; it is kept for comparison and has no control.
 const blendWidth = 0.35;
+// How wide materials dissolve into each other by spot (0 the narrow strip).
+let spotWidth = 0;
 const blendSpots = new URLSearchParams(location.search).get('blend') !== 'splat';
 let toneGrade = true;     // near another material, centres of the nearest tones
 let cellMix = null;
@@ -319,6 +515,8 @@ let classSwap = false;
 const tileClassFor = (k) => (classSwap ? classCount - 1 - k : k);
 let blendedCells = 0;
 let classStats = null;
+// The maps and decision of the last rule run, for the demo's tables.
+let lastRule = null;
 // Mean colour of each class (linear 0..1), for the terrain window previews.
 let classColours = [[0.62, 0.55, 0.45]];
 let tileSize = 0;
@@ -350,6 +548,7 @@ let shotWanted = false;
 // holds, and one mesh for all distant ground.
 let farOn = true;
 let farStartTiles = 14;          // splats out to here, atlas beyond
+const FAR_OCTAVES = 3;           // the far field starts at most lodBase * 2^3 tiles out
 let atlas = null;                // { tex, cols, rows }
 let atlasTex = null;             // the GPU copy, freed when replaced
 let cellTex = null;
@@ -357,6 +556,57 @@ let centreTex = null;     // frames: per cell, its centre and turn
 let centreToneTex = null; // and its mean tint
 let tileInfoTex = null;   // per tile: colour gain, mean colour
 let farVAO = null, farCount = 0;
+// Distant land past the world's edge (rangesAt in FAR_VERT): hill height in
+// multiples of the world's relief (x RANGES_RELIEF), landforms the size of
+// the world's own (relief scale); 0 is off and draws nothing past the edge.
+// Hills several world widths tall dwarfed the world and read as a toy.
+let ranges = 0;
+let horizonVAO = null, horizonCount = 0, horizonKey = '';
+const HORIZON_OUT = 4;      // outer radius in world widths; the edge haze has it by then
+const RANGES_RELIEF = 2.5;
+/** A ring mesh from inside the world's edge to HORIZON_OUT widths, rings
+ *  spaced geometrically: fine near the edge, coarse where the haze is thick.
+ *  It starts at 0.4 of the half width, so it still meets the world while
+ *  the film shrinks it by rings (FAR_FRAG drops what lies inside). */
+function buildHorizonMesh() {
+  const half = gridN * (tileSize || 1) / 2;
+  const key = `${half}`;
+  if (key === horizonKey && horizonVAO) return;
+  horizonKey = key;
+  const K = 112, M = 512, R = HORIZON_OUT * 2 * half, r0 = 0.4 * half;
+  const xy = new Float32Array(K * M * 2);
+  for (let k = 0; k < K; k++) {
+    const r = r0 * Math.pow(R / r0, k / (K - 1));
+    for (let m = 0; m < M; m++) {
+      const a = 2 * Math.PI * m / M;
+      xy[2 * (k * M + m)] = r * Math.cos(a);
+      xy[2 * (k * M + m) + 1] = r * Math.sin(a);
+    }
+  }
+  const ix = new Uint32Array((K - 1) * M * 6);
+  let t = 0;
+  for (let k = 0; k < K - 1; k++) {
+    for (let m = 0; m < M; m++) {
+      const v = k * M + m, w = k * M + (m + 1) % M;
+      ix[t++] = v; ix[t++] = w; ix[t++] = v + M;
+      ix[t++] = w; ix[t++] = w + M; ix[t++] = v + M;
+    }
+  }
+  if (!horizonVAO) {
+    horizonVAO = gl.createVertexArray();
+    buildHorizonMesh.vb = gl.createBuffer(); buildHorizonMesh.ib = gl.createBuffer();
+  }
+  gl.bindVertexArray(horizonVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buildHorizonMesh.vb);
+  gl.bufferData(gl.ARRAY_BUFFER, xy, gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(farProg, 'aXY');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buildHorizonMesh.ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  horizonCount = ix.length;
+}
 // A scene that is not a Wang tileset is shown as the capture itself: no
 // warping onto terrain, no material rule.
 let plainScene = false;
@@ -455,6 +705,7 @@ function setShares(given) {
 // on several frames far over budget; recovery slower than the drop.
 let autoQuality = true;
 let lodBaseUser = 8;            // what the slider says
+let lodBaseKept = null;         // the slider's value while a tileset's lod_base stands in
 // Phones start lower; auto quality raises it if there is room.
 let renderScale = matchMedia('(pointer: coarse)').matches ? 0.6 : 1;
 let frameMs = 16;               // smoothed frame time
@@ -550,7 +801,7 @@ function tuneQuality(dt) {
     }
   }
   if (detail) {
-    lodBase = Math.max(QUALITY_MIN_BASE, Math.min(lodBaseUser, lodBase + detail));
+    lodBase = Math.max(Math.min(QUALITY_MIN_BASE, lodBaseUser), Math.min(lodBaseUser, lodBase + detail));
     lodHold = 3000;
     slowFor = quickFor = 0;
     qualityNote(detail < 0 ? `detail from ${lodBase} tiles to keep up`
@@ -617,15 +868,25 @@ function detailAt(x, y) {
   return amp * mask * ((r1 * r1 + 0.5 * r2 * r2) / 1.5 - 0.5);
 }
 
+/** What the camera stands on: the ground, or a river's water over it while
+ *  water is drawn (the channel is cut below the level; under it the eye
+ *  looked up at the water from beneath). */
+function surfaceAt(x, y) {
+  const g = height(x, y);
+  return waterOn && field && field.level ? Math.max(g, field.sampleLevel(x, y)) : g;
+}
+
 /** Ground height at a point, the CPU copy of terrainHeight() in the shader. */
 function height(x, y) {
   const relief = amplitude();
-  if (relief <= 0) return 0;
+  // A river's channel (buildRiver), metres, with or without relief.
+  const carve = field ? field.sampleCarve(x, y) : 0;
+  if (relief <= 0) return carve;
   if (field) {
     // Centred on zero. The field's extent is set by relief scale (tiles per
     // landform), and it mirrors past its edge, so a small survey still reads
     // at any grid size.
-    return relief * (field.sample(x, y) - 0.5) * 2.0 + detailAt(x, y);
+    return relief * (field.sample(x, y) - 0.5) * 2.0 + detailAt(x, y) + carve;
   }
   // Wavelength in tiles, so the shape stays the same relative to the tiling.
   const f = 1 / Math.max(reliefScale * (tileSize || 1), 0.01);
@@ -658,6 +919,7 @@ let lineCount = 0;
 let splatWidth = 0;        // median splat long axis, the unit gaps are judged in
 let positionsRef = null;   // splat positions, kept for measuring sort error
 let lastOrder = null;      // the live order most recently returned
+let yawRate = 0, lastYaw = null, lastYawT = 0;   // turn rate about the vertical, deg/s
 let lodLevels = 1;         // levels available per tile
 let lodBase = 8;           // distance in tiles at which level 1 takes over
 let lodOn = true;
@@ -673,12 +935,39 @@ const CLASS_RGB = [[0.30, 0.62, 0.35], [0.88, 0.72, 0.30],
 const SKIES = {
   none:     { top: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], fog: 0 },
   overcast: { top: [0.52, 0.57, 0.62], horizon: [0.78, 0.80, 0.82],
-              ground: [0.10, 0.10, 0.11], fog: 0.020 },
+              ground: [0.10, 0.10, 0.11], fog: 0.020, sun: [0.30, 0.26, 0.20] },
   dusk:     { top: [0.10, 0.13, 0.24], horizon: [0.72, 0.47, 0.35],
-              ground: [0.05, 0.05, 0.07], fog: 0.030 },
+              ground: [0.05, 0.05, 0.07], fog: 0.030, sun: [0.55, 0.32, 0.16] },
   clear:    { top: [0.22, 0.45, 0.78], horizon: [0.70, 0.80, 0.90],
-              ground: [0.08, 0.09, 0.10], fog: 0.012 },
+              ground: [0.08, 0.09, 0.10], fog: 0.012, sun: [0.32, 0.28, 0.20] },
 };
+// Atmosphere (ATMOS_GLSL), all off at 0: the sun's glow and its direction
+// (degrees; the light in the scans is baked, so it only lights the sky and
+// haze), mist that lies in the low ground, and a colour grade.
+let sunGlow = 0, sunAzimuth = 225, sunElevation = 6;
+let mist = 0, gradeAmount = 0, seaHaze = 0;
+const SEA_BASE = 0.06;    // sea haze density per world unit under its top, 1, 24 cells
+const MIST_BASE = 0.3;    // density per world unit over the channels, mist 1, 24 cells
+function atmosUniforms(U, S, debug) {
+  const az = sunAzimuth * Math.PI / 180, el = sunElevation * Math.PI / 180;
+  gl.uniform4f(U.sun, Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el),
+               debug ? 0 : sunGlow);
+  gl.uniform3fv(U.sunRGB, new Float32Array(S.sun || [0, 0, 0]));
+  // Densest over the channel each spot drains to (drainBaseAt), falling by
+  // e every 0.3 relief above it: valley fog fills the bottom of a valley,
+  // not its sides. Measured from the lowest ground instead, it filled
+  // basins to a level shore that read as a lake.
+  const amp = Math.abs(amplitude()) || 0.5;
+  gl.uniform4f(U.mist, debug || S === SKIES.none ? 0
+    : mist * MIST_BASE * Math.min(1, FOG_CELLS / Math.max(cellsN, 1)),
+  1 / Math.max(0.1, 0.3 * amp), -amp, 0);
+  // Sea haze: a layer whose top lies a quarter of the relief above the
+  // middle, so the higher ground stands out of it.
+  gl.uniform4f(U.marine, debug || S === SKIES.none ? 0
+    : seaHaze * SEA_BASE * Math.min(1, FOG_CELLS / Math.max(cellsN, 1)),
+  0.25 * amp, Math.max(0.05, 0.15 * amp), 0);
+  gl.uniform4f(U.grade, debug ? 0 : gradeAmount, 1, 0.35, 0.12);
+}
 let sky = 'overcast';
 let fogScale = 1.0;
 // Haze per metre is set for a 24-cell world. A larger world keeps the haze
@@ -733,6 +1022,18 @@ const WAKE_FRAMES = 90;
 let wakeFrames = WAKE_FRAMES, lastFrameKey = '', lastDrawAt = 0;
 
 const worker = new Worker('./sort-worker.js');
+// Merged streams sort on their own worker, so the live sort never queues
+// behind them; it holds its own copy of the positions.
+const mergeWorker = new Worker('./sort-worker.js');
+// The live sort split over helpers, each holding only its share of the
+// positions: one sort over everything took 120-210 ms, and a fast turn swept
+// past 90 degrees in that time, where the stale order is nearly reversed
+// (the ground's underside drawn on top). `worker` keeps the cached orders and
+// turned centres, and sorts alone when the split does not apply.
+const SORT_HELPERS = 3;
+const sortHelpers = Array.from({ length: SORT_HELPERS }, () => new Worker('./sort-worker.js'));
+let helperChunks = null;                // per helper: { from, to, ks } (splat range, range indices)
+let helperSeq = 0, helperPending = 0, helperMs = 0;
 worker.onmessage = (e) => {
   const m = e.data;
   wakeFrames = WAKE_FRAMES;
@@ -754,11 +1055,30 @@ worker.onmessage = (e) => {
   }
 
   if (m.type === 'mergedGroups') {
-    if (m.seq !== mergeSeq) return;          // a later frame overtook it
-    mergeHave = m.orders.map((b) => new Uint32Array(b));
-    mergeHaveKey = mergeKey;
+    if (m.seq !== mergeSeq || !mergePendingSigs) return;   // sent before a reset
+    mergePending = false;
+    const f = mergePendingFwd;
+    const dot = (a) => a[0] * f[0] + a[1] * f[1] + a[2] * f[2];
+    m.orders.forEach((buf, k) => {
+      const sig = mergePendingSigs[k];
+      const list = mergeCache.get(sig) || [];
+      mergeCache.delete(sig);                   // newest last, so the oldest go first
+      // A new heading replaces one it nearly repeats, else the oldest when full.
+      let at = list.findIndex((e) => dot(e.fwd) > MERGE_NEAR);
+      if (at < 0 && list.length >= MERGE_HEADINGS) at = 0;
+      if (at >= 0) { mergeBytes -= list[at].stream.byteLength; list.splice(at, 1); }
+      const stream = new Uint32Array(buf);
+      list.push({ fwd: f, stream });
+      mergeBytes += stream.byteLength;
+      mergeCache.set(sig, list);
+    });
+    while (mergeBytes > MERGE_BYTES && mergeCache.size) {
+      const [oldest, list] = mergeCache.entries().next().value;
+      for (const e of list) mergeBytes -= e.stream.byteLength;
+      mergeCache.delete(oldest);
+    }
     mergeStats.ms = m.ms;
-    mergeStats.splats = mergeHave.reduce((t, o) => t + o.length, 0);
+    mergeStats.splats = m.sizes.reduce((t, n) => t + n, 0);
     return;
   }
 
@@ -768,6 +1088,7 @@ worker.onmessage = (e) => {
   gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
   lastOrder = new Uint32Array(m.order);
   gl.bufferData(gl.ARRAY_BUFFER, lastOrder, gl.DYNAMIC_DRAW);
+  liveFwd = liveFwdPending;
   liveBehind = m.behind ? new Uint32Array(m.behind) : null;
   spunAt = new Map();
   if (m.keys && m.keys.length) {
@@ -780,6 +1101,46 @@ worker.onmessage = (e) => {
   sortedReady = true;
   sortPending = false;
 };
+mergeWorker.onmessage = (e) => { if (e.data && e.data.type === 'mergedGroups') worker.onmessage(e); };
+sortHelpers.forEach((h) => {
+  h.onmessage = (e) => {
+    const m = e.data;
+    if (!m || m.type !== 'sortedPart') return;
+    wakeFrames = WAKE_FRAMES;
+    if (m.ring != null) {
+      if (m.seq !== ringSeq || m.ring !== ringJob || !helperChunks) return;
+      gl.bindVertexArray(splatVAO);
+      gl.bindBuffer(gl.ARRAY_BUFFER, ringBufs[m.ring]);
+      gl.bufferSubData(gl.ARRAY_BUFFER, helperChunks[m.part].from * 4, new Uint32Array(m.order));
+      gl.bindVertexArray(null);
+      if (++ringParts[m.ring] >= SORT_HELPERS) { ringFwd[m.ring] = ringJobFwd; ringJob = -1; }
+      return;
+    }
+    if (m.seq !== helperSeq || !helperChunks || !sortingEnabled) {
+      if (m.seq === helperSeq && --helperPending <= 0) sortPending = false;
+      return;
+    }
+    const ch = helperChunks[m.part];
+    const part = new Uint32Array(m.order);
+    if (!lastOrder || lastOrder.length !== splatCount) lastOrder = identityOrder ? identityOrder.slice() : new Uint32Array(splatCount);
+    lastOrder.set(part, ch.from);
+    gl.bindVertexArray(splatVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, ch.from * 4, part);
+    gl.bindVertexArray(null);
+    const bh = new Uint32Array(m.behind);
+    if (!liveBehind || liveBehind.length !== rangeIndex.size) liveBehind = new Uint32Array(rangeIndex.size);
+    ch.ks.forEach((k, j) => { liveBehind[k] = bh[j]; });
+    helperMs = Math.max(helperMs, m.ms);
+    if (--helperPending <= 0) {
+      sortPending = false;
+      liveFwd = liveFwdPending;
+      sortMs = helperMs;
+      sortedReady = true;
+      spunAt = new Map();
+    }
+  };
+});
 
 // ================================================================ layout
 
@@ -867,6 +1228,7 @@ function buildGrid() {
   // share edge codes, so the neighbours pick the code and the terrain picks
   // the class, and neither overrules the other.
   let wantClass = null;
+  lastRule = null;
   cellMix = null;
   cellAlt = null;
   classStats = null;
@@ -890,6 +1252,14 @@ function buildGrid() {
                                          Math.max(4, Math.min(gridN, reliefScale / 3)))
                            : null,
                          sediment: sed,
+                         river: riverRule,
+                         // The tileset names its bar material (manifest bar);
+                         // a joined capture's height order cannot say which.
+                         barPos: barClass == null ? 0 : (classSwap ? classCount - 1 - barClass : barClass),
+                         barZone: riverRule && field && field.barZone
+                           ? sampleGrid(gridN, tileSize, (x, y) => field.sampleBar(x, y),
+                                        gridAngle, over)
+                           : null,
                          balance: classCount === 2 ? classBalance
                            : classShares(classCount) });
     wantClass = r.cls;
@@ -902,6 +1272,7 @@ function buildGrid() {
     for (const v of r.strength) sure += v;
     classStats = { counts, sure: sure / Math.max(r.strength.length, 1),
                    source: r.source, weights: r.weights };
+    lastRule = { n: gridN, maps: r.maps, cls: r.cls, strength: r.strength };
   }
 
   for (let j = 0; j < gridN; j++) {
@@ -1194,8 +1565,8 @@ function reportSeams() {
   if (!m || !ui.seam) return;
   const unit = splatWidth > 0 ? splatWidth : 1;
   ui.seam.textContent =
-    `max ${(m.worst / unit).toFixed(2)} splat widths (${m.worst.toFixed(4)}), ` +
-    `mean ${(m.mean / unit).toFixed(2)}, over ${m.count} samples`;
+    `largest ${(m.worst / unit).toFixed(2)}, mean ${(m.mean / unit).toFixed(2)} splat widths ` +
+    `(${m.count.toLocaleString()} points)`;
 }
 
 /** Load <scene>.atlas.png/.json if there is one; without it the far field
@@ -1330,8 +1701,8 @@ function adoptAtlas(source) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    atlas = { tex, cols: lay.cols, rows: lay.rows, count: lay.count,
-              baked: !!source.baked };
+    atlas = { tex, cols: lay.cols, rows: lay.rows, count: lay.count, res: lay.res,
+              img: source.img, baked: !!source.baked };
     farMeshKey = '';
     console.log(`far field: atlas of ${lay.count} tiles`
                 + (source.baked ? ', baked in the browser' : ''));
@@ -1406,9 +1777,11 @@ let farMeshKey = '';
 function buildFarMesh() {
   if (!atlas || !cells.length) return;
   const n = gridN;
-  const m = Math.max(32, Math.min(512, 2 * n + 1));
+  // With water on the mesh is also the water's flat base near the eye
+  // (FAR_FRAG), so it follows a river's edge more finely.
+  const m = Math.max(waterOn ? 192 : 32, Math.min(512, 2 * n + 1));
   const extent = n * tileSize;
-  const key = `${n},${tileSize},${gridAngle}`;
+  const key = `${n},${tileSize},${gridAngle},${m}`;
   if (key === farMeshKey && farVAO) return;
   farMeshKey = key;
   const axis = [];
@@ -1451,6 +1824,7 @@ function buildFarMesh() {
 }
 
 function regenerate() {
+  buildRiver();
   buildGrid(); buildOverlay(); reportSeams(); buildFarField();
   // New centres and turns need their own live orders.
   if (frameInfo) lastSortKey = '';
@@ -1475,22 +1849,41 @@ function scheduleRegenerate() {
 // ================================================================ loading
 
 function load(buffer, manifest) {
-  const { n, positions, data, colour } = unpack(buffer);
+  const { n, positions, data, colour } = unpack(buffer, (manifest && manifest.stride) || 32);
   splatCount = n;
   loadedManifest = manifest || null;
 
   if (manifest && manifest.tiles && manifest.tiles.length) {
+    mergeCache.clear(); mergeBytes = 0;   // tile numbers mean other splats now
     patches = manifest.tiles.map(t => ({
       start: t.start, count: t.count,
       levels: t.levels || [[t.start, t.count]],
     }));
     lodLevels = Math.max(1, manifest.lod || 1);
+    // A tileset with merged levels says from how far they start (by its
+    // splat density); others keep the panel's value.
+    if (manifest.lod_base) {
+      if (lodBaseKept == null) lodBaseKept = lodBaseUser;
+      lodBaseUser = lodBase = manifest.lod_base;
+      if (ui.lodbasen) ui.lodbasen.textContent = `${lodBase} tiles`;
+    } else if (lodBaseKept != null) {
+      lodBaseUser = lodBase = lodBaseKept;
+      lodBaseKept = null;
+      if (ui.lodbasen) ui.lodbasen.textContent = `${lodBase} tiles`;
+    }
     tileSize = manifest.size || 0;
     wangCodes = manifest.wang ? manifest.tiles.map(t => [t.n, t.e, t.s, t.w]) : null;
     plainScene = !manifest.wang;
     tileClass = manifest.tiles.map(t => t.class || 0);
     variantOf = manifest.tiles.map(t => (t.base != null ? t.base : -1));
     decalCopies = decalVariants(manifest.tiles);
+    riverRule = manifest.rule === 'river';
+    barClass = typeof manifest.bar === 'number' ? manifest.bar : null;
+    if (ui.riverrule) ui.riverrule.checked = riverRule;
+    patchOverlay = manifest.tiles.some((t) => t.overlay)
+      ? manifest.tiles.map((t) => (t.overlay ? { piece: t.overlay.piece, at: t.at || [0, 0],
+                                                 rIn: t.overlay.r_in, r: t.overlay.radius } : null))
+      : null;
     classCount = Math.max(1, manifest.classes || 1);
     classColours = meanClassColours(colour, manifest.tiles, classCount);
     captureShares = Array.isArray(manifest.shares) ? manifest.shares : null;
@@ -1512,10 +1905,16 @@ function load(buffer, manifest) {
       // along tile edges.
       classBlend = true;
       if (ui.classblend) ui.classblend.checked = true;
+    } else if (classCount >= 2) {
+      // Captures put side by side carry no shares (their splat sizes
+      // differ too much to measure them), but meet the same way.
+      classBlend = true;
+      if (ui.classblend) ui.classblend.checked = true;
     }
     // Each tile's own mean, for matching the far field to it.
     tileMeans = manifest.tiles.map((t) =>
       meanClassColours(colour, [{ start: t.start, count: t.count }], 1)[0]);
+    classDrift = driftGains(tileMeans, manifest.tiles.map((t) => t.class || 0), classCount);
     frameInfo = manifest.wang && manifest.frames && Array.isArray(manifest.centres)
       && manifest.centres.length ? manifest.frames : null;
     centres = frameInfo ? manifest.centres.map((c) => ({
@@ -1532,11 +1931,13 @@ function load(buffer, manifest) {
     tileClass = null;
     variantOf = null;
     decalCopies = null;
+    patchOverlay = null;
     classColours = meanClassColours(colour, [{ start: 0, count: n }], 1);
     classCount = 1;
     captureShares = null;
     frameInfo = null;
     centres = null;
+    classDrift = [];
   }
   // Frames: ground heights (a splat above its ground wins the ring), each
   // material's pool, and the centres' decal copies.
@@ -1610,11 +2011,57 @@ function load(buffer, manifest) {
   const pos = positions.slice();
   // Each LOD level holds different splats, so each is sorted on its own.
   const ranges = [];
+  // Decal overlays share their plain tile's ranges and add their pieces:
+  // each range once.
+  const seenRange = new Set();
+  const addRange = (start, count) => {
+    if (seenRange.has(start)) return;
+    seenRange.add(start);
+    ranges.push({ start, count });
+  };
   for (const p of patches.concat(centres || [])) {
-    for (const [start, count] of p.levels) ranges.push({ start, count });
+    for (const [start, count] of p.levels) addRange(start, count);
+  }
+  for (const o of patchOverlay || []) {
+    if (o) for (const [start, count] of o.piece) addRange(start, count);
   }
   rangeIndex = new Map(ranges.map((r, k) => [r.start, k]));
   liveBehind = cacheBehind = null;
+  const posCopy = pos.slice();
+  mergeWorker.postMessage({ type: 'init', positions: posCopy.buffer, patches: ranges }, [posCopy.buffer]);
+  // Helper shares: consecutive ranges, split by splat count. Only when the
+  // ranges lie end to end from 0 (each share is then one block of the order).
+  helperChunks = null;
+  helperSeq++; helperPending = 0;
+  ringSeq++; ringJob = -1; ringFwd.fill(null); ringParts.fill(0); ringSize = 0;
+  liveFwd = null;
+  const byStart = ranges.map((r, k) => ({ ...r, k })).sort((p, q) => p.start - q.start);
+  const tight = byStart.every((r, j) => r.start === (j ? byStart[j - 1].start + byStart[j - 1].count : 0));
+  if (tight && byStart.length >= SORT_HELPERS) {
+    const total = byStart.reduce((t, r) => t + r.count, 0);
+    helperChunks = [];
+    let j = 0;
+    for (let h = 0; h < SORT_HELPERS; h++) {
+      const goal = total * (h + 1) / SORT_HELPERS;
+      const share = [];
+      while (j < byStart.length && (h === SORT_HELPERS - 1 || !share.length
+             || byStart[j].start + byStart[j].count / 2 < goal)) share.push(byStart[j++]);
+      const from = share.length ? share[0].start : 0;
+      const to = share.length ? share[share.length - 1].start + share[share.length - 1].count : 0;
+      helperChunks.push({ from, to, ks: share.map((r) => r.k) });
+      const own = pos.slice(3 * from, 3 * to);
+      sortHelpers[h].postMessage({ type: 'init', positions: own.buffer,
+                                   patches: share.map((r) => ({ start: r.start, count: r.count, local: r.start - from })) },
+                                 [own.buffer]);
+    }
+    ringSize = total;
+    gl.bindVertexArray(splatVAO);
+    for (const rb of ringBufs) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, rb);
+      gl.bufferData(gl.ARRAY_BUFFER, ringSize * 4, gl.DYNAMIC_DRAW);
+    }
+    gl.bindVertexArray(null);
+  }
   worker.postMessage({ type: 'init', positions: pos.buffer, patches: ranges },
                      [pos.buffer]);
   cacheReady = false;
@@ -1698,9 +2145,25 @@ let cycleWarned = false;
 // Set from the panel (ordering).
 let topoOrder = true;
 let mergeOn = true;
+let groupedOrder = false;      // merged groups ordered as one node (order.js groupedOrder)
 let mergeThreshold = 0.5;   // in tiles
-let mergeSeq = 0, mergeKey = '', mergeHave = null, mergeHaveKey = '';
-let mergeStats = { groups: 0, cells: 0, ms: 0, splats: 0 };
+let mergeSeq = 0, mergeKey = '', mergeHaveKey = '';
+// Merged streams by group (its cells, tiles and slots) with the heading each
+// was sorted for. A group draws from its stream while the heading is within
+// MERGE_REUSE of it: a stale order costs little (a stream 45 degrees off left
+// 0.5% of pixels changed), a missing one draws the group's tiles apart, and
+// along the grid line under the eye each tile's fringe then shows over its
+// neighbour. Each group keeps streams for up to MERGE_HEADINGS headings, so a
+// fast turn finds one near the view at once (GSWT keeps cached orders per
+// direction the same way); idle jobs fill headings MERGE_SECTOR apart around
+// the view. A best stream past MERGE_FRESH is re-sorted for the view.
+const mergeCache = new Map();                   // signature -> [{ fwd, stream }]
+const MERGE_REUSE = 0.5, MERGE_FRESH = Math.cos(8 * Math.PI / 180);
+const MERGE_HEADINGS = 7, MERGE_SECTOR = 60, MERGE_NEAR = Math.cos(25 * Math.PI / 180);
+const MERGE_BYTES = 160e6;                      // cache cap; the oldest groups go first
+let mergeBytes = 0;
+let mergePending = false, mergePendingSigs = null, mergePendingFwd = null;
+let mergeStats = { groups: 0, cells: 0, ms: 0, splats: 0, drawn: 0, missing: 0, turned: 0 };
 const mergeBuf = gl.createBuffer();
 // Room for eight tile centres, refilled per draw.
 const cellXYArr = new Float32Array(2 * MAX_GROUP);
@@ -1747,9 +2210,43 @@ const slotRole = new Float32Array(MAX_GROUP);
 const slotZ0 = new Float32Array(MAX_GROUP);
 const slotTone = new Float32Array(21 * MAX_GROUP);
 const NO_TONE = new Float32Array(21);
+const slotDrift = new Float32Array(6 * MAX_GROUP).fill(1);
+// Per material, the gains from its mean tile colour to the two ends of its
+// tiles' colour range (along the direction they vary most); a slow field
+// mixes between them. Only colours its own tiles have; 0 is off.
+let classDrift = [];
+let colourDrift = 0;
 const ROLE_TILE = 0, ROLE_FRAME = 1, ROLE_CENTRE = 2;
 
-function setSlot(i, turnQ, role, z0, tone) {
+/** Per class, [lo r, g, b, hi r, g, b]: the gains from the class's mean
+ *  tile colour to the ends of its tiles' spread along the direction they
+ *  differ most (the first principal axis of their means). */
+function driftGains(means, classOf, count) {
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const ms = means.filter((m, i) => m && classOf[i] === k);
+    if (ms.length < 2) { out.push(null); continue; }
+    const mu = [0, 1, 2].map((c) => ms.reduce((s, m) => s + m[c], 0) / ms.length);
+    const d = ms.map((m) => m.map((v, c) => v - mu[c]));
+    // Power iteration on the 3 x 3 covariance.
+    const cov = [0, 1, 2].map((a) => [0, 1, 2].map((b) => d.reduce((s, x) => s + x[a] * x[b], 0)));
+    let ax = [1, 1, 1];
+    for (let it = 0; it < 30; it++) {
+      const nx = cov.map((row) => row[0] * ax[0] + row[1] * ax[1] + row[2] * ax[2]);
+      const n = Math.hypot(...nx) || 1;
+      ax = nx.map((v) => v / n);
+    }
+    const proj = d.map((x) => x[0] * ax[0] + x[1] * ax[1] + x[2] * ax[2]);
+    const lo = Math.min(...proj), hi = Math.max(...proj);
+    const end = (p) => mu.map((v, c) => Math.max(0.02, v + p * ax[c]) / Math.max(v, 0.02));
+    out.push([...end(lo), ...end(hi)]);
+  }
+  return out;
+}
+
+function setSlot(i, turnQ, role, z0, tone, cls = -1) {
+  const d = classDrift[cls];
+  slotDrift.set(d ? d : [1, 1, 1, 1, 1, 1], 6 * i);
   const [cs, sn] = turnQ ? turnCosSin(turnQ) : [1, 0];
   slotTurn[2 * i] = cs; slotTurn[2 * i + 1] = sn;
   slotRole[i] = role; slotZ0[i] = z0 || 0;
@@ -1761,6 +2258,7 @@ function flushSlots(n = MAX_GROUP) {
   gl.uniform1fv(splatU.slotRole, slotRole.subarray(0, n));
   gl.uniform1fv(splatU.slotZ0, slotZ0.subarray(0, n));
   gl.uniform3fv(splatU.slotTone, slotTone.subarray(0, 21 * n));
+  gl.uniform3fv(splatU.slotDrift, slotDrift.subarray(0, 6 * n));
 }
 
 /** The tint for centre `k` turned by `turnQ` in a cell holding tile `t`. */
@@ -1813,7 +2311,7 @@ function bindOrder(range, turnQ, c, forward) {
     return { at: (d * cacheStride + start) * 4,
              behind: cacheBehind && k != null ? cacheBehind[d * rangeIndex.size + k] : null };
   }
-  gl.bindBuffer(gl.ARRAY_BUFFER, indexBuf);
+  gl.bindBuffer(gl.ARRAY_BUFFER, orderBuf || indexBuf);
   return { at: start * 4, behind: liveBehind && k != null ? liveBehind[k] : null };
 }
 
@@ -1892,10 +2390,23 @@ function drawFrame() {
     const bb = cam.basis();
     const key = [...bb.forward, ...bb.eye, canvas.clientWidth, canvas.clientHeight, cam.fov]
       .map((v) => v.toFixed(4)).join(',');
-    const busy = orbiting || held.size || zoomGoal || camVel[0] || camVel[1] || camVel[2]
+    {
+      // Turn rate about the vertical, degrees per second, smoothed.
+      const h = Math.atan2(bb.forward[1], bb.forward[0]) * 180 / Math.PI;
+      if (lastYaw != null && t > lastYawT) {
+        let d = h - lastYaw;
+        if (d > 180) d -= 360;
+        if (d < -180) d += 360;
+        const rate = d * 1000 / (t - lastYawT);
+        yawRate = 0.5 * yawRate + 0.5 * rate;
+      }
+      lastYaw = h; lastYawT = t;
+    }
+    const busy = orbiting || (film && film.playing()) || held.size || zoomGoal || camVel[0] || camVel[1] || camVel[2]
       || capture.active || bench.active || sortPending || regenPending || shotWanted
       || (mergeOn && mergeKey !== '' && mergeHaveKey !== mergeKey);
     if (busy || key !== lastFrameKey) { lastFrameKey = key; wakeFrames = WAKE_FRAMES; }
+    if (wakeFrames <= 0 && flowing() && t - lastDrawAt >= 1000 / FLOW_FPS - 1) wakeFrames = 1;
     const measuring = capture.active || bench.active;
     const due = measuring || t - lastDrawAt >= 1000 / MAX_FPS - 1;
     const heartbeat = t - lastDrawAt > 1000;         // anything a poke missed
@@ -1924,12 +2435,64 @@ function drawFrame() {
     if (key !== lastSortKey) {
       lastSortKey = key;
       sortPending = true;
-      worker.postMessage({ type: 'sort', forward: b.forward, eye: b.eye,
-                           spins: sortMode === 'live' ? turnedNear(b) : [] });
+      // Sort for the heading the view will have when the order arrives: the
+      // turn rate times the last sort's time, at most 40 degrees ahead.
+      const ahead = Math.max(-40, Math.min(40, yawRate * (sortMs + 30) / 1000)) * Math.PI / 180;
+      const ca = Math.cos(ahead), sa = Math.sin(ahead);
+      const f = b.forward;
+      const fwd = [ca * f[0] - sa * f[1], sa * f[0] + ca * f[1], f[2]];
+      const spins = sortMode === 'live' ? turnedNear(b) : [];
+      liveFwdPending = fwd;
+      if (helperChunks && !spins.length) {
+        helperSeq++;
+        helperPending = SORT_HELPERS;
+        helperMs = 0;
+        sortHelpers.forEach((h, part) => h.postMessage({ type: 'sort', forward: fwd, eye: b.eye, part, seq: helperSeq }));
+      } else {
+        worker.postMessage({ type: 'sort', forward: fwd, eye: b.eye, spins });
+      }
     }
+  }
+  if (splatCount && sortingEnabled && helperChunks && ringSize && !sortPending && ringJob < 0
+      && Math.abs(yawRate) < 30) {
+    // Idle: refresh the ring slot nearest the view whose heading (fixed
+    // azimuth, the view's elevation) has drifted past 8 degrees.
+    const f = b.forward, hm = Math.hypot(f[0], f[1]);
+    const yaw = Math.atan2(f[1], f[0]);
+    let pick = -1, pickGap = Infinity, pickFwd = null;
+    for (let k = 0; k < RING; k++) {
+      const az = k * 2 * Math.PI / RING;
+      const want = [hm * Math.cos(az), hm * Math.sin(az), f[2]];
+      const have = ringFwd[k];
+      if (have && have[0] * want[0] + have[1] * want[1] + have[2] * want[2] > Math.cos(8 * Math.PI / 180)) continue;
+      let gap = Math.abs(az - yaw) % (2 * Math.PI);
+      if (gap > Math.PI) gap = 2 * Math.PI - gap;
+      if (gap < pickGap) { pickGap = gap; pick = k; pickFwd = want; }
+    }
+    if (pick >= 0) {
+      ringJob = pick; ringJobFwd = pickFwd; ringParts[pick] = 0; ringFwd[pick] = null; ringSeq++;
+      sortHelpers.forEach((h, part) => h.postMessage({ type: 'sort', forward: pickFwd, eye: b.eye, part,
+                                                       seq: ringSeq, ring: pick }));
+    }
+  }
+  {
+    // The live-path order for this frame: the live one or the nearest ring
+    // slot, whichever was sorted nearer the view.
+    const f = b.forward;
+    const dot = (a) => (a ? a[0] * f[0] + a[1] * f[1] + a[2] * f[2] : -2);
+    orderBuf = indexBuf;
+    let best = liveFwd ? dot(liveFwd) : -2;
+    for (let k = 0; k < RING; k++) {
+      const d = dot(ringFwd[k]);
+      if (d > best + 1e-6) { best = d; orderBuf = ringBufs[k]; }
+    }
+  }
+  {
   }
 
   const S = SKIES[sky] || SKIES.none;
+  // Debug views show the data as it is: no glow, mist or grade over them.
+  const debugView = showLodColours || showIdentity || showClasses || showTints || showEdges;
   gl.clear(gl.COLOR_BUFFER_BIT);
   if (sky !== 'none') {
     gl.useProgram(skyProg);
@@ -1940,15 +2503,20 @@ function drawFrame() {
     gl.uniform3fv(skyU.skyTop, new Float32Array(S.top));
     gl.uniform3fv(skyU.skyHorizon, new Float32Array(S.horizon));
     gl.uniform3fv(skyU.ground, new Float32Array(S.ground));
+    gl.uniform3fv(skyU.eye, new Float32Array(b.eye));
+    atmosUniforms(skyU, S, debugView);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
   drawnSplats = 0; drawCalls = 0;
   // The far field is the next LOD level, fading in over the same last fifth
   // of an octave as lodFor(). It starts one level before the coarsest (16
   // tiles at the default instead of 32): the coarsest splat level added
-  // little over the atlas and cost most of the frame.
+  // little over the atlas and cost most of the frame. At most three octaves
+  // out: a tileset with more levels (seven, 64 splats a tile at the last)
+  // kept splats to 150 m and drew every cell of a large world.
   const farStart = (lodOn && lodLevels > 1
-    ? lodBase * Math.pow(2, Math.max(0, lodLevels - 2)) : farStartTiles) * (tileSize || 1);
+    ? lodBase * Math.pow(2, Math.min(FAR_OCTAVES, Math.max(0, lodLevels - 2)))
+    : farStartTiles) * (tileSize || 1);
   const farBand = farStart * (1 - Math.pow(2, -0.2));
   const farLive = farOn && atlas && farCount && cellTex && tileSize;
   if (farLive) {
@@ -1998,6 +2566,7 @@ function drawFrame() {
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, field && openTex ? openTex : null);
     gl.uniform1f(farU.hasOpen, field && openTex ? 1.0 : 0.0);
+    setWater(farU);
     gl.uniform1i(farU.debug, showClasses && classCount > 1 ? 2
       : showIdentity ? 1 : showLodColours ? 3 : 0);
     gl.uniform3fv(farU.classRGB, new Float32Array(CLASS_RGB.flat()));
@@ -2017,10 +2586,28 @@ function drawFrame() {
     gl.uniform1f(farU.hasCentres, ringed ? 1.0 : 0.0);
     gl.uniform3f(farU.ringFar, ringed ? frameInfo.radius : 0, ringed ? frameInfo.wobble : 0,
                  ringed ? frameInfo.shape || 2 : 2);
+    gl.uniform4fv(farU.rise, riseCircle);
+    gl.uniform1f(farU.riseSquare, riseSquare ? 1 : 0);
+    atmosUniforms(farU, S, debugView);
+    // While the world grows or shrinks by rings (the film's square rise),
+    // the distant land starts where the landed cells end.
+    const half = riseSquare && riseCircle[3] > 0
+      ? Math.min(gridN * tileSize / 2, Math.max(tileSize, riseCircle[2] - 0.5 * riseCircle[3]))
+      : gridN * tileSize / 2;
+    const rangeH = ranges * RANGES_RELIEF * Math.max(Math.abs(amplitude()), 0.2 * tileSize);
+    const rangeW = 0.5 * Math.max(reliefScale, 4) * tileSize;
+    gl.uniform4f(farU.horizon, half, rangeH, rangeW, 0);
     gl.drawElements(gl.TRIANGLES, farCount, gl.UNSIGNED_INT, 0);
+    drawCalls++;
+    if (ranges > 0) {
+      buildHorizonMesh();
+      gl.bindVertexArray(horizonVAO);
+      gl.uniform4f(farU.horizon, half, rangeH, rangeW, 1);
+      gl.drawElements(gl.TRIANGLES, horizonCount, gl.UNSIGNED_INT, 0);
+      drawCalls++;
+    }
     gl.bindVertexArray(null);
     gl.disable(gl.DEPTH_TEST);
-    drawCalls++;
   }
 
   if (splatCount && sortedReady) {
@@ -2039,6 +2626,8 @@ function drawFrame() {
     } else {
       gl.uniform1f(splatU.hasField, 0.0);
     }
+    gl.uniform1f(splatU.waterView, waterView && riverOn() ? 1.0 : 0.0);
+    setWater(splatU);
     gl.uniform1i(splatU.open, 4);
     if (field && openTex) {
       gl.activeTexture(gl.TEXTURE4);
@@ -2077,12 +2666,19 @@ function drawFrame() {
     const half = (tileSize || 1) / 2;
     const tanHalf = Math.tan(cam.fov * Math.PI / 360);
     const aspect = canvas.width / canvas.height;
+    const corners = [[-half, -half], [half, -half], [-half, half], [half, half]];
+    // A corner lies at most this much nearer than the centre along the view.
+    const cornerReach = half * (Math.abs(b.forward[0]) + Math.abs(b.forward[1]));
 
     for (let ci = 0; ci < cells.length; ci++) {
       const c = cells[ci];
       const dx = c.x - b.eye[0], dy = c.y - b.eye[1], dz = c.z - b.eye[2];
       const z = dx * b.forward[0] + dy * b.forward[1] + dz * b.forward[2];
       if (z < -tileSize * 2.0) continue;
+      // Not yet reached by the demo's growing world (the shader hides it too).
+      if (riseCircle[3] > 0 && riseDist(c.x, c.y) >= riseCircle[2]) continue;
+      // Past the far field even at its nearest corner: atlas, as below.
+      if (farLive && z - cornerReach > farStart) continue;
       const dist = Math.hypot(dx, dy, dz);
       const sx = dx * b.right[0] + dy * b.right[1] + dz * b.right[2];
       const sy = dx * b.down[0] + dy * b.down[1] + dz * b.down[2];
@@ -2098,8 +2694,7 @@ function drawFrame() {
       // Depth key from the nearest corner, not the centre: cells overlap at
       // their shared edge. Only a tiebreak now (see order.js below).
       let near = Infinity;
-      for (const [ox, oy] of [[-half, -half], [half, -half],
-                              [-half, half], [half, half]]) {
+      for (const [ox, oy] of corners) {
         const kx = dx + ox, ky = dy + oy;
         const kz = kx * b.forward[0] + ky * b.forward[1] + dz * b.forward[2];
         if (kz < near) near = kz;
@@ -2165,7 +2760,7 @@ function drawFrame() {
     const padded = (f) => { const a = new Float32Array(52); a.set(f); return a; };
     const spotOf = (c) => {
       if (c.spot === undefined) {
-        const draws = spotDraws(classAt, c.i, c.j);
+        const draws = spotDraws(classAt, c.i, c.j, SPOT_WARP, spotSharpness(spotWidth));
         const mates = draws.slice(1).map((d) => ({ tile: tileOfClass(c.patch, d.cls),
                                                     field: padded(d.field) }))
           .filter((m) => m.tile >= 0);
@@ -2175,7 +2770,7 @@ function drawFrame() {
     };
     // A cell dissolving into the other class draws twice with its own
     // uniforms, so it stays out of merged streams.
-    const blends = (c) => (spotMode ? !!spotOf(c)
+    const blends = (c) => (patchOverlay && patchOverlay[c.patch]) || (spotMode ? !!spotOf(c)
       : !!blendGrid && c.mix != null && Math.min(...blendCorners(c)) < 0.999);
 
     // With frames each cell draws a frame and a centre; a merged group gives
@@ -2195,47 +2790,191 @@ function drawFrame() {
     gl.uniform2f(splatU.prom, prom[0], prom[1]);
     gl.uniform1f(splatU.spots, blendSpots ? 1.0 : 0.0);
     gl.uniform1f(splatU.mixWarp, SPOT_WARP);
+    gl.uniform1f(splatU.spotSharp, spotSharpness(spotWidth));
+    gl.uniform1f(splatU.drift, colourDrift);
+    gl.uniform4fv(splatU.rise, riseCircle);
+    gl.uniform1f(splatU.riseSquare, riseSquare ? 1 : 0);
+    atmosUniforms(splatU, S, debugView);
+    gl.uniform1f(splatU.riseDrop, riseDrop);
 
-    let groupOf = null, groups = null, groupParts = null;
+    let groupOf = null, groups = null, groupParts = null, sigs = null;
+    const bestStream = (sig, dir = b.forward) => {
+      const list = mergeCache.get(sig);
+      if (!list) return null;
+      let best = null, bd = -2;
+      for (const e of list) {
+        const d = e.fwd[0] * dir[0] + e.fwd[1] * dir[1] + e.fwd[2] * dir[2];
+        if (d > bd) { bd = d; best = e; }
+      }
+      return best && { stream: best.stream, fwd: best.fwd, dot: bd };
+    };
     if (mergeOn && tileSize && visible.length > 1) {
-      const vc = visible.map((v) => v.c);
+      let vc = visible.map((v) => v.c);
       const ar = gridAngle * Math.PI / 180;
       const ga = { c: Math.cos(ar), s: Math.sin(ar) };
-      const g = splitOut(mergeGroups(vc, b.eye, { threshold: tileSize * mergeThreshold,
-                                                  cap: framed ? MAX_GROUP / 2 : MAX_GROUP }),
-                         vc.map(blends));
-      const multi = g.groups.filter((x) => x.length > 1);
+      // Groups over the whole grid, not just what is on screen: merging
+      // depends on where the eye is against the grid lines, so turning the
+      // view then leaves the groups (and their cached streams) as they are,
+      // and only stepping across a line makes new ones. Turning used to bring
+      // new cells into view every frame, each a new group without a stream.
+      const mergeOpts = { threshold: tileSize * mergeThreshold, cap: framed ? MAX_GROUP / 2 : MAX_GROUP };
+      const blendAll = cells.map(blends);
+      const world = splitOut(mergeGroups(cells, b.eye, mergeOpts), blendAll);
+      const where = new Map();
+      cells.forEach((c, w) => where.set(c, w));
+      const localOf = new Map();                  // world group -> local group
+      const localGroups = [], localWorld = [];
+      const localOfCell = new Int32Array(vc.length);
+      vc.forEach((c, k) => {
+        const wg = world.groupOf[where.get(c)];
+        const many = world.groups[wg].length > 1;
+        let lg = many ? localOf.get(wg) : undefined;
+        if (lg === undefined) {
+          lg = localGroups.length;
+          localGroups.push([]);
+          localWorld.push(many ? wg : -1);
+          if (many) localOf.set(wg, lg);
+        }
+        localGroups[lg].push(k);
+        localOfCell[k] = lg;
+      });
+      let g = { groupOf: localOfCell, groups: localGroups };
+      // A group is drawn whole at its first cell, so with groupedOrder its
+      // cells are made adjacent in the order: ordered cell by cell, a cell
+      // that belongs between two members is drawn after the whole group and
+      // covers the nearer member (a stripe along the grid line under the eye).
+      if (groupedOrder && topoOrder && g.groups.some((x) => x.length > 1)) {
+        const r = drawOrder(vc, b.eye, { key: visible.map((v) => v.near), groupOf: g.groupOf });
+        const pos = new Int32Array(r.order.length);
+        r.order.forEach((k, p) => { pos[k] = p; });
+        const re = r.order.map((k) => visible[k]);
+        visible.length = 0;
+        for (const v of re) visible.push(v);
+        g = { ...g, groupOf: Int32Array.from(r.order, (k) => g.groupOf[k]),
+              groups: g.groups.map((x) => x.map((k) => pos[k]).sort((a, c) => a - c)) };
+        vc = visible.map((v) => v.c);
+        orderStats = { ...orderStats, cycles: r.cycles };
+      }
+      const merged = (gi) => localWorld[gi] >= 0;
+      const multi = g.groups.filter((x, gi) => merged(gi));
       if (multi.length) {
         groupOf = g.groupOf; groups = g.groups;
-        // One entry per slot: the cell (index into visible) and what it draws.
-        groupParts = groups.map((x) => x.flatMap((k) => cellParts(vc[k]).map((e) => ({ k, ...e }))));
+        // One entry per slot: its cell (on screen or not) and what it draws.
+        // Slots go by grid position, not draw order: a merged pair is the one
+        // whose order is undecided and swaps from frame to frame, and the
+        // stream (already sorted by depth) does not care which slot is which.
+        const byIJ = (a, c) => (a.j - c.j) || (a.i - c.i);
+        const partsOf = (cs) => cs.slice().sort(byIJ).flatMap((c) => cellParts(c).map((e) => ({ c, ...e })));
+        // A group's signature: its cells, what they hold and in which slot,
+        // and the grid angle the tile-frame heading was turned by.
+        const sigOf = (parts) => gridAngle + '|' + parts.map((e) => {
+          const c = e.c;
+          return `${c.i}.${c.j}.${c.patch}.${e.role}.${e.turn || 0}.${e.range[0]}.${e.range[1]}`;
+        }).join('+');
+        groupParts = groups.map((x, gi) => partsOf(merged(gi)
+          ? world.groups[localWorld[gi]].map((w) => cells[w]) : x.map((k) => vc[k])));
         mergeStats.groups = multi.length;
         mergeStats.cells = multi.reduce((t, x) => t + x.length, 0);
 
-        // What a returned stream must match: the cells and what they hold,
-        // the groups and the rough heading (or a stream for the opposite
-        // heading draws back to front).
-        const dir = b.forward.map((v) => Math.round(v * 24)).join(',');
-        const key = dir + '|' + groups.map((x) => x.map((k) => {
-          const c = vc[k];
-          return `${c.i}.${c.j}.${c.patch}` + (hasCentre(c) ? `.${c.centre}.${c.turn}` : '');
-        }).join('+')).join('/');
-        if (key !== mergeKey) {
-          mergeKey = key;
+        sigs = groups.map((x, gi) => (merged(gi) ? sigOf(groupParts[gi]) : null));
+        // Groups with no stream first (they draw apart until one comes), then
+        // streams turned more than MERGE_FRESH from the view.
+        const missing = [], stale = [];
+        sigs.forEach((sig, gi) => {
+          if (!sig) return;
+          const e = bestStream(sig);
+          if (!e) missing.push(gi);
+          else if (e.dot < MERGE_FRESH) stale.push(gi);
+        });
+        const want = missing.length ? missing : stale;
+        mergeKey = sigs.filter(Boolean).join('/');
+        mergeHaveKey = want.length ? '' : mergeKey;
+        const reqParts = want.map((gi) => groupParts[gi]), reqSigs = want.map((gi) => sigs[gi]);
+        let jf = b.forward;                       // the heading this job sorts for
+        const reach = 8 * tileSize;
+        if (!reqParts.length && !mergePending && !cam.fly) {
+          // Idle, first: orbiting swings the eye round the target (a 10 degree
+          // turn moves it most of a tile at a few metres), so it crosses grid
+          // lines and makes new groups; sort the ones it would make 10-40
+          // degrees either way, at the heading it would have there.
+          const t = cam.target;
+          const rx = b.eye[0] - t[0], ry = b.eye[1] - t[1];
+          for (const deg of [10, -10, 20, -20, 30, -30, 40, -40]) {
+            const a = deg * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+            const e2 = [t[0] + ca * rx - sa * ry, t[1] + sa * rx + ca * ry, b.eye[2]];
+            const h = [ca * b.forward[0] - sa * b.forward[1], sa * b.forward[0] + ca * b.forward[1], b.forward[2]];
+            const gw = splitOut(mergeGroups(cells, e2, mergeOpts), blendAll);
+            for (const x of gw.groups) {
+              if (x.length < 2 || reqParts.length >= 32) continue;
+              const cs = x.map((w) => cells[w]);
+              if (!cs.some((c) => Math.hypot(c.x - e2[0], c.y - e2[1]) < reach)) continue;
+              const parts = partsOf(cs), sig = sigOf(parts);
+              const e = bestStream(sig, h);
+              if ((e && e.dot >= MERGE_NEAR) || reqSigs.includes(sig)) continue;
+              reqParts.push(parts); reqSigs.push(sig);
+            }
+            if (reqParts.length) { jf = h; break; }
+          }
+        }
+        if (!reqParts.length && !mergePending) {
+          // Then the groups on screen at headings around the view, so
+          // a fast turn finds a stream near it at once.
+          const [fx, fy, fz] = b.forward;
+          for (let k = 1; k * MERGE_SECTOR < 360 && !reqParts.length; k++) {
+            const a = (k * MERGE_SECTOR) * Math.PI / 180;
+            const h = [Math.cos(a) * fx - Math.sin(a) * fy, Math.sin(a) * fx + Math.cos(a) * fy, fz];
+            sigs.forEach((sig, gi) => {
+              if (!sig) return;
+              const e = bestStream(sig, h);
+              if (!e || e.dot < MERGE_NEAR) { reqParts.push(groupParts[gi]); reqSigs.push(sig); }
+            });
+            if (reqParts.length) jf = h;
+          }
+        }
+        if (!reqParts.length && !mergePending) {
+          // Then the groups the eye would make a step or two across the
+          // nearest grid lines (orbiting swings it over several).
+          const seen = new Set(sigs.filter(Boolean));
+          const steps = [];
+          for (const r of [1, 2]) {
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+              steps.push([r * dx, r * dy]);
+            }
+          }
+          for (const [dx, dy] of steps) {
+            const e2 = [b.eye[0] + dx * tileSize, b.eye[1] + dy * tileSize, b.eye[2]];
+            const gw = splitOut(mergeGroups(cells, e2, mergeOpts), blendAll);
+            for (const x of gw.groups) {
+              if (x.length < 2 || reqParts.length >= 32) continue;
+              const cs = x.map((w) => cells[w]);
+              if (!cs.some((c) => Math.hypot(c.x - b.eye[0], c.y - b.eye[1]) < reach)) continue;
+              const parts = partsOf(cs), sig = sigOf(parts);
+              if (seen.has(sig) || mergeCache.has(sig)) continue;
+              seen.add(sig);
+              reqParts.push(parts); reqSigs.push(sig);
+            }
+          }
+        }
+        // One job in flight: the live sort shares this worker, and a job per
+        // frame while moving queued it behind seconds of merging.
+        if (reqParts.length && !mergePending) {
+          mergePending = true;
           mergeSeq++;
-          worker.postMessage({
+          mergePendingSigs = reqSigs;
+          mergePendingFwd = jf.slice();
+          mergeWorker.postMessage({
             type: 'mergeGroups', eye: [0, 0, 0], seq: mergeSeq,
             // View direction in the tile frame (positions are tile-local and
             // the grid may be rotated); world offsets go in `shift`, a
             // centre's turn in `spin`.
-            forward: [ ga.c * b.forward[0] + ga.s * b.forward[1],
-                      -ga.s * b.forward[0] + ga.c * b.forward[1],
-                       b.forward[2] ],
-            groups: groupParts.map((parts) => parts.map((e) => {
-              const c = vc[e.k];
-              const shift = (c.x - b.eye[0]) * b.forward[0]
-                          + (c.y - b.eye[1]) * b.forward[1]
-                          + (c.z - b.eye[2]) * b.forward[2];
+            forward: [ ga.c * jf[0] + ga.s * jf[1],
+                      -ga.s * jf[0] + ga.c * jf[1],
+                       jf[2] ],
+            groups: reqParts.map((parts) => parts.map((e) => {
+              const c = e.c;
+              const shift = (c.x - b.eye[0]) * jf[0]
+                          + (c.y - b.eye[1]) * jf[1]
+                          + (c.z - b.eye[2]) * jf[2];
               return { start: e.range[0], count: e.range[1], shift,
                        ...(e.turn ? { spin: turnCosSin(e.turn) } : {}) };
             })),
@@ -2251,8 +2990,15 @@ function drawFrame() {
       mergeKey = '';
       mergeStats.groups = 0; mergeStats.cells = 0;
     }
-    const canMerge = groups && mergeHave && mergeHaveKey === mergeKey
-                  && mergeHave.length === groups.length;
+    mergeStats.drawn = 0; mergeStats.missing = 0; mergeStats.turned = 0;
+    const streamFor = (gi) => {
+      const e = sigs && sigs[gi] ? bestStream(sigs[gi]) : null;
+      if (!e) { mergeStats.missing++; return null; }
+      if (e.dot <= MERGE_REUSE || !e.stream.length) { mergeStats.turned++; return null; }
+      mergeStats.drawn++;
+      return e.stream;
+    };
+    const canMerge = !!(groups && sigs);
     const groupDrawn = canMerge ? new Uint8Array(groups.length) : null;
 
     lodCounts = new Array(lodLevels).fill(0);
@@ -2265,17 +3011,17 @@ function drawFrame() {
       // A merged group is drawn whole at its first cell in the order.
       if (canMerge) {
         const gi = groupOf[vi];
-        if (groups[gi].length > 1) {
+        if (sigs[gi]) {
           if (groupDrawn[gi]) continue;
-          groupDrawn[gi] = 1;
-          const stream = mergeHave[gi];
-          if (stream && stream.length) {
+          const stream = streamFor(gi);
+          if (stream) {
+            groupDrawn[gi] = 1;
             cellXYArr.fill(0);
             groupParts[gi].forEach((e, slot) => {
               if (slot >= MAX_GROUP) return;
-              cellXYArr[2 * slot] = visible[e.k].c.x;
-              cellXYArr[2 * slot + 1] = visible[e.k].c.y;
-              setSlot(slot, e.turn, e.role, e.z0, e.tone);
+              cellXYArr[2 * slot] = e.c.x;
+              cellXYArr[2 * slot + 1] = e.c.y;
+              setSlot(slot, e.turn, e.role, e.z0, e.tone, tileClass ? tileClass[e.c.patch] : -1);
             });
             flushSlots();
             gl.uniform2fv(splatU.cellXY, cellXYArr);
@@ -2376,10 +3122,18 @@ function drawFrame() {
       const split = own.centre >= 0 || mates.some((m) => m.centre >= 0);
       for (const who of [own, ...mates]) {
         if (who.field) gl.uniform4fv(splatU.mixField, who.field);
-        for (const phase of split ? ['back', 'centre', 'front'] : [null]) {
+        // A decal overlay: the plain tile with its disc cut, the decal's own
+        // splats drawn between the tile's back and front parts.
+        const ovl = !split && patchOverlay ? patchOverlay[who.tile] : null;
+        for (const phase of split ? ['back', 'centre', 'front'] : ovl ? ['back', 'piece', 'front'] : [null]) {
           const isCentre = phase === 'centre';
           if (isCentre && who.centre < 0) continue;
-          const src = isCentre ? centres[who.centre] : patches[who.tile];
+          const isPiece = phase === 'piece';
+          if (ovl) {
+            if (isPiece) gl.uniform4f(splatU.decal, 0, 0, 0, 0);
+            else gl.uniform4f(splatU.decal, ovl.at[0], ovl.at[1], ovl.rIn, ovl.r);
+          }
+          const src = isPiece ? { levels: ovl.piece } : isCentre ? centres[who.centre] : patches[who.tile];
           const role = isCentre ? ROLE_CENTRE : who.centre >= 0 ? ROLE_FRAME : ROLE_TILE;
           const z0 = isCentre ? src.z0 : tileZ0[who.tile];
           const turn = isCentre ? who.turn : 0;
@@ -2408,11 +3162,13 @@ function drawFrame() {
               gl.uniform3f(splatU.tint, c2[0], c2[1], c2[2]);
               gl.uniform1f(splatU.tintAmount, 0.6);
             }
-            setSlot(0, turn, role, z0, isCentre ? who.tone : null);
+            setSlot(0, turn, role, z0, isCentre ? who.tone : null,
+                    tileClass ? tileClass[who.tile] : -1);
             flushSlots(1);
-            const n = drawSpan(c, [start, count], turn, isCentre ? null : phase, b.forward);
+            const n = drawSpan(c, [start, count], turn, isCentre || isPiece ? null : phase, b.forward);
             if (who.mate && n) blendedCells++;
           }
+          if (ovl) gl.uniform4f(splatU.decal, 0, 0, 0, 0);
           if (who.mate) {
             if (corners) gl.uniform4f(splatU.mixCorners, corners[0], corners[1], corners[2], corners[3]);
             gl.uniform1f(splatU.mixNoise, 1.0);
@@ -2438,7 +3194,7 @@ function drawFrame() {
   measurePop();
   drawGizmo(b);
 
-  frames++;
+  frames++; drawCount++;
   const now = performance.now();
   if (now - fpsTime > 500) {
     if (ui.fps) ui.fps.textContent = (frames * 1000 / (now - fpsTime)).toFixed(0);
@@ -2449,7 +3205,7 @@ function drawFrame() {
       popPeakAge++;
       if (popPeakAge > 8) { popPeak *= 0.6; popPeakAge = 0; }
       ui.pop.textContent = popOn
-        ? `${(popRate * 100).toFixed(2)} now, ${(popPeak * 100).toFixed(2)} peak`
+        ? `${(popRate * 100).toFixed(2)}% colour change per degree now, ${(popPeak * 100).toFixed(2)}% peak`
         : 'off';
     }
     if (ui.lodinfo) {
@@ -2495,7 +3251,8 @@ function drawFrame() {
       ui.mergestat.textContent = !mergeOn ? 'off'
         : (mergeStats.groups
             ? `${mergeStats.groups} group${mergeStats.groups > 1 ? 's' : ''}, `
-              + `${mergeStats.cells} cells, ${mergeStats.ms.toFixed(0)} ms`
+              + `${mergeStats.cells} cells, ${mergeStats.ms.toFixed(0)} ms, `
+              + `${mergeStats.drawn} drawn merged (${mergeStats.missing} waiting, ${mergeStats.turned} turned away)`
             : 'none here');
     }
     if (orderStats.cycles > 0 && !cycleWarned) {
@@ -2518,6 +3275,7 @@ function drawFrame() {
     `--fov ${cam.fov.toFixed(0)}`;
 
   if (orbiting) cam.azimuth = (cam.azimuth + 0.08) % 360;
+  if (film) film.step(performance.now());
 
   // Here, inside the frame: without preserveDrawingBuffer the colour buffer
   // is only readable until the frame ends.
@@ -2609,7 +3367,7 @@ function setWalk(on) {
   if (on) {
     if (!cam.fly) cam.setFly(true);
     const t = cam.target;
-    cam.pos = [t[0], t[1], height(t[0], t[1]) + EYE_HEIGHT];
+    cam.pos = [t[0], t[1], surfaceAt(t[0], t[1]) + EYE_HEIGHT];
     cam.elevation = 4;
     cam.walk = true;
     camVel.fill(0);
@@ -2673,7 +3431,7 @@ function walkStep(sec) {
     p[0] = ca * lx - sa * ly;
     p[1] = sa * lx + ca * ly;
   }
-  const want = height(p[0], p[1]) + EYE_HEIGHT;
+  const want = surfaceAt(p[0], p[1]) + EYE_HEIGHT;
   // A short ease, so the fine creases do not shake the view.
   p[2] += (want - p[2]) * (1 - Math.exp(-sec / 0.08));
   if (p[2] < want - 0.5) p[2] = want - 0.5;
@@ -2692,15 +3450,16 @@ function moveCamera(dt) {
       zoomGoal = 0;
     }
   }
-  if (!cam.fly) {
+  // The film places the camera itself, clear of the ground (film.js).
+  if (!cam.fly && !(film && film.playing())) {
     // The orbit point rides on the ground and the eye stays above it, so
     // relief or a new terrain never leaves the view underground.
-    const g = height(cam.target[0], cam.target[1]);
+    const g = surfaceAt(cam.target[0], cam.target[1]);
     if (Math.abs(g - cam.target[2]) > 1e-4) {
       cam.target[2] += (g - cam.target[2]) * (1 - Math.exp(-sec / 0.15));
     }
     const e = cam.eye();
-    if (e[2] < height(e[0], e[1]) + 0.05 * (tileSize || 1) && cam.elevation < 85) {
+    if (e[2] < surfaceAt(e[0], e[1]) + 0.05 * (tileSize || 1) && cam.elevation < 85) {
       cam.elevation = Math.min(85, cam.elevation + 60 * sec);
     }
   }
@@ -2890,6 +3649,30 @@ on('exposure', 'input', (e) => {
 on('macro', 'input', (e) => {
   macro = +e.target.value;
   ui.macron.textContent = macro.toFixed(2);
+});
+on('sunglow', 'input', (e) => {
+  sunGlow = +e.target.value;
+  ui.sunglown.textContent = sunGlow.toFixed(2);
+});
+on('sunaz', 'input', (e) => {
+  sunAzimuth = +e.target.value;
+  ui.sunazn.textContent = `${sunAzimuth}°`;
+});
+on('ranges', 'input', (e) => {
+  ranges = +e.target.value;
+  ui.rangesn.textContent = ranges.toFixed(2);
+});
+on('seahaze', 'input', (e) => {
+  seaHaze = +e.target.value;
+  ui.seahazen.textContent = seaHaze.toFixed(2);
+});
+on('mist', 'input', (e) => {
+  mist = +e.target.value;
+  ui.mistn.textContent = mist.toFixed(2);
+});
+on('grade', 'input', (e) => {
+  gradeAmount = +e.target.value;
+  ui.graden.textContent = gradeAmount.toFixed(2);
 });
 on('saturation', 'input', (e) => {
   saturation = +e.target.value;
@@ -3083,6 +3866,22 @@ on('reset', 'click', () => {
 on('tileorder', 'change', (e) => { topoOrder = e.target.value !== 'depth'; });
 
 on('classrule', 'change', (e) => { classOn = e.target.checked; scheduleRegenerate(); });
+on('riverrule', 'change', (e) => { riverRule = e.target.checked; scheduleRegenerate(); });
+// Water and the water map cut the river's channel into the ground, so the
+// layout is rebuilt on top of it.
+on('watermap', 'change', (e) => { waterView = e.target.checked; scheduleRegenerate(); });
+on('water', 'change', (e) => {
+  waterOn = e.target.checked;
+  if (waterOn && !waterTex) loadWater().then(() => { wakeFrames = WAKE_FRAMES; });
+  wakeFrames = WAKE_FRAMES;
+  scheduleRegenerate();
+});
+on('riverwidth', 'input', (e) => {
+  riverWidth = +e.target.value;
+  ui.riverwidthn.textContent = `${riverWidth} m`;
+  if (waterOn || waterView) scheduleRegenerate();
+});
+on('waterflow', 'change', (e) => { flowOn = e.target.checked; wakeFrames = WAKE_FRAMES; });
 on('classswap', 'change', (e) => {
   classSwap = e.target.checked;
   // Swapping changes where each material goes, not how much of it there
@@ -3115,6 +3914,18 @@ on('classbalance', 'input', (e) => {
   scheduleRegenerate();
 });
 on('classblend', 'change', (e) => { classBlend = e.target.checked; });
+on('drift', 'input', (e) => {
+  colourDrift = +e.target.value;
+  ui.driftn.textContent = `${Math.round(colourDrift * 100)}%`;
+  wakeFrames = WAKE_FRAMES;
+});
+on('blendwidth', 'input', (e) => {
+  spotWidth = +e.target.value;
+  ui.blendwidthn.textContent = `${Math.round(spotWidth * 100)}%`;
+  // Which cells draw a neighbour's material depends on the width.
+  for (const c of cells) c.spot = undefined;
+  wakeFrames = WAKE_FRAMES;
+});
 on('tonegrade', 'change', (e) => { toneGrade = e.target.checked; scheduleRegenerate(); });
 on('decals', 'change', (e) => { decalsOn = e.target.checked; scheduleRegenerate(); });
 on('decalterrain', 'change', (e) => { decalTerrain = e.target.checked; scheduleRegenerate(); });
@@ -3131,12 +3942,16 @@ on('classsharp', 'input', (e) => {
 on('merging', 'change', (e) => {
   mergeOn = e.target.checked;
   // Drop any stale stream, or it is drawn the moment merging comes back.
-  mergeKey = ''; mergeHave = null; mergeHaveKey = '';
+  mergeKey = ''; mergeHaveKey = ''; mergeCache.clear(); mergeBytes = 0; mergeSeq++; mergePending = false;
+});
+on('mergeorder', 'change', (e) => {
+  groupedOrder = e.target.checked;
+  mergeKey = ''; mergeHaveKey = ''; mergeCache.clear(); mergeBytes = 0; mergeSeq++; mergePending = false;
 });
 on('mergethr', 'input', (e) => {
   mergeThreshold = +e.target.value;
   ui.mergethrn.textContent = mergeThreshold.toFixed(2);
-  mergeKey = '';
+  mergeKey = ''; mergeCache.clear(); mergeBytes = 0; mergeSeq++; mergePending = false;
 });
 function showSweep() {
   const arc = +ui.caparc.value, frames = +ui.capframes.value;
@@ -3281,7 +4096,11 @@ on('captureboth', 'click', () => {
 });
 
 const params = new URLSearchParams(location.search);
-const wanted = params.get('scene');
+// ?demo plays the one-minute demo (film.js), starting on the river.
+// &slow=N plays it, and the water's flow, N times slower.
+const wantFilm = params.has('demo');
+const TIME_SCALE = 1 / Math.max(1, +params.get('slow') || 1);
+const wanted = params.get('scene') || (wantFilm ? 'river' : null);
 // Terrain is chosen separately: ?scene=desert&height=mesa. Without it a
 // tileset looks for the height field with its own name.
 const wantedHeight = params.get('height');
@@ -3293,8 +4112,9 @@ const wantedSize = [128, 256, 512].includes(+params.get('size'))
   ? +params.get('size') : 256;
 
 // Scenes tried when none is asked for: an export named 'scene' (your own
-// capture), then the desert tileset that ships with the repo.
-const DEFAULT_SCENES = ['scene', 'desert'];
+// capture), then the desert tileset that ships with the repo. The river
+// ships too and is listed, but opens only when asked for.
+const DEFAULT_SCENES = ['scene', 'desert', 'river'];
 
 /** Fill the tileset and terrain menus from data/index.json (a static server
  *  cannot list a folder) plus the defaults, keeping only files that are
@@ -3369,6 +4189,7 @@ function drawPreview(canvas, z, sed, n) {
         sharpness: classSharp, altitude: classAltitude,
         coherence: Math.min(classCoherence, 1),
         balance: classCount === 2 ? classBalance : null,
+        river: riverRule,
       }).cls;
     } catch (e) { cls = null; }
   }
@@ -3518,6 +4339,15 @@ if (ui.genseed) {
 
 let presets = {};
 let pendingPreset = params.get('preset');
+// The loaded tileset's own view (manifest view) and story (manifest story:
+// its chapters in views.json carry the same "story"; none is the default).
+function ownPreset() {
+  const v = loadedManifest && loadedManifest.view;
+  return typeof v === 'string' && presets[v] ? v : 'readme';
+}
+function storyOf() {
+  return (loadedManifest && loadedManifest.story) || null;
+}
 
 async function loadPresets() {
   try {
@@ -3525,18 +4355,27 @@ async function loadPresets() {
     presets = r.ok ? await r.json() : {};
   } catch (e) { presets = {}; }
   if (!ui.presetchips) return;
+  // One chip for the tileset's own settings (its manifest's view), then the
+  // Research comparisons; other views stay reachable by link (?preset=).
+  const standard = document.createElement('button');
+  standard.type = 'button';
+  standard.dataset.standard = '1';
+  standard.textContent = 'standard';
+  standard.dataset.tip = "This tileset's own settings: everything back to how it was set up to be seen.";
+  standard.addEventListener('click', () => applyPreset(ownPreset()));
+  ui.presetchips.appendChild(standard);
   for (const [name, p] of Object.entries(presets)) {
-    if (name.startsWith('_') || p.chapter) continue;
+    if (name.startsWith('_') || p.chapter || !p.research) continue;
     const b = document.createElement('button');
     b.type = 'button';
     b.dataset.preset = name;
-    if (p.research) b.classList.add('adv');
+    b.classList.add('adv');
     b.textContent = p.short || name;
     b.dataset.tip = p.label || name;
     b.addEventListener('click', () => applyPreset(name));
     ui.presetchips.appendChild(b);
   }
-  setChapters(presets);
+  setChapters(presets, storyOf());
   // If the ground arrived before this file, the URL's preset is still waiting.
   if (pendingPreset && presets[pendingPreset] && field) {
     const name = pendingPreset;
@@ -3563,7 +4402,7 @@ function setControl(id, value) {
 
 // Keys in views.json that are about the preset, not panel controls.
 const PRESET_META = new Set(['label', 'short', 'view', 'research', 'chapter',
-                             'caption', 'camera']);
+                             'caption', 'camera', 'story']);
 
 /** A control back to the page's own value. */
 function resetControl(id) {
@@ -3590,7 +4429,8 @@ function applyPreset(name) {
   }
   for (const k of touched) {
     if (named.has(k) || PRESET_META.has(k) || k === 'grid' || k === 'reliefscale') continue;
-    if ((k === 'classbalance' || k === 'classblend') && captureShares && classCount >= 2) continue;
+    if (k === 'classbalance' && captureShares && classCount >= 2) continue;
+    if (k === 'classblend' && classCount >= 2) continue;
     resetControl(k);
   }
   // Grid first, since 'reliefscale: grid' and the rule both depend on it.
@@ -3602,7 +4442,7 @@ function applyPreset(name) {
       setControl(k, snapShare(captureShares[tileClassFor(0)]));
       continue;
     }
-    if (k === 'classblend' && captureShares && classCount >= 2) continue;
+    if (k === 'classblend' && classCount >= 2) continue;
     setControl(k, k === 'reliefscale' && v === 'grid' ? gridN : v);
   }
   const viewBtn = p.view && $(p.view);
@@ -3619,11 +4459,173 @@ function applyPreset(name) {
   }
   if (!p.chapter) endChapters();
   if (ui.presetchips) {
-    for (const b of ui.presetchips.children) b.classList.toggle('on', b.dataset.preset === name);
+    for (const b of ui.presetchips.children) {
+      b.classList.toggle('on', b.dataset.standard ? name === ownPreset() : b.dataset.preset === name);
+    }
   }
   const q = new URLSearchParams(location.search);
   q.set('preset', name);
   history.replaceState(null, '', `${location.pathname}?${q}`);
+}
+
+// --- the demo (?demo, film.js) ------------------------------------------
+/** The deepest-looking water nearest the world's centre, world x, y (null
+ *  without a river). */
+function waterSpot() {
+  if (!field || !field.level || !field.carve) return null;
+  const n = field.w, amp = amplitude(), scale = (n - 1) / (field.extent || 1);
+  let best = null, bestD = Infinity;
+  for (let j = 0; j < n; j += 2) for (let i = 0; i < n; i += 2) {
+    const c = j * n + i;
+    if (field.level[c] - (2 * amp * (field.z[c] - 0.5) + field.carve[c]) < 0.15) continue;
+    const x = (i - (n - 1) / 2) / scale, y = ((n - 1) / 2 - j) / scale, d = x * x + y * y;
+    if (d < bestD) { bestD = d; best = [x, y]; }
+  }
+  return best;
+}
+/** A water spot about `dist` from (x0, y0), for a camera pass along the
+ *  river; null without water. */
+function waterAlong(x0, y0, dist) {
+  if (!field || !field.level || !field.carve) return null;
+  const n = field.w, amp = amplitude(), scale = (n - 1) / (field.extent || 1);
+  let best = null, bestE = Infinity;
+  for (let j = 0; j < n; j += 2) for (let i = 0; i < n; i += 2) {
+    const c = j * n + i;
+    if (field.level[c] - (2 * amp * (field.z[c] - 0.5) + field.carve[c]) < 0.15) continue;
+    const x = (i - (n - 1) / 2) / scale, y = ((n - 1) / 2 - j) / scale;
+    const e = Math.abs(Math.hypot(x - x0, y - y0) - dist) + 0.3 * Math.hypot(x, y);
+    if (e < bestE) { bestE = e; best = [x, y]; }
+  }
+  return best;
+}
+/** Water depth at world x, y in metres, negative where dry; null without
+ *  a river or off the field. */
+function waterDepthAt(x, y) {
+  if (!field || !field.level || !field.carve) return null;
+  const n = field.w, amp = amplitude(), scale = (n - 1) / (field.extent || 1);
+  const i = Math.round(x * scale + (n - 1) / 2), j = Math.round((n - 1) / 2 - y * scale);
+  if (i < 0 || j < 0 || i >= n || j >= n) return null;
+  const c = j * n + i;
+  return field.level[c] - (2 * amp * (field.z[c] - 0.5) + field.carve[c]);
+}
+/** The demo's first tile, world x, y: a dry cell of the material in `want`
+ *  (gravel on the river), 1.5 to 4 tiles from the water so the river comes
+ *  in early, nearest the world's centre. Else the cell nearest the centre. */
+function captureCell(want = ['gravel']) {
+  const T = tileSize || 1, k = materialNames().findIndex((n) => want.includes(n));
+  const w = waterSpot();
+  const dry = (x, y) => [[0, 0], [-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]]
+    .every(([u, v]) => { const d = waterDepthAt(x + u * T, y + v * T); return d == null || d < -0.05; });
+  let best = null, bestD = Infinity, near = null, nearD = Infinity;
+  for (const c of cells) {
+    const d = Math.hypot(c.x, c.y);
+    if (d < nearD) { nearD = d; near = [c.x, c.y]; }
+    if (k >= 0 && tileClass && tileClass[c.patch] !== k) continue;
+    const dw = w ? Math.hypot(c.x - w[0], c.y - w[1]) / T : 3;
+    if (dw < 1.5 || dw > 4 || !dry(c.x, c.y)) continue;
+    if (d < bestD) { bestD = d; best = [c.x, c.y]; }
+  }
+  return best || near || [0, 0];
+}
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+async function waitFor(ok) { while (!ok()) await nextFrame(); }
+/** Resolves once nothing has been rebuilt or waited on for 20 frames. */
+async function settled() {
+  let quiet = 0;
+  while (quiet < 20) {
+    await nextFrame();
+    quiet = field && !regenPending && !sortPending && (!waterOn || waterTex) ? quiet + 1 : 0;
+  }
+}
+const prefetched = {};
+function fetchScene(name) {
+  return prefetched[name] || (prefetched[name] = Promise.all([
+    fetchBuffer(`./data/${name}.splat`, () => {}),
+    fetch(`./data/${name}.json`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+  ]));
+}
+/** Open another tileset in place (no reload), with the ground it was set
+ *  up on, as loadFirst does. */
+async function switchScene(name) {
+  const t0 = performance.now();
+  const [b, m] = await fetchScene(name);
+  if (!b) throw new Error(`demo: no tileset ${name}`);
+  const t1 = performance.now();
+  // Water is the river's; off, the new ground is not cut for it first.
+  if (waterOn) { waterOn = false; if (ui.water) ui.water.checked = false; }
+  loadedScene = name;
+  if (ui.scenepick) ui.scenepick.value = name;
+  load(b, m);
+  loadAtlas(name);
+  if (Object.keys(presets).length) setChapters(presets, storyOf());
+  const t2 = performance.now();
+  const own = m && m.terrain && m.terrain.gen ? m.terrain : null;
+  if (own) await useGeneratedField(own.gen, own.seed || 0, own.size || 256);
+  else await useHeightField(name);
+  console.log(`demo: ${name} in ${((performance.now() - t0) / 1000).toFixed(1)} s `
+    + `(download ${((t1 - t0) / 1000).toFixed(1)}, unpack ${((t2 - t1) / 1000).toFixed(1)}, `
+    + `ground ${((performance.now() - t2) / 1000).toFixed(1)})`);
+}
+const film = wantFilm ? createFilm({
+  scene: () => loadedScene,
+  tileSize: () => tileSize || 1,
+  surfaceAt, waterSpot, captureCell, settled, switchScene,
+  // The tileset's own preset is applied a moment after its ground arrives;
+  // the film's settings go over it, not under.
+  ready: async () => {
+    await waitFor(() => field && splatCount && Object.keys(presets).length && !pendingPreset);
+    await settled();
+  },
+  prefetch: (names) => { for (const n of names) if (n !== loadedScene) fetchScene(n); },
+  applyPreset: (name) => applyPreset(name),
+  setControl: (id, v) => setControl(id, v),
+  setFigure: (on) => { setWalk(false); orbiting = false; setFigureMode(on); },
+  setResearch: (on) => { const b = $(on ? 'modeResearch' : 'modeExplore'); if (b) b.click(); },
+  openTab: (name) => {
+    const b = [...document.querySelectorAll('#side .tabs button')].find((x) => x.textContent === name);
+    if (b && !b.classList.contains('on')) b.click();
+    return b;
+  },
+  panelEl: () => $('panel'),
+  setCamera: (t, az, el, d) => {
+    if (cam.fly) cam.setFly(false);
+    cam.target = t; cam.azimuth = az; cam.elevation = el; cam.distance = d;
+    zoomGoal = 0; camVel.fill(0);
+  },
+  setRise: (x, y, r, band, drop, square = false) => {
+    riseCircle.set([x, y, r, band]); riseDrop = drop; riseSquare = square;
+  },
+  // The world's size changes in the film extend the ground instead of
+  // stretching it: the relief scale stays where it is.
+  holdReliefScale: () => { reliefScaleTouched = true; },
+  waterAlong,
+  setFlowClock: (s) => { flowClock = s; },
+  // What the film's tables draw: the rule's maps and decision for this
+  // world, and the tileset's tiles as the far-field atlas shows them.
+  ruleMaps: () => lastRule && { ...lastRule, cls: Array.from(lastRule.cls),
+                                colours: Array.from(lastRule.cls, (k) => CLASS_RGB[k % CLASS_RGB.length]),
+                                names: materialNames(), classOf: tileClassFor },
+  tileTable: () => loadedManifest && atlas && {
+    scene: loadedScene, img: atlas.img, cols: atlas.cols, res: atlas.res,
+    tiles: loadedManifest.tiles.map((t) => ({ codes: [t.n, t.e, t.s, t.w], cls: t.class || 0 })),
+    // Atlas entries after the tiles, in order; decal copies (with a base)
+    // are not part of the pool.
+    centres: (loadedManifest.centres || []).map((c) => ({ cls: c.class || 0, pool: !('base' in c) })),
+    frames: loadedManifest.frames || null,
+    names: materialNames(), edgeRGB: EDGE_RGB, size: tileSize,
+  },
+}, { rec: params.has('rec'), slow: 1 / TIME_SCALE, fps: Math.max(0, +params.get('frames') || 0) }) : null;
+if (film) film.prepare().catch((e) => { console.error(e); film.stop(); });
+// What scripts/record_demo.mjs drives a render with: the next frame, and
+// whether the one asked for has been drawn with nothing left to sort.
+if (film && params.has('frames')) {
+  window.bozkirFilm = {
+    state: () => film.state(), clock: () => film.clock(), tick: () => film.tick(),
+    drawn: () => drawCount,
+    // The eye and the ground under it, for checking a render's camera.
+    eye: () => { const e = cam.eye(); return [...e, surfaceAt(e[0], e[1]), cam.elevation]; },
+    idle: () => !sortPending && !regenPending && !(mergeOn && mergeKey !== '' && mergeHaveKey !== mergeKey),
+  };
 }
 
 loadPresets();
@@ -3657,6 +4659,7 @@ function loadStarter(note) {
  *  parallel, the smallest file won, not the first in the list). */
 async function loadFirst(names) {
   for (const name of names) {
+    if (splatCount) break;        // one loaded: the rest are not downloaded
     let b = null, m = null;
     try {
       [b, m] = await Promise.all([
@@ -3681,13 +4684,19 @@ async function loadFirst(names) {
     // own (a view, a preset, a chapter); a plain capture keeps 'no rule'.
     // Choosing a tileset reloads with ?scene=, and that used to skip this
     // and open a 1 x 1 world.
+    // The manifest can name its own (view: a preset in views.json).
     if (!pendingPreset && !plainScene && !params.has('v') && !params.has('chapter')) {
-      pendingPreset = 'readme';
+      pendingPreset = (m && typeof m.view === 'string' && m.view) || 'readme';
     }
     loadAtlas(name);
     loadCatalogue();
+    if (Object.keys(presets).length) setChapters(presets, storyOf());
     // The height field arrives after the splats; the scene shows meanwhile.
+    // A manifest's terrain ({gen, seed, size}) is the ground it was set up
+    // on, used unless the link names one.
+    const own = m && m.terrain && m.terrain.gen ? m.terrain : null;
     if (wantedGen) useGeneratedField(wantedGen, wantedSeed, wantedSize);
+    else if (own && !wantedHeight) useGeneratedField(own.gen, own.seed || 0, own.size || 256);
     else useHeightField(wantedHeight || name);
     return true;
   }
@@ -3786,7 +4795,8 @@ function adoptField(f) {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, f.w, f.h, 0, gl.RED, gl.FLOAT,
                 f.z);
 
-  // Openness (r) and the detail mask (g), once per field.
+  // Openness (r), the detail mask (g) and the drainage base (b: the height
+  // of the channel each sample drains to, for the valley mist), once per field.
   if (!openTex) openTex = gl.createTexture();
   gl.activeTexture(gl.TEXTURE4);
   gl.bindTexture(gl.TEXTURE_2D, openTex);
@@ -3796,9 +4806,18 @@ function adoptField(f) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   const open = openness(f.z, f.w, f.h);
   f.mask = roughnessMask(f.z, f.w, f.h, open);
-  const rg = new Float32Array(f.w * f.h * 2);
-  for (let i = 0; i < f.w * f.h; i++) { rg[2 * i] = open[i]; rg[2 * i + 1] = f.mask[i]; }
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, f.w, f.h, 0, gl.RG, gl.FLOAT, rg);
+  let base = null;
+  if (f.w === f.h) {
+    try { base = drainBase(f.z, f.w); } catch (e) { console.warn('no drainage base:', e); }
+  }
+  let zmin = Infinity;
+  for (const v of f.z) if (v < zmin) zmin = v;
+  const rgb = new Float32Array(f.w * f.h * 3);
+  for (let i = 0; i < f.w * f.h; i++) {
+    rgb[3 * i] = open[i]; rgb[3 * i + 1] = f.mask[i];
+    rgb[3 * i + 2] = base ? base[i] : zmin;
+  }
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB32F, f.w, f.h, 0, gl.RGB, gl.FLOAT, rgb);
   // Cover the whole grid by default: a small scale shows a corner of the
   // landscape mirrored many times, which is repetition, not tiling.
   if (ui.reliefscale && !reliefScaleTouched) {
@@ -3882,6 +4901,7 @@ function viewerState() {
     collects: tileClassFor(0), exposed: tileClassFor(classCount - 1),
     tiles: patches.length - (variantOf ? variantOf.filter(b => b >= 0).length : 0),
     tileSize, world: gridN * tileSize,
+    river: waterOn && field && field.carve ? riverWidth : 0,
     note: meta.note || '', units: meta.units || (loadedManifest && loadedManifest.units) || '',
     metresPerPixel: mpp,
     // How many times the height field repeats across the world (mirrored).
