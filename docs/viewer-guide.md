@@ -31,8 +31,10 @@ control). Edit the JSON, not this page.
 - [Selective merging](#merging)
 - [Measurement](#measure)
 - [Repetition and busyness](#repetition)
+- [Atmosphere](#atmosphere)
 - [Capture](#capture)
 - [Frames and centres](#frames)
+- [Distant land](#horizon)
 - [River and water](#water)
 
 <a id="about"></a>
@@ -216,7 +218,7 @@ WASD walks, shift runs, click to look with the mouse, Esc releases it, V leaves.
 
 Haze is exponential in view depth. Its density is set for a 24-cell world; a larger world keeps the same haze at the same fraction of its width, so the haze slider means the same at any world size.
 
-- See also: [Baked light](#lighting), [Land variation](#macro)
+- See also: [Baked light](#lighting), [Land variation](#macro), [Atmosphere](#atmosphere)
 
 <a id="lighting"></a>
 ## Baked light
@@ -324,6 +326,15 @@ Repetition: excess brightness correlation at whole-tile shifts over half-tile sh
 - In the code: `scripts/repetition.py`
 - See also: [Wang tiles](#tiles), [Land variation](#macro)
 
+<a id="atmosphere"></a>
+## Atmosphere
+
+*Valley mist, sea haze, the sun's glow and a colour grade: how the air and the picture look, not the ground.*
+
+Valley mist is cold-air pooling: densest over the channel each spot drains to and thinning by e every 0.3 relief above it (valley fog fills a valley's bottom, not its sides), measured with the same HAND (height above the nearest drainage, Renno et al. 2008) the river rule places gravel and grass by, and integrated along each ray (Quilez, Better fog). Sea haze is a coast's marine layer: even under a lid a quarter of the relief above the middle (the inversion that caps it), so high ground stands out; its logistic profile integrates in closed form. Both are depth cues scaled to the world's width, not a physical visibility: a 36 m world would show no real haze. The sun's glow lightens the sky and the haze towards it; the scans' light is baked, so the ground is not relit. The grade is a final tone curve. All are off at 0 and off in the debug views.
+
+- See also: [Look](#look), [Baked light](#lighting)
+
 <a id="capture"></a>
 ## Capture
 
@@ -351,6 +362,15 @@ Pool candidates are judged where they show: no larger splat footprint, no thicke
 - Mikkelsen. Practical Real-Time Hex-Tiling. JCGT 2022.
 - In the code: `bozkir/frames.py`, `bozkir/pick.py`, `web/frames.js`
 - See also: [Wang tiles](#tiles), [Blending](#blend)
+
+<a id="horizon"></a>
+## Distant land
+
+*Ground past the world's edge, at the world's own scale, thinning into the haze: a backdrop, not part of the world.*
+
+One ring mesh out to four world widths, drawn like the far field: each point shows the tile of the world's cell it mirrors, as the height field and the river mirror, faded to the tile's mean colour with distance. Its hills are rounded ridged noise a few times the world's relief and the size of its landforms, a little taller further out; extra haze with the distance from the edge dissolves it, so from any height it reads as a horizon. Slopes darken by how much sky they see, as hollows do. No splats are drawn out there and the rule does not place it; 0 is off.
+
+- See also: [Look](#look), [Atmosphere](#atmosphere)
 
 <a id="water"></a>
 ## River and water
