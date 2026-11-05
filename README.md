@@ -1,20 +1,19 @@
-# bozkır
+<h1 align="center">bozkır</h1>
 
-**Scan a few square metres of real ground. Get a whole world out of it, in
-your browser.**
+<p align="center"><b>Scan a few square metres of real ground. Get a whole world out of it, in your browser.</b></p>
 
-![a river of captured gravel and water in the browser](web/media/river-hero.jpg)
+<p align="center">
+  <a href="https://husmen8.github.io/bozkir/?demo"><img alt="Live demo" src="https://img.shields.io/badge/-%E2%96%B6%20Live%20demo-2563eb?style=for-the-badge"></a>
+  <a href="https://husmen8.github.io/bozkir/project.html"><img alt="Project page" src="https://img.shields.io/badge/-Project%20page-1e293b?style=for-the-badge"></a>
+  <a href="https://husmen8.github.io/bozkir/?scene=river"><img alt="Full viewer" src="https://img.shields.io/badge/-Full%20viewer-1e293b?style=for-the-badge"></a>
+  <a href="web/media/demo.mp4"><img alt="1-minute video" src="https://img.shields.io/badge/-1--minute%20video-1e293b?style=for-the-badge"></a>
+</p>
 
-**[Live demo](https://husmen8.github.io/bozkir/?demo)** ·
-[project page](https://husmen8.github.io/bozkir/project.html) ·
-[full viewer](https://husmen8.github.io/bozkir/?scene=river) ·
-[1-minute video](web/media/demo.mp4)
-
-[![nine seconds of the demo: a capture cut into tiles, gravel placed along the river, and the rule's decision in the desert](web/media/demo-preview.webp)](web/media/demo.mp4)
-
-*Nine seconds from the [1-minute video](web/media/demo.mp4), recorded from
-the viewer: a capture cut into tiles, gravel placed along the river, and the
-rule's decision in the desert.*
+<p align="center">
+  <a href="web/media/demo.mp4"><img src="web/media/demo-preview.webp" alt="nine seconds of the demo: a capture cut into tiles, gravel placed along the river, and the rule's decision in the desert"></a>
+  <br>
+  <sub>Nine seconds from the 1-minute video, recorded from the viewer: a capture cut into tiles, gravel placed along the river, and the rule's decision in the desert.</sub>
+</p>
 
 Every pebble and blade of grass here comes from real drone photos, captured
 as 3D Gaussian splats. bozkır turns that small scan into ground of any size
